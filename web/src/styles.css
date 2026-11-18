@@ -201,3 +201,8 @@ button.small { padding: 2px 8px; font-size: 12px; }
 .project-head .project-name { flex: 1; }
 .project-head { gap: 8px; }
 .schedule .link { margin-left: 4px; padding: 0 2px; }
+.proc.running .task-state { color: var(--ok); }
+.proc.exited .task-state { color: var(--bad); }
+.proc .link { margin-left: 4px; }
+.doc.wide { max-width: 1000px; }
+.log-tail { max-height: 420px; overflow: auto; font-size: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px; white-space: pre-wrap; }
