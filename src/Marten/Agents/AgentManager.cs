@@ -39,6 +39,9 @@ public sealed class AgentManager {
 		Publish(new { type = "config" });
 	}
 
+	/// <summary>The default model if known without a network call.</summary>
+	public string? KnownDefaultModel => Config.Model ?? resolvedDefaultModel;
+
 	public async Task<string> DefaultModel(CancellationToken ct) {
 		if(Config.Model != null) return Config.Model;
 		if(resolvedDefaultModel != null) return resolvedDefaultModel;

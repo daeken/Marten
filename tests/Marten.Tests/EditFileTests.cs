@@ -83,3 +83,30 @@ public class EditFileTests {
 		Assert.Equal(" 9\tline 9\n10\tline 10\n[lines 9-10 of 12]\n", r.Text);
 	}
 }
+
+public class EditFileConcurrencyTests {
+	[Fact]
+	public async Task ConcurrentEditorsCannotEraseEachOther() {
+		using var dir = new TempDir();
+		var path = dir.File("shared.txt");
+		File.WriteAllText(path, "base\n");
+		// Many agents read the same version, then all edit at once. Exactly one may win.
+		var agents = Enumerable.Range(0, 24).Select(_ => new TestContext(dir.Path)).ToList();
+		foreach(var a in agents) await new ReadFileTool().InvokeAsync(a, new System.Text.Json.Nodes.JsonObject { ["path"] = "shared.txt" }, default);
+		var start = new TaskCompletionSource();
+		var tasks = agents.Select((a, i) => Task.Run(async () => {
+			await start.Task;
+			var args = System.Text.Json.Nodes.JsonNode.Parse($$"""{"path":"shared.txt","edits":[{"op":"insert_after","anchor":"base\n","text":"agent {{i}}\n"}]}""")!.AsObject();
+			try {
+				await new EditFileTool().InvokeAsync(a, args, default);
+				return true;
+			} catch(ToolException) {
+				return false;
+			}
+		})).ToList();
+		start.SetResult();
+		var results = await Task.WhenAll(tasks);
+		Assert.Equal(1, results.Count(ok => ok));
+		Assert.Equal(2, File.ReadAllLines(path).Length);
+	}
+}

@@ -68,12 +68,29 @@ public sealed class EditFileTool : ITool {
 
 	public sealed record Edit(string Op, string? Anchor, string? Text);
 
+	/// <summary>
+	/// One lock per path, so the version check and the write are a single step for every agent in
+	/// this process. Without it two agents can both pass the check and the second write erases the first.
+	/// </summary>
+	static readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> PathLocks = new(StringComparer.Ordinal);
+
 	public async Task<ToolOutput> InvokeAsync(IToolContext ctx, JsonObject args, CancellationToken ct) {
 		var path = Paths.Resolve(ctx, args.ReqString("path"));
 		var edits = (args["edits"] as JsonArray ?? throw new ToolException("edits must be a list."))
 			.Select(e => e as JsonObject ?? throw new ToolException("Each edit must be an object."))
 			.Select(e => new Edit(e.ReqString("op"), e.OptString("anchor"), e.OptString("text"))).ToList();
 		if(edits.Count == 0) throw new ToolException("No edits given.");
+
+		var gate = PathLocks.GetOrAdd(path, _ => new SemaphoreSlim(1, 1));
+		await gate.WaitAsync(ct);
+		try {
+			return await ApplyLocked(ctx, path, edits, ct);
+		} finally {
+			gate.Release();
+		}
+	}
+
+	static async Task<ToolOutput> ApplyLocked(IToolContext ctx, string path, List<Edit> edits, CancellationToken ct) {
 
 		if(edits.Any(e => e.Op == "create")) {
 			if(edits.Count != 1) throw new ToolException("create must be the only edit.");

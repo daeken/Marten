@@ -11,7 +11,7 @@ namespace Marten.Agents;
 /// boundary; queued messages wait until the agent is idle and then wake it.
 /// </summary>
 public sealed class Agent : IPowerShellOwner {
-	public AgentInfo Info { get; }
+	public AgentInfo Info { get; private set; }
 	public string Directory { get; }
 	public Transcript Transcript { get; }
 	public FileTracker Files { get; }
@@ -114,6 +114,15 @@ public sealed class Agent : IPowerShellOwner {
 		lock(gate) inbox.Add(message);
 		manager.Publish(new { type = "inbox", agentId = Info.Id, pending = PendingCount });
 		signal.Release();
+	}
+
+	/// <summary>Change this agent's model or effort; null means the configured default. Takes effect at the next model call.</summary>
+	public void UpdateSettings(string? model, string? effort) {
+		lock(gate) {
+			Info = Info with { Model = model, Effort = effort };
+			JsonIO.Save(Path.Combine(Directory, "agent.json"), Info);
+		}
+		manager.Publish(new { type = "agents" });
 	}
 
 	public int PendingCount { get { lock(gate) return inbox.Count; } }
