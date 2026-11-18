@@ -60,7 +60,7 @@ export interface BackgroundProcess {
   state: 'running' | 'exited' | 'stopped';
 }
 
-export interface ScriptToolInfo { name: string; scope: 'global' | 'project'; path: string; script: string; description?: string; error?: string; modified: string }
+export interface ScriptToolInfo { name: string; scope: 'global' | 'project'; path: string; script: string; description?: string; error?: string; modified: string; pendingReview?: boolean }
 
 export interface BackupStatus {
   directory: string;
@@ -217,6 +217,7 @@ export class Api {
   imageUrl = (agentId: string, path: string) =>
     `/api/agents/${agentId}/images/${encodeURIComponent(path.split(/[\\/]/).pop() ?? '')}?token=${encodeURIComponent(this.token)}`;
   mcp = () => this.call<McpServer[]>('GET', '/mcp');
+  approveTool = (path: string) => this.call<void>('POST', '/tools/approve', { path });
   backups = () => this.call<BackupStatus>('GET', '/backups');
   backupNow = () => this.call<BackupStatus>('POST', '/backups');
   setBackupPassphrase = (key: string | null) => this.call<BackupStatus>('PUT', '/backups/passphrase', { key });

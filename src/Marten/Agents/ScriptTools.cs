@@ -113,7 +113,7 @@ public sealed class ScriptToolSource(Func<AgentManager> manager) : IToolSource {
 				try { tool = ScriptTool.Parse(System.IO.Path.GetFileNameWithoutExtension(file), File.ReadAllText(file), file, scope); } catch { }
 				cache[file] = hit = (stamp, tool);
 			}
-			if(hit.Tool != null) yield return hit.Tool;
+			if(hit.Tool != null && manager().Guard.ToolApproved(file, hit.Tool.Script)) yield return hit.Tool;
 		}
 	}
 }
@@ -141,11 +141,18 @@ public sealed class DefineToolTool(Func<AgentManager> manager, ScriptToolSource 
 		var path = Path.Combine(dir, name + ".ps1");
 		var tool = ScriptTool.Parse(name, args.ReqString("script"), path, scope);
 		var existed = File.Exists(path);
+		// Ask before writing, so turning review on can't grandfather in the tool being defined.
+		var approved = manager().Guard.ToolApproved(path, tool.Script);
 		Directory.CreateDirectory(dir);
 		AtomicFile.Write(path, tool.Script);
 		manager().Publish(new { type = "tools" });
 		var paramList = string.Join(", ", (tool.Parameters["properties"] as JsonObject)!.Select(p => p.Key));
-		return Task.FromResult(new ToolOutput($"{(existed ? "Replaced" : "Defined")} {name} ({(scope == "global" ? "global" : "project")}) at {path}; parameters: {(paramList.Length > 0 ? paramList : "none")}."));
+		var saved = $"{(existed ? "Replaced" : "Defined")} {name} ({(scope == "global" ? "global" : "project")}) at {path}; parameters: {(paramList.Length > 0 ? paramList : "none")}.";
+		if(!approved) {
+			var card = manager().Guard.RequestToolReview(self, name, path, tool.Script, scope);
+			saved += $" Sera reviews new and changed tools: it can't be called until she approves it (card {card.Id}). Her answer arrives as a message.";
+		}
+		return Task.FromResult(new ToolOutput(saved));
 	}
 }
 

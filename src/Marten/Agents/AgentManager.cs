@@ -19,6 +19,9 @@ public sealed record SeraMessage(string Id, DateTimeOffset At, string From, stri
 	public string? Context { get; init; }
 	public string? Answer { get; init; }
 	public DateTimeOffset? AnsweredAt { get; init; }
+	/// <summary>Null for an agent's own question; "approval" or "tool_review" for cards the guard puts up.</summary>
+	public string? Kind { get; init; }
+	public string? Reference { get; init; }
 }
 
 /// <summary>A message one agent sent another, logged so the UI can show every exchange.</summary>
@@ -34,6 +37,7 @@ public sealed class AgentManager {
 	/// <summary>MCP servers' per-agent instances; set by Program.</summary>
 	public Marten.Mcp.McpHub? Mcp { get; set; }
 	public LoopBreaker Loops { get; }
+	public Guard Guard { get; }
 	readonly ConcurrentDictionary<string, Agent> agents = new();
 	readonly ConcurrentDictionary<string, Project> projects = new();
 	readonly SemaphoreSlim modelGate = new(1, 1);
@@ -48,7 +52,9 @@ public sealed class AgentManager {
 		Config = config;
 		Backend = backend;
 		Loops = new LoopBreaker(() => Config);
+		Guard = new Guard(this);
 		Tools = tools;
+		tools.Gate = Guard.Check;
 		PausedAll = File.Exists(home.PausedPath);
 		WriteDefaultPrompts();
 	}
@@ -303,9 +309,9 @@ public sealed class AgentManager {
 		Publish(new { type = "sera_message", message = msg });
 	}
 
-	public SeraMessage AskSera(Agent from, string question, List<string>? options, string? context) {
+	public SeraMessage AskSera(Agent from, string question, List<string>? options, string? context, string? kind = null, string? reference = null) {
 		var msg = new SeraMessage(Guid.NewGuid().ToString("N")[..12], DateTimeOffset.UtcNow, from.Info.Id, from.Info.Name, from.Info.ProjectId, question) {
-			Question = true, Options = options is { Count: > 0 } ? options : null, Context = context,
+			Question = true, Options = options is { Count: > 0 } ? options : null, Context = context, Kind = kind, Reference = reference,
 		};
 		lock(inboxGate) File.AppendAllText(Home.SeraInboxPath, JsonIO.Serialize(msg) + "\n");
 		Publish(new { type = "sera_message", message = msg });
@@ -315,6 +321,8 @@ public sealed class AgentManager {
 	/// <summary>Record Sera's answer on a card and send it to the agent that asked, queued.</summary>
 	public SeraMessage AnswerQuestion(string id, int? choice, string? text) {
 		SeraMessage answered;
+		bool firstOption;
+		string? note;
 		lock(inboxGate) {
 			var all = SeraInbox();
 			var i = all.FindIndex(m => m.Id == id && m.Question);
@@ -324,10 +332,13 @@ public sealed class AgentManager {
 			var words = string.IsNullOrWhiteSpace(text) ? null : text.Trim();
 			if(picked == null && words == null) throw new ArgumentException("Pick an option or write an answer.");
 			var answer = picked != null && words != null ? $"{picked}: {words}" : picked ?? words!;
+			firstOption = choice == 0 && picked != null;
+			note = words;
 			answered = all[i] = all[i] with { Answer = answer, AnsweredAt = DateTimeOffset.UtcNow };
 			AtomicFile.Write(Home.SeraInboxPath, string.Concat(all.Select(m => JsonIO.Serialize(m) + "\n")));
 		}
 		Publish(new { type = "sera_message", message = answered });
+		if(Guard.Answered(answered, firstOption, note)) return answered;
 		if(Get(answered.From) is { } asker)
 			asker.Send(new Inbound("Sera", $"Sera answered your question \"{answered.Text}\":\n\n{answered.Answer}", SendMode.Queued, "answer"));
 		return answered;
