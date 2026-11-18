@@ -216,6 +216,7 @@ public sealed partial class Agent : IPowerShellOwner {
 				resumeReason = null;
 			}
 			if(reason == null) continue;
+			await WaitWhilePaused(CancellationToken.None);
 			try {
 				await RunTurn(reason);
 			} catch(Exception e) {
@@ -237,6 +238,7 @@ public sealed partial class Agent : IPowerShellOwner {
 			var changesAtStart = taskChanges;
 			var failed = false;
 			while(true) {
+				await WaitWhilePaused(cts.Token);
 				var result = await CallModel(cts.Token);
 				if(result == null) {
 					failed = true;
@@ -274,7 +276,7 @@ public sealed partial class Agent : IPowerShellOwner {
 	/// task changing state, nudging stops and the agent is flagged. Closed agents are never nudged.
 	/// </summary>
 	void MaybeNudge(int changesAtStart) {
-		if(Info.Closed || PendingCount > 0) return;
+		if(Info.Closed || IsPaused || PendingCount > 0) return;
 		var open = Tasks.Where(t => t.State == TaskState.Open).ToList();
 		if(open.Count == 0) return;
 		bool stop;

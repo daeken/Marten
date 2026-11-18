@@ -13,6 +13,8 @@ public sealed record ProjectInfo {
 	/// <summary>Default for spawning task agents into their own git worktree.</summary>
 	public bool WorktreesByDefault { get; init; }
 	public string? OrchestratorId { get; init; }
+	/// <summary>Every agent in a paused project holds, as if paused itself.</summary>
+	public bool Paused { get; init; }
 }
 
 public sealed record MemoryEdit(DateTimeOffset At, string AgentId, string? Reason, List<string> Added, List<string> Removed);

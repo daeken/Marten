@@ -1,5 +1,5 @@
 export type Kind = 'chat' | 'orchestrator' | 'task';
-export type Status = 'idle' | 'running' | 'waiting_for_quota' | 'error';
+export type Status = 'idle' | 'running' | 'waiting_for_quota' | 'paused' | 'error';
 
 export interface AgentSummary {
   id: string;
@@ -19,6 +19,9 @@ export interface AgentSummary {
   worktree?: string;
   nudgesStopped: boolean;
   openTasks: number;
+  /** Paused by itself; pausedEffective also counts its project and pause-all. */
+  paused: boolean;
+  pausedEffective: boolean;
 }
 
 export interface Project {
@@ -28,6 +31,7 @@ export interface Project {
   bindings: string[];
   worktreesByDefault: boolean;
   orchestratorId?: string;
+  paused: boolean;
 }
 
 export interface TaskItem {
@@ -66,6 +70,7 @@ export interface Status_ {
   agents: AgentSummary[];
   projects: Project[];
   inbox: number;
+  paused: boolean;
 }
 
 export type ServerEvent =
@@ -129,6 +134,9 @@ export class Api {
   memory = (projectId: string) => this.call<ProjectMemory>('GET', `/projects/${projectId}/memory`);
   inbox = () => this.call<SeraMessage[]>('GET', '/inbox');
   interrupt = (id: string) => this.call<void>('POST', `/agents/${id}/interrupt`);
+  pauseAgent = (id: string, paused: boolean) => this.call<AgentSummary>('POST', `/agents/${id}/pause`, { paused });
+  pauseProject = (id: string, paused: boolean) => this.call<Project>('POST', `/projects/${id}/pause`, { paused });
+  pauseAll = (paused: boolean) => this.call<void>('POST', '/pause', { paused });
 
   /** Subscribe to runtime events, reconnecting with backoff. Returns an unsubscribe function. */
   events(onEvent: (e: ServerEvent) => void, onConnect: () => void): () => void {
