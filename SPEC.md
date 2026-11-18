@@ -211,7 +211,7 @@ The UI is how Sera watches and steers the system, so it has to show everything t
 
 **Outside agents.** Agents outside Marten, such as Claude Code sessions, get a named client token (`client add NAME`, or the UI). It reaches only the `/api/ext` routes: status, create project, message an agent, read replies, transcripts and tasks. To Marten agents they're peers named `NAME (outside)`, never Sera, and agents answer them with `send_message` to `client:NAME`. Exchanges count toward the loop breaker. If the connection drops, `marten-ext` exits with a short error and exit code 2 instead of silently replaying a command. See docs/outside-agents.md.
 
-**Question cards.** An orchestrator or chat agent can put a structured question to Sera as a card, and she answers on the card. Task agents cannot ask Sera directly; they pass questions up to their orchestrator.
+**Question cards.** An orchestrator or chat agent can put a structured question to Sera as a card, and she answers on the card. The conversation shows the recorded answer immediately, even if the agent is paused; once delivered as a transcript message, it is not shown twice. Task agents cannot ask Sera directly; they pass questions up to their orchestrator.
 
 ## Not day 0
 

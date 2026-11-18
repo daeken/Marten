@@ -116,7 +116,10 @@ export function App() {
         case 'agents':
         case 'config':
         case 'projects':
+          refresh();
+          break;
         case 'sera_message':
+          setTick(t => t + 1);
           refresh();
           break;
       }
@@ -346,8 +349,17 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
   useEffect(() => { api.tasks(agent.id).then(setTasks).catch(() => setTasks([])); }, [api, agent.id, tick]);
   const [questions, setQuestions] = useState<SeraMessage[]>([]);
   useEffect(() => {
-    api.inbox().then(all => setQuestions(all.filter(m => m.question && !m.answer && m.from === agent.id))).catch(() => setQuestions([]));
+    let active = true;
+    api.inbox().then(all => {
+      if (!active) return;
+      setQuestions(current => {
+        const answered = new Map(current.filter(q => q.answer).map(q => [q.id, q]));
+        return all.filter(m => m.question && m.from === agent.id).map(q => answered.get(q.id) ?? q);
+      });
+    }).catch(() => {});
+    return () => { active = false; };
   }, [api, agent.id, tick]);
+  const updateQuestion = (answer: SeraMessage) => setQuestions(current => current.map(q => q.id === answer.id ? answer : q));
   const [procs, setProcs] = useState<BackgroundProcess[]>([]);
   useEffect(() => { api.agentProcesses(agent.id).then(setProcs).catch(() => setProcs([])); }, [api, agent.id, tick]);
   const [schedules, setSchedules] = useState<Schedule[]>([]);
@@ -371,7 +383,7 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
       followLatest.current = true;
     }
     if (followLatest.current) el.scrollTop = el.scrollHeight;
-  }, [agent.id, transcript, streaming, runningCall, showNotebook]);
+  }, [agent.id, transcript, streaming, runningCall, showNotebook, questions]);
 
   const trackLogScroll = (event: React.UIEvent<HTMLDivElement>) => {
     const el = event.currentTarget;
@@ -380,6 +392,15 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
   };
 
   const results = useMemo(() => new Map(entries.filter(e => e.kind === 'tool_result').map(e => [e.callId, e])), [entries]);
+  const agentQuestions = questions.filter(q => q.from === agent.id);
+  const delivered = new Set(entries.filter(e => e.kind === 'message' && e.from === 'Sera').map(e => e.text));
+  // Keep showing the recorded answer until its ordinary inbound message appears. Approval
+  // answers are handled by Guard and may never become ordinary inbound messages.
+  const answeredCards = agentQuestions.filter(q => q.answer && !delivered.has(`Sera answered your question "${q.text}":\n\n${q.answer}`))
+    .sort((a, b) => Date.parse(a.answeredAt ?? a.at) - Date.parse(b.answeredAt ?? b.at));
+  const card = (q: SeraMessage) => <div key={`question-${q.id}`} className="inbox-item card-inline"><QuestionCard api={api} q={q} onAnswered={updateQuestion} /></div>;
+  let nextCard = 0;
+
 
   const send = async () => {
     const t = text.trim();
@@ -474,13 +495,19 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
       )}
       {showNotebook && <NotebookView api={api} agent={agent} tick={tick} />}
       <div className="log" ref={scroller} onScroll={trackLogScroll} style={showNotebook ? { display: 'none' } : undefined}>
-        {entries.map(e => <EntryView key={e.seq} entry={e} result={e.kind === 'tool_call' ? results.get(e.callId) : undefined} running={e.callId === runningCall} imageUrl={p => api.imageUrl(agent.id, p)} />)}
+        {entries.flatMap(e => {
+          const before = [];
+          while (nextCard < answeredCards.length && Date.parse(answeredCards[nextCard].answeredAt ?? answeredCards[nextCard].at) <= Date.parse(e.ts))
+            before.push(card(answeredCards[nextCard++]));
+          return [...before, <EntryView key={e.seq} entry={e} result={e.kind === 'tool_call' ? results.get(e.callId) : undefined} running={e.callId === runningCall} imageUrl={p => api.imageUrl(agent.id, p)} />];
+        })}
+        {answeredCards.slice(nextCard).map(card)}
         {streaming && <div className="assistant streaming"><Md text={streaming} /></div>}
         {agent.modelCall && !agent.modelCall.endedAt && !streaming && !runningCall &&
           <Thinking label={agent.modelCall.kind === 'compaction' ? 'Compacting context' : 'Thinking'} />}
         {agent.status === 'waiting_for_quota' && <Thinking label="Waiting for quota" />}
         {agent.status === 'waiting_for_slot' && <Thinking label="Waiting for slot" />}
-        {questions.map(q => <div key={q.id} className="inbox-item card-inline"><QuestionCard api={api} q={q} /></div>)}
+        {agentQuestions.filter(q => !q.answer).map(card)}
       </div>
       <footer className="composer">
         <div className="composer-row">
@@ -897,11 +924,14 @@ function ProcessesView({ api, tick, onSelect }: { api: Api; tick: number; onSele
   );
 }
 
-function QuestionCard({ api, q }: { api: Api; q: SeraMessage }) {
+function QuestionCard({ api, q, onAnswered }: { api: Api; q: SeraMessage; onAnswered?: (answer: SeraMessage) => void }) {
   const [text, setText] = useState('');
   const [error, setError] = useState<string | null>(null);
   const answer = (choice: number | null) =>
-    api.answer(q.id, choice, text.trim() || null).then(() => setText('')).catch(e => setError(String(e.message ?? e)));
+    api.answer(q.id, choice, text.trim() || null).then(answered => {
+      setText('');
+      onAnswered?.(answered);
+    }).catch(e => setError(String(e.message ?? e)));
   return (
     <div className="question">
       <div className="q-text"><Md text={q.text} /></div>
