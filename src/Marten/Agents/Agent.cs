@@ -212,7 +212,8 @@ public sealed partial class Agent : IPowerShellOwner {
 			await signal.WaitAsync();
 			string? reason;
 			lock(gate) {
-				reason = resumeReason ?? (inbox.Count > 0 ? (inbox.All(m => m.From == NudgeSender) ? "nudge" : "message") : null);
+				var reasons = inbox.Select(m => m.Reason ?? (m.From == NudgeSender ? "nudge" : "message")).Distinct().ToList();
+				reason = resumeReason ?? reasons.Count switch { 0 => null, 1 => reasons[0], _ => "message" };
 				resumeReason = null;
 			}
 			if(reason == null) continue;
@@ -345,7 +346,7 @@ public sealed partial class Agent : IPowerShellOwner {
 	}
 
 	/// <summary>Truncate an oversized result on arrival, keeping its head and tail and saving the full text.</summary>
-	(string Text, string? FullOutput) Truncate(string callId, string text) {
+	internal (string Text, string? FullOutput) Truncate(string callId, string text) {
 		var max = manager.Config.ToolResultMaxChars;
 		if(text.Length <= max) return (text, null);
 		System.IO.Directory.CreateDirectory(OutputsDir);
