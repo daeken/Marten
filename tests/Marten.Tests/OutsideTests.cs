@@ -37,7 +37,7 @@ public class OutsideTests {
 	}
 
 	[Fact]
-	public async Task MessagesFlowBothWaysThroughApiAndMailbox() {
+	public async Task MessagesFlowBothWays() {
 		using var dir = new TempDir();
 		var (m, orch) = Setup(dir);
 		m.Outside.Register("cc");
@@ -49,18 +49,7 @@ public class OutsideTests {
 		Assert.Equal(1, orch.PendingCount);
 		Assert.Contains(m.AgentMessages(), x => x.FromId == "client:cc" && x.ToId == orch.Info.Id);
 
-		// Mailbox files are picked up, delivered, and moved to sent/ (or failed/ with the reason).
-		var outDir = m.Outside.OutDir("cc");
-		File.WriteAllText(Path.Combine(outDir, "001.md"), $"to: {orch.Info.Id}\nmode: queued\n---\nSecond message.\n");
-		File.WriteAllText(Path.Combine(outDir, "002.md"), "to: nobody-at-all\n---\nLost.\n");
-		File.SetLastWriteTimeUtc(Path.Combine(outDir, "001.md"), DateTime.UtcNow.AddSeconds(-5));
-		File.SetLastWriteTimeUtc(Path.Combine(outDir, "002.md"), DateTime.UtcNow.AddSeconds(-5));
-		Assert.Equal(1, m.Outside.PollOutboxes());
-		Assert.Equal(2, orch.PendingCount);
-		Assert.True(File.Exists(Path.Combine(outDir, "sent", "001.md")));
-		Assert.Contains("Not delivered", File.ReadAllText(Path.Combine(outDir, "failed", "002.md")));
-
-		// The orchestrator answers with send_message to client:cc; it lands in in/ and the API reads it.
+		// The orchestrator answers with send_message to client:cc; the client reads it through the API.
 		var r = await m.Tools.InvokeAsync(orch, "send_message", JsonSerializer.Serialize(new { to = "client:cc", text = "Tests pass.", mode = "queued" }), CancellationToken.None);
 		Assert.False(r.IsError, r.Text);
 		var inbox = m.Outside.Inbox("cc", ack: true);
@@ -68,7 +57,6 @@ public class OutsideTests {
 		Assert.Equal("Tests pass.", msg.Text);
 		Assert.Equal(orch.Info.Id, msg.Header("reply_to"));
 		Assert.Empty(m.Outside.Inbox("cc", ack: false));
-		Assert.Single(Directory.GetFiles(Path.Combine(m.Outside.InDir("cc"), "read")));
 
 		var unknown = await m.Tools.InvokeAsync(orch, "send_message", JsonSerializer.Serialize(new { to = "client:nope", text = "hi", mode = "queued" }), CancellationToken.None);
 		Assert.True(unknown.IsError);

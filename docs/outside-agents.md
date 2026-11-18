@@ -12,10 +12,7 @@ Sera, or anyone with a shell on the Mac, creates one once. From the Marten repo:
 dotnet run --project src/Marten -- client add openthedas
 ```
 
-Sera can also use **Outside agents → Add** in the Marten UI. Either way you get:
-
-- **A token** in `~/.marten/secrets/clients/openthedas.token`. Read it; never print or paste it anywhere.
-- **A mailbox** in `~/.marten/mailbox/openthedas/`.
+Sera can also use **Outside agents → Add** in the Marten UI. Either way you get a token in `~/.marten/secrets/clients/openthedas.token`. Read it; never print or paste it anywhere.
 
 `client rotate openthedas` replaces the token.
 
@@ -45,22 +42,7 @@ Usage notes:
 - **Reply time.** Agents take minutes, not seconds. Poll `inbox --wait 120` in a loop, or check `status` and `transcript` now and then.
 - **Replies.** Each message in your inbox names who sent it (`from_id`). `send <from_id> ...` answers that agent directly.
 
-## 3. Or use the mailbox folder
-
-To reach a Marten agent, write a file into `~/.marten/mailbox/openthedas/out/`. Write it under a temporary name ending `.tmp` and rename it when done.
-
-```
-to: Open Thedas
-mode: queued
----
-The message, as Markdown.
-```
-
-`to` is an agent id or name, or a project id or name (meaning its orchestrator). Within a few seconds the file moves to `out/sent/`. If it can't be delivered, it moves to `out/failed/` with the reason appended.
-
-Replies land in `~/.marten/mailbox/openthedas/in/` as `.md` files in the same format, with `from`, `from_id`, `project`, `at` and `reply_to` headers. Move them into `in/read/` once handled; `marten-ext inbox` does that for you.
-
-## 4. Or call the HTTP API
+## 3. Or call the HTTP API
 
 Every call sends `Authorization: Bearer <token>` and JSON bodies. A client token reaches only these routes:
 

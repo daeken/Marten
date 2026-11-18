@@ -62,7 +62,7 @@ export interface BackgroundProcess {
 
 export interface ScriptToolInfo { name: string; scope: 'global' | 'project'; path: string; script: string; description?: string; error?: string; modified: string; pendingReview?: boolean }
 
-export interface OutsideClient { name: string; created: string; tokenPath: string; mailbox: string; unread: number }
+export interface OutsideClient { name: string; created: string; tokenPath: string; unread: number }
 
 export interface BackupStatus {
   directory: string;

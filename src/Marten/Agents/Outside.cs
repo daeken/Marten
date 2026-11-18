@@ -9,14 +9,14 @@ namespace Marten.Agents;
 /// <summary>An agent outside Marten (a Claude Code session, say) that Sera gave a token.</summary>
 public sealed record OutsideClient(string Name, string TokenHash, DateTimeOffset Created);
 
-/// <summary>A message in a mailbox file: header lines, a "---" line, then the text.</summary>
+/// <summary>A reply waiting for a client: header lines, a "---" line, then the text.</summary>
 public sealed record MailMessage(string File, Dictionary<string, string> Headers, string Text) {
 	public string? Header(string key) => Headers.GetValueOrDefault(key);
 }
 
 /// <summary>
-/// Agents outside Marten. Each gets a token (secrets/clients/NAME.token) for the /api/ext routes, and a mailbox:
-/// mailbox/NAME/out/ is where it drops messages for Marten agents, mailbox/NAME/in/ where their replies land.
+/// Agents outside Marten. Each gets a token (secrets/clients/NAME.token) for the /api/ext routes. Replies from
+/// Marten agents wait in outside/NAME/inbox/ until the client reads them through the API.
 /// To Marten agents they're peers named "NAME (outside)", never Sera.
 /// </summary>
 public sealed class Outside(AgentManager manager) {
@@ -29,10 +29,8 @@ public sealed class Outside(AgentManager manager) {
 
 	string ClientsPath => Path.Combine(manager.Home.Root, "clients.json");
 	public string TokenDir => Path.Combine(manager.Home.Secrets, "clients");
-	public string MailboxRoot => Path.Combine(manager.Home.Root, "mailbox");
 	public string TokenPath(string name) => Path.Combine(TokenDir, name + ".token");
-	public string InDir(string name) => Path.Combine(MailboxRoot, name, "in");
-	public string OutDir(string name) => Path.Combine(MailboxRoot, name, "out");
+	public string InDir(string name) => Path.Combine(manager.Home.Root, "outside", name, "inbox");
 	public static string Label(string name) => $"{name} (outside)";
 
 	public IReadOnlyList<OutsideClient> Clients {
@@ -73,8 +71,6 @@ public sealed class Outside(AgentManager manager) {
 			JsonIO.Save(ClientsPath, list);
 			clients = null;
 		}
-		Directory.CreateDirectory(InDir(name));
-		Directory.CreateDirectory(OutDir(name));
 		return client;
 	}
 
@@ -132,45 +128,9 @@ public sealed class Outside(AgentManager manager) {
 		return target;
 	}
 
-	/// <summary>Pick up files clients dropped in their out/ folders; delivered ones move to out/sent/, failed ones to out/failed/.</summary>
-	public int PollOutboxes() {
-		var delivered = 0;
-		foreach(var c in Clients) {
-			var dir = OutDir(c.Name);
-			if(!Directory.Exists(dir)) continue;
-			foreach(var file in Directory.EnumerateFiles(dir).Where(f => !Path.GetFileName(f).StartsWith('.') && !f.EndsWith(".tmp") && !f.EndsWith(".partial")).Order().ToList()) {
-				// Let a writer finish: skip files touched in the last second.
-				if(DateTime.UtcNow - File.GetLastWriteTimeUtc(file) < TimeSpan.FromSeconds(1)) continue;
-				string? error = null;
-				try {
-					var msg = Parse(file, File.ReadAllText(file));
-					var to = msg.Header("to") ?? throw new ToolException("No \"to:\" header. Start the file with \"to: <agent or project>\", then a \"---\" line, then the message.");
-					var mode = string.Equals(msg.Header("mode"), "immediate", StringComparison.OrdinalIgnoreCase) ? SendMode.Immediate : SendMode.Queued;
-					Deliver(c.Name, to, msg.Text, mode);
-					delivered++;
-				} catch(Exception e) when(e is ToolException or IOException) { error = e.Message; }
-				var dest = Path.Combine(dir, error == null ? "sent" : "failed");
-				Directory.CreateDirectory(dest);
-				var target = Path.Combine(dest, Path.GetFileName(file));
-				try {
-					File.Move(file, target, overwrite: true);
-					if(error != null) File.AppendAllText(target, $"\n\n[marten] Not delivered: {error}\n");
-				} catch(IOException) { }
-			}
-		}
-		return delivered;
-	}
-
-	public void Start(CancellationToken stop) => _ = Task.Run(async () => {
-		while(!stop.IsCancellationRequested) {
-			try { PollOutboxes(); } catch(Exception e) { Console.Error.WriteLine($"Mailbox: {e.Message}"); }
-			try { await Task.Delay(TimeSpan.FromSeconds(2), stop); } catch(OperationCanceledException) { break; }
-		}
-	});
-
 	// ---- Marten → outside ----
 
-	/// <summary>Write an agent's message into a client's in/ folder.</summary>
+	/// <summary>Queue an agent's message for a client to read through the API.</summary>
 	public MailMessage Write(Agent from, string client, string text) {
 		if(Get(client) == null) throw new ToolException($"No outside client {client}. Known: {string.Join(", ", Clients.Select(c => c.Name)) switch { "" => "none", var s => s }}.");
 		if(manager.Loops.Record(from.Info.Id, Prefix + client, DateTimeOffset.UtcNow) is { } count) {
@@ -190,11 +150,11 @@ public sealed class Outside(AgentManager manager) {
 		var path = Path.Combine(dir, name);
 		AtomicFile.Write(path, string.Concat(headers.Select(h => $"{h.Key}: {h.Value}\n")) + "---\n" + text.Trim() + "\n");
 		manager.LogAgentMessage(new AgentMessage(now, from.Info.Id, from.Info.Name, Prefix + client, Label(client), from.Info.ProjectId, SendMode.Queued, text.Trim(), "outside"));
-		manager.Publish(new { type = "mailbox", client });
+		manager.Publish(new { type = "outside", client });
 		return new MailMessage(path, headers, text.Trim());
 	}
 
-	/// <summary>Unread messages for a client, oldest first. Ack moves them to in/read/.</summary>
+	/// <summary>Unread messages for a client, oldest first. Ack moves them to inbox/read/.</summary>
 	public List<MailMessage> Inbox(string client, bool ack) {
 		var dir = InDir(client);
 		if(!Directory.Exists(dir)) return [];
