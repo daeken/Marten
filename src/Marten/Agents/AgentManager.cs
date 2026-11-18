@@ -11,7 +11,18 @@ using Marten.Tools;
 namespace Marten.Agents;
 
 /// <summary>A message an agent sent to Sera; shown in the UI inbox.</summary>
-public sealed record SeraMessage(string Id, DateTimeOffset At, string From, string FromName, string? ProjectId, string Text);
+/// <summary>Something an agent put in front of Sera: a message, or a question card she answers.</summary>
+public sealed record SeraMessage(string Id, DateTimeOffset At, string From, string FromName, string? ProjectId, string Text) {
+	public bool Question { get; init; }
+	/// <summary>Choices on a question card; Sera can also answer in her own words.</summary>
+	public List<string>? Options { get; init; }
+	public string? Context { get; init; }
+	public string? Answer { get; init; }
+	public DateTimeOffset? AnsweredAt { get; init; }
+}
+
+/// <summary>A message one agent sent another, logged so the UI can show every exchange.</summary>
+public sealed record AgentMessage(DateTimeOffset At, string FromId, string FromName, string ToId, string ToName, string? ProjectId, SendMode Mode, string Text, string? Reason);
 
 public sealed class AgentManager {
 	public Home Home { get; }
@@ -286,6 +297,58 @@ public sealed class AgentManager {
 		var msg = new SeraMessage(Guid.NewGuid().ToString("N")[..12], DateTimeOffset.UtcNow, from.Info.Id, from.Info.Name, from.Info.ProjectId, text);
 		lock(inboxGate) File.AppendAllText(Home.SeraInboxPath, JsonIO.Serialize(msg) + "\n");
 		Publish(new { type = "sera_message", message = msg });
+	}
+
+	public SeraMessage AskSera(Agent from, string question, List<string>? options, string? context) {
+		var msg = new SeraMessage(Guid.NewGuid().ToString("N")[..12], DateTimeOffset.UtcNow, from.Info.Id, from.Info.Name, from.Info.ProjectId, question) {
+			Question = true, Options = options is { Count: > 0 } ? options : null, Context = context,
+		};
+		lock(inboxGate) File.AppendAllText(Home.SeraInboxPath, JsonIO.Serialize(msg) + "\n");
+		Publish(new { type = "sera_message", message = msg });
+		return msg;
+	}
+
+	/// <summary>Record Sera's answer on a card and send it to the agent that asked, queued.</summary>
+	public SeraMessage AnswerQuestion(string id, int? choice, string? text) {
+		SeraMessage answered;
+		lock(inboxGate) {
+			var all = SeraInbox();
+			var i = all.FindIndex(m => m.Id == id && m.Question);
+			if(i < 0) throw new KeyNotFoundException($"No question {id}.");
+			if(all[i].Answer != null) throw new InvalidOperationException("That question is already answered.");
+			var picked = choice is int c && all[i].Options is { } opts && c >= 0 && c < opts.Count ? opts[c] : null;
+			var words = string.IsNullOrWhiteSpace(text) ? null : text.Trim();
+			if(picked == null && words == null) throw new ArgumentException("Pick an option or write an answer.");
+			var answer = picked != null && words != null ? $"{picked}: {words}" : picked ?? words!;
+			answered = all[i] = all[i] with { Answer = answer, AnsweredAt = DateTimeOffset.UtcNow };
+			AtomicFile.Write(Home.SeraInboxPath, string.Concat(all.Select(m => JsonIO.Serialize(m) + "\n")));
+		}
+		Publish(new { type = "sera_message", message = answered });
+		if(Get(answered.From) is { } asker)
+			asker.Send(new Inbound("Sera", $"Sera answered your question \"{answered.Text}\":\n\n{answered.Answer}", SendMode.Queued, "answer"));
+		return answered;
+	}
+
+	// ---- Messages between agents ----
+
+	string AgentMessagesPath => Path.Combine(Home.Root, "messages.jsonl");
+	readonly object messagesGate = new();
+
+	internal void LogAgentMessage(AgentMessage m) {
+		lock(messagesGate) File.AppendAllText(AgentMessagesPath, JsonIO.Serialize(m) + "\n");
+		Publish(new { type = "agent_message", message = m });
+	}
+
+	public List<AgentMessage> AgentMessages(string? agentId = null, string? projectId = null, int limit = 500) {
+		lock(messagesGate) {
+			if(!File.Exists(AgentMessagesPath)) return [];
+			return File.ReadLines(AgentMessagesPath).Where(l => l.Length > 0)
+				.Select(l => { try { return JsonIO.Deserialize<AgentMessage>(l); } catch { return null; } })
+				.OfType<AgentMessage>()
+				.Where(m => agentId == null || m.FromId == agentId || m.ToId == agentId)
+				.Where(m => projectId == null || m.ProjectId == projectId)
+				.TakeLast(limit).ToList();
+		}
 	}
 
 	public List<SeraMessage> SeraInbox() {

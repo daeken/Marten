@@ -85,7 +85,7 @@ public sealed class SendMessageTool(Func<AgentManager> manager) : ITool {
 		var target = AgentTools.Resolve(m, from, to);
 		if(MessagingRules.Check(from, target, mode) is { } why) throw new ToolException(why);
 		var wasClosed = target.Info.Closed;
-		target.Send(new Inbound(AgentManager.Label(from), text, mode));
+		target.Send(Inbound.FromAgent(from, text, mode));
 		return Task.FromResult(new ToolOutput($"{(mode == SendMode.Immediate ? "Delivered" : "Queued")} to {AgentManager.Label(target)}{(wasClosed ? ", which was closed and is now awake" : "")}."));
 	}
 }
@@ -116,7 +116,7 @@ public sealed class SpawnAgentTool(Func<AgentManager> manager) : ITool {
 			throw new ToolException(e.Message);
 		}
 		if(args.OptString("task") is { Length: > 0 } task) agent.AddTask(task, self.Info.Id);
-		agent.Send(new Inbound(AgentManager.Label(self), args.ReqString("brief"), SendMode.Queued));
+		agent.Send(Inbound.FromAgent(self, args.ReqString("brief"), SendMode.Queued));
 		return Task.FromResult(new ToolOutput($"Spawned {AgentManager.Label(agent)} in {agent.Info.WorkingDirectory}."));
 	}
 }
@@ -163,7 +163,7 @@ public sealed class CreateProjectTool(Func<AgentManager> manager) : ITool {
 			throw new ToolException(e.Message);
 		}
 		if(args.OptString("brief") is { Length: > 0 } brief)
-			orchestrator.Send(new Inbound(AgentManager.Label(self), brief, SendMode.Queued));
+			orchestrator.Send(Inbound.FromAgent(self, brief, SendMode.Queued));
 		return Task.FromResult(new ToolOutput($"Created project {project.Info.Name} ({project.Info.Id}) with orchestrator {orchestrator.Info.Id}."));
 	}
 }
@@ -183,7 +183,7 @@ public sealed class TaskAddTool(Func<AgentManager> manager) : ITool {
 		if(target != self && target.Info.ParentId != self.Info.Id)
 			throw new ToolException("You can only add tasks to your own list or your task agents' lists.");
 		var task = target.AddTask(args.ReqString("title"), self.Info.Id);
-		if(target != self) target.Send(new Inbound(AgentManager.Label(self), $"New task #{task.Id} on your list: {task.Title}", SendMode.Queued));
+		if(target != self) target.Send(Inbound.FromAgent(self, $"New task #{task.Id} on your list: {task.Title}", SendMode.Queued));
 		return Task.FromResult(new ToolOutput($"Added task #{task.Id} to {(target == self ? "your list" : target.Info.Name + "'s list")}."));
 	}
 }
@@ -209,7 +209,7 @@ public sealed class TaskUpdateTool(Func<AgentManager> manager) : ITool {
 		var (before, after) = self.UpdateTask(id, newState, reason);
 		var stateWord = newState.ToString().ToLowerInvariant();
 		if(before.State != newState && newState != TaskState.Open && after.AssignedBy != self.Info.Id && m.Get(after.AssignedBy) is { } assigner)
-			assigner.Send(new Inbound(AgentManager.Label(self), $"Task #{after.Id} \"{after.Title}\" is now {stateWord}{(reason != null ? $": {reason}" : "")}", SendMode.Queued));
+			assigner.Send(Inbound.FromAgent(self, $"Task #{after.Id} \"{after.Title}\" is now {stateWord}{(reason != null ? $": {reason}" : "")}", SendMode.Queued));
 		if(newState == TaskState.Blocked && before.State != TaskState.Blocked && self.Info.Kind == AgentKind.Orchestrator)
 			m.MessageSera(self, $"Blocked on you: {after.Title}\n\n{reason}");
 		return Task.FromResult(new ToolOutput($"Task #{id} is {stateWord}."));
@@ -286,5 +286,29 @@ public sealed class SetModelTool(Func<AgentManager> manager) : ITool {
 		target.UpdateSettings(model, effort);
 		var cfg = manager().Config;
 		return Task.FromResult(new ToolOutput($"{(target == self ? "You now use" : target.Info.Name + " now uses")} {model ?? cfg.Model + " (default)"} at {effort ?? cfg.Effort + " (default)"} effort."));
+	}
+}
+
+public sealed class AskSeraTool(Func<AgentManager> manager) : ITool {
+	public string Name => "ask_sera";
+	public string Description =>
+		"Put a question to Sera as a card she answers in the UI, with options to pick from and room for her own words. " +
+		"Her answer reaches you later as a queued message; carry on with other work meanwhile, or mark the task that " +
+		"needs it blocked. Use it for decisions only she can make, not for status.";
+	public JsonObject Parameters => Schema.Object(
+		("question", Schema.Str("The question, short and specific.")),
+		("options", new JsonObject {
+			["type"] = new JsonArray("array", "null"), ["items"] = Schema.Str("A choice, a few words."),
+			["description"] = "2 to 6 choices, recommended first; null for a free-form answer.",
+		}),
+		("context", Schema.Str("What she needs to decide: background, tradeoffs, your recommendation. Null for none.", nullable: true)));
+	public bool AvailableTo(IToolContext ctx) => ctx is Agent { Info.Kind: AgentKind.Chat or AgentKind.Orchestrator };
+
+	public Task<ToolOutput> InvokeAsync(IToolContext ctx, JsonObject args, CancellationToken ct) {
+		var self = AgentTools.Self(ctx);
+		var options = (args["options"] as JsonArray)?.Select(n => n?.GetValue<string>()?.Trim() ?? "").Where(s => s.Length > 0).ToList();
+		if(options is { Count: 1 or > 6 }) throw new ToolException("Give 2 to 6 options, or null.");
+		var q = manager().AskSera(self, args.ReqString("question"), options, args.OptString("context"));
+		return Task.FromResult(new ToolOutput($"Asked (card {q.Id}). Sera's answer will arrive as a message."));
 	}
 }

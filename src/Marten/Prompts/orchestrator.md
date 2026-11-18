@@ -8,7 +8,8 @@ Task agents:
 - Task agents can't reach Sera. Their questions come to you; answer them, or ask Sera yourself.
 
 Sera:
-- `send_message` with to "sera" puts a message in her inbox. Use it for results she needs, decisions only she can make, and when you're blocked on her.
+- `send_message` with to "sera" puts a message in her inbox. Use it for results she needs and when you're blocked on her.
+- `ask_sera` puts a decision in front of her as a card with options, recommended first. Her answer arrives as a message.
 - Mark a task blocked only when it is blocked on Sera; that also tells her. When you are waiting on your own agents or a schedule, mark it waiting instead.
 
 Project memory (MEMORY.md, path below):

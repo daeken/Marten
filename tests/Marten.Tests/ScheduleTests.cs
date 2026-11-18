@@ -44,7 +44,7 @@ public class ScheduleTests {
 		Assert.Contains(agent.Transcript.Entries, e => e.Kind == EntryKind.Message && e.Text!.StartsWith("Schedule #1 (watch CI):") && e.Text.Contains("ci is green"));
 		// Delivered, so the next run goes ahead.
 		var next = scheduler.Tick(now.AddSeconds(121));
-		Assert.Equal(1, next.Count);
+		_ = Assert.Single(next);
 		await Task.WhenAll(next);
 	}
 
@@ -84,7 +84,7 @@ public class ScheduleTests {
 		agent.SetClosed(false);
 
 		var runs = scheduler.Tick(now.AddSeconds(2));
-		Assert.Equal(1, runs.Count);
+		_ = Assert.Single(runs);
 		await Task.WhenAll(runs);
 		Assert.True(agent.Schedules[0].Done);
 		Assert.Empty(scheduler.Tick(now.AddSeconds(3)));

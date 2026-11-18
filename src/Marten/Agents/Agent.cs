@@ -172,6 +172,9 @@ public sealed partial class Agent : IPowerShellOwner {
 
 	public void Send(Inbound message) {
 		if(Info.Closed) SetClosed(false);
+		if(message.FromId is { } fromId && manager.Get(fromId) is { } sender)
+			manager.LogAgentMessage(new AgentMessage(DateTimeOffset.UtcNow, fromId, sender.Info.Name, Info.Id, Info.Name,
+				Info.ProjectId ?? sender.Info.ProjectId, message.Mode, message.Text, message.Reason));
 		lock(gate) {
 			inbox.Add(message);
 			if(message.From == "Sera" && (state.NudgeStreak != 0 || state.NudgesStopped))

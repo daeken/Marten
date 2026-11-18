@@ -207,3 +207,10 @@ button.small { padding: 2px 8px; font-size: 12px; }
 .doc.wide { max-width: 1000px; }
 .log-tail { max-height: 420px; overflow: auto; font-size: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px; white-space: pre-wrap; }
 .tool-def { margin: 6px 0; } .tool-def summary { cursor: pointer; }
+.question { display: flex; flex-direction: column; gap: 8px; }
+.q-context { color: var(--muted); border-left: 2px solid var(--border); padding-left: 10px; }
+.q-options { display: flex; flex-wrap: wrap; gap: 6px; }
+.q-free { display: flex; gap: 6px; }
+.q-free input { flex: 1; min-width: 0; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg, transparent); color: inherit; }
+.q-answer { color: var(--ok); }
+.card-inline { border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--border)); border-radius: 8px; padding: 12px; margin: 8px 0; }

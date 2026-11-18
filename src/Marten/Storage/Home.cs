@@ -18,7 +18,7 @@ public sealed class Home {
 		Directory.CreateDirectory(Agents);
 		Directory.CreateDirectory(Projects);
 		Directory.CreateDirectory(Prompts);
-		if(!OperatingSystem.IsWindows())
+		if(OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
 			File.SetUnixFileMode(Secrets, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
 	}
 
@@ -64,7 +64,7 @@ public static class AtomicFile {
 			fs.Write(contents);
 			fs.Flush(flushToDisk: true);
 		}
-		if(mode is { } m) File.SetUnixFileMode(tmp, m);
+		if(mode is { } m && !OperatingSystem.IsWindows()) File.SetUnixFileMode(tmp, m);
 		File.Move(tmp, path, overwrite: true);
 	}
 }
