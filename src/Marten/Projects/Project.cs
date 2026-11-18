@@ -24,13 +24,14 @@ public sealed record MemoryEdit(DateTimeOffset At, string AgentId, string? Reaso
 
 /// <summary>A project's place in ~/.marten: project.json, prompt.md, MEMORY.md and the memory audit log.</summary>
 public sealed partial class Project {
-	public ProjectInfo Info { get; private set; }
+	volatile ProjectInfo info;
+	public ProjectInfo Info { get => info; private set => info = value; }
 	public string Directory { get; }
 	readonly object gate = new();
 
 	public Project(string directory, ProjectInfo info) {
 		Directory = directory;
-		Info = info;
+		this.info = info;
 	}
 
 	public string PromptPath => Path.Combine(Directory, "prompt.md");

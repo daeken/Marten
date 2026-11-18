@@ -12,7 +12,8 @@ namespace Marten.Agents;
 /// boundary; queued messages wait until the agent is idle and then wake it.
 /// </summary>
 public sealed partial class Agent : IPowerShellOwner {
-	public AgentInfo Info { get; private set; }
+	volatile AgentInfo info;
+	public AgentInfo Info { get => info; private set => info = value; }
 	public string Directory { get; }
 	public Transcript Transcript { get; }
 	public FileTracker Files { get; }
@@ -25,14 +26,26 @@ public sealed partial class Agent : IPowerShellOwner {
 	readonly List<Inbound> inbox = new();
 	readonly SemaphoreSlim signal = new(0);
 	AgentState state;
-	CancellationTokenSource? turnCts;
+	Turn? activeTurn;
+
+	// Serialized by gate. CancelAsync marks the token immediately without running arbitrary
+	// cancellation callbacks under the lifecycle lock. Drain those callbacks before disposal.
+	sealed class Turn {
+		public readonly CancellationTokenSource Cancellation = new();
+		public Task Cancelled { get; private set; } = Task.CompletedTask;
+		public bool Closed { get; private set; }
+		public void Cancel(bool closed = false) {
+			Closed |= closed;
+			if(!Cancellation.IsCancellationRequested) Cancelled = Cancellation.CancelAsync();
+		}
+	}
 	string? resumeReason;
 	MartenApi? api;
 
 	public Agent(AgentManager manager, string directory, AgentInfo info, string instructions) {
 		this.manager = manager;
 		Directory = directory;
-		Info = info;
+		this.info = info;
 		Instructions = instructions;
 		Transcript = new Transcript(Path.Combine(directory, "transcript"));
 		if(Transcript.Entries.LastOrDefault(e => e.Kind == EntryKind.Compaction)?.Instructions is { } rebuilt) Instructions = rebuilt;
@@ -60,7 +73,16 @@ public sealed partial class Agent : IPowerShellOwner {
 	public string WorkingDirectory => Info.WorkingDirectory;
 	public ToolRegistry Tools => manager.Tools;
 	public object MartenObject => api ??= new MartenApi(this, manager);
-	public object MartenObjectForRun(CancellationToken ct) => new MartenApi(this, manager, ct);
+	readonly AsyncLocal<CancellationToken> toolTurn = new();
+	public object MartenObjectForRun(CancellationToken ct) => new MartenApi(this, manager, ct, toolTurn.Value);
+
+	internal void CheckNestedTool(CancellationToken turnToken, CancellationToken runToken) {
+		lock(gate) {
+			turnToken.ThrowIfCancellationRequested();
+			runToken.ThrowIfCancellationRequested();
+			if(Info.Closed || IsPaused) throw new ToolException("Cannot start another tool while the agent is closed or paused.");
+		}
+	}
 	public IReadOnlyList<AbandonedRunspace> AbandonedRunspaces => state.AbandonedRunspaces;
 	public bool NudgesStopped => state.NudgesStopped;
 	public Project? Project => manager.ProjectOf(this);
@@ -124,14 +146,24 @@ public sealed partial class Agent : IPowerShellOwner {
 	public void SetClosed(bool closed) {
 		lock(gate) {
 			if(Info.Closed == closed) return;
-			Info = Info with { Closed = closed };
-			JsonIO.Save(Path.Combine(Directory, "agent.json"), Info);
+			SaveClosed(closed);
+			if(closed) {
+				resumeReason = null;
+				activeTurn?.Cancel(closed: true);
+			}
 		}
 		if(closed) {
 			_ = StopAllProcesses();
 			_ = manager.Mcp?.StopFor(Info.Id);
-		}
+		} else signal.Release();
 		manager.Publish(new { type = "agents" });
+	}
+
+	// Called with gate held so a deliberate reopen and its message are one lifecycle transition.
+	void SaveClosed(bool closed) {
+		var updated = Info with { Closed = closed };
+		JsonIO.Save(Path.Combine(Directory, "agent.json"), updated);
+		Info = updated;
 	}
 
 	public JsonNode? PowerShellState {
@@ -186,16 +218,26 @@ public sealed partial class Agent : IPowerShellOwner {
 	}
 
 	public void Send(Inbound message) {
-		if(Info.Closed) SetClosed(false);
 		if(message.From == "Sera") manager.Loops.Reset(Info.Id);
 		if(message.FromId is { } fromId && manager.Get(fromId) is { } sender)
 			manager.LogAgentMessage(new AgentMessage(DateTimeOffset.UtcNow, fromId, sender.Info.Name, Info.Id, Info.Name,
 				Info.ProjectId ?? sender.Info.ProjectId, message.Mode, message.Text, message.Reason));
+		bool reopened = false;
 		lock(gate) {
+			if(Info.Closed) {
+				if(message.From == NudgeSender && message.Reason == null) return;
+				// Turn errors, schedule output, answers to old questions, etc. cannot reopen an agent.
+				if(message.Reason == null && (message.From == "Sera" ||
+					(message.FromId != null && message.FromId == Info.ParentId))) {
+					SaveClosed(false);
+					reopened = true;
+				}
+			}
 			inbox.Add(message);
 			if(message.From == "Sera" && (state.NudgeStreak != 0 || state.NudgesStopped))
 				state = state with { NudgeStreak = 0, NudgesStopped = false };
 		}
+		if(reopened) manager.Publish(new { type = "agents" });
 		manager.Publish(new { type = "inbox", agentId = Info.Id, pending = PendingCount });
 		signal.Release();
 	}
@@ -212,7 +254,7 @@ public sealed partial class Agent : IPowerShellOwner {
 	public int PendingCount { get { lock(gate) return inbox.Count; } }
 
 	/// <summary>Stop the current turn. The in-flight model call or tool is cancelled and the agent goes idle.</summary>
-	public void Interrupt() => turnCts?.Cancel();
+	public void Interrupt() { lock(gate) activeTurn?.Cancel(); }
 
 	List<Inbound> Take(Func<Inbound, bool> which) {
 		lock(gate) {
@@ -232,70 +274,84 @@ public sealed partial class Agent : IPowerShellOwner {
 		while(!manager.Restart.IsStopping) {
 			try { await signal.WaitAsync(stopping); }
 			catch(OperationCanceledException) when(stopping.IsCancellationRequested) { return; }
-			string? reason;
+			using var operation = manager.Restart.Enter();
+			if(operation == null) return;
+			string reason;
+			Turn turn;
 			lock(gate) {
+				if(Info.Closed || (resumeReason == null && inbox.Count == 0)) continue;
 				var reasons = inbox.Select(m => m.Reason ?? (m.From == NudgeSender ? "nudge" : "message")).Distinct().ToList();
-				reason = resumeReason ?? reasons.Count switch { 0 => null, 1 => reasons[0], _ => "message" };
+				reason = resumeReason ?? (reasons.Count == 1 ? reasons[0] : "message");
 				resumeReason = null;
+				activeTurn = turn = new Turn();
 			}
-			if(reason == null) continue;
-			using var turn = manager.Restart.Enter();
-			if(turn == null) return;
 			try {
-				await WaitWhilePaused(stopping);
-				manager.Restart.ThrowIfStopping();
-				await RunTurn(reason);
+				await RunTurn(reason, turn);
 			} catch(OperationCanceledException) when(manager.Restart.IsStopping) {
 				// Leave the Wake and any unanswered calls for Recover, not the Sera interrupt path.
 				return;
-			} catch(Exception e) {
-				FailTurn(e);
+			} finally {
+				lock(gate) activeTurn = null;
+				await turn.Cancelled.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+				turn.Cancellation.Dispose();
 			}
+			if(PendingCount > 0 && !Info.Closed) signal.Release();
 		}
 	}
 
-	async Task RunTurn(string reason) {
-		using var cts = new CancellationTokenSource();
-		turnCts = cts;
-		using var slots = new TurnSlots(this);
-
-		using var modelCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, manager.Restart.Stopping);
-		using var toolCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, manager.Restart.CancelTools);
+	async Task RunTurn(string reason, Turn turn) {
+		var token = turn.Cancellation.Token;
+		using var slots = new TurnSlots(this, token);
+		using var modelCts = CancellationTokenSource.CreateLinkedTokenSource(token, manager.Restart.Stopping);
+		using var toolCts = CancellationTokenSource.CreateLinkedTokenSource(token, manager.Restart.CancelTools);
 		try {
-			SetStatus(AgentStatus.Running);
-			Append(new Entry { Kind = EntryKind.Wake, Reason = reason });
-			NoteMemoryChanges();
-			NoteToolChanges();
-			Deliver(Take(_ => true));
+			await WaitWhilePaused(modelCts.Token);
+			lock(gate) {
+				slots.ThrowIfStopped(modelCts.Token);
+				SetStatus(AgentStatus.Running);
+				Append(new Entry { Kind = EntryKind.Wake, Reason = reason });
+				NoteMemoryChanges();
+				NoteToolChanges();
+				Deliver(Take(_ => true));
+			}
 			var changesAtStart = taskChanges;
 			while(true) {
 				manager.Restart.ThrowIfStopping();
-				var result = await CallModel(slots, modelCts.Token);
-				modelCts.Token.ThrowIfCancellationRequested();
+				var (result, view) = await CallModel(slots, modelCts.Token);
 				var calls = new List<Entry>();
-				foreach(var item in result.Items) {
-					var e = Append(item);
-					if(e.Kind == EntryKind.ToolCall) calls.Add(e);
-				}
+				await CommitModelOutput(slots, modelCts.Token, () => {
+					RecordUsage(result, view);
+					foreach(var item in result.Items) {
+						var e = Append(item);
+						if(e.Kind == EntryKind.ToolCall) calls.Add(e);
+					}
+				});
 				// No tool boundary left in this turn: anything that arrived during the reply wakes a new one.
 				if(calls.Count == 0) break;
 				foreach(var call in calls) {
-					manager.Restart.ThrowIfStopping();
-					await RunTool(call, toolCts.Token);
+					await RunTool(call, slots, toolCts.Token);
 				}
-				Deliver(Take(m => m.Mode == SendMode.Immediate));
+				lock(gate) {
+					slots.ThrowIfStopped(modelCts.Token);
+					Deliver(Take(m => m.Mode == SendMode.Immediate));
+				}
 			}
-			Append(new Entry { Kind = EntryKind.Idle });
-			SetStatus(AgentStatus.Idle);
+			lock(gate) {
+				slots.ThrowIfStopped(modelCts.Token);
+				Append(new Entry { Kind = EntryKind.Idle });
+				SetStatus(AgentStatus.Idle);
+				activeTurn = null;
+			}
 			MaybeNudge(changesAtStart);
-		} catch(OperationCanceledException) when(cts.IsCancellationRequested && !manager.Restart.IsStopping) {
-			AnswerDanglingCalls("Interrupted by Sera before this finished.");
+		} catch(OperationCanceledException) when(manager.Restart.IsStopping) {
+			throw;
+		} catch(Exception) when(token.IsCancellationRequested && !manager.Restart.IsStopping) {
+			AnswerDanglingCalls(turn.Closed ? "Cancelled because the agent was closed. Check for partial effects before retrying." : "Interrupted by Sera before this finished.");
 			Append(new Entry { Kind = EntryKind.Idle, Reason = "interrupted" });
-			SetStatus(AgentStatus.Idle, "Interrupted");
-		} finally {
-			turnCts = null;
+			SetStatus(AgentStatus.Idle, turn.Closed ? "Closed" : "Interrupted");
+		} catch(Exception e) {
+			FailTurn(e);
 		}
-		if(PendingCount > 0) signal.Release();
 	}
 
 	public const string NudgeSender = "Marten";
@@ -357,25 +413,41 @@ public sealed partial class Agent : IPowerShellOwner {
 		SaveState();
 	}
 
-	async Task RunTool(Entry call, CancellationToken ct) {
-		manager.Publish(new { type = "tool_start", agentId = Info.Id, callId = call.CallId, name = call.Name });
+	async Task RunTool(Entry call, TurnSlots slots, CancellationToken ct) {
+		async Task Admit() {
+			while(true) {
+				await slots.EnsureAgent(ct);
+				lock(gate) {
+					slots.ThrowIfStopped(ct);
+					manager.Restart.ThrowIfStopping();
+					if(IsPaused) continue;
+					return;
+				}
+			}
+		}
 		ToolOutput output;
+		await Admit();
+		manager.Publish(new { type = "tool_start", agentId = Info.Id, callId = call.CallId, name = call.Name });
 		TakeViewedImages();
+		toolTurn.Value = slots.TurnToken;
 		try {
-			output = await manager.Tools.InvokeAsync(this, call.Name ?? "", call.Arguments, ct);
-		} catch(OperationCanceledException) when(ct.IsCancellationRequested) {
+			output = await manager.Tools.InvokeAsync(this, call.Name ?? "", call.Arguments, ct, Admit);
+		} catch(OperationCanceledException) when(ct.IsCancellationRequested || slots.TurnToken.IsCancellationRequested || manager.Restart.IsStopping) {
 			throw;
 		} catch(Exception e) {
 			output = ToolOutput.Error($"Tool crashed: {e.GetType().Name}: {e.Message}");
+		} finally {
+			toolTurn.Value = default;
 		}
-		manager.Restart.CancelTools.ThrowIfCancellationRequested();
-		ct.ThrowIfCancellationRequested();
-		var (text, full) = Truncate(call.CallId ?? Guid.NewGuid().ToString("N"), output.Text);
-		List<ImageRef> images = [.. output.Images ?? [], .. TakeViewedImages()];
-		Append(new Entry {
-			Kind = EntryKind.ToolResult, CallId = call.CallId, Name = call.Name, Text = text,
-			IsError = output.IsError ? true : null, FullOutput = full, Images = images.Count > 0 ? images : null,
-		});
+		lock(gate) {
+			slots.ThrowIfStopped(ct);
+			var (text, full) = Truncate(call.CallId ?? Guid.NewGuid().ToString("N"), output.Text);
+			List<ImageRef> images = [.. output.Images ?? [], .. TakeViewedImages()];
+			Append(new Entry {
+				Kind = EntryKind.ToolResult, CallId = call.CallId, Name = call.Name, Text = text,
+				IsError = output.IsError ? true : null, FullOutput = full, Images = images.Count > 0 ? images : null,
+			});
+		}
 	}
 
 	/// <summary>Truncate an oversized result on arrival, keeping its head and tail and saving the full text.</summary>
@@ -392,7 +464,26 @@ public sealed partial class Agent : IPowerShellOwner {
 		return (head + note + tail, Path.GetRelativePath(Directory, path));
 	}
 
-	async Task<ModelResult> CallModel(TurnSlots slots, CancellationToken ct) {
+	// A completion's model lease has already been returned. Don't retain the agent lease
+	// while its reply is buffered; close must still invalidate this turn before commit.
+	async Task CommitModelOutput(TurnSlots slots, CancellationToken ct, Action commit) {
+		bool yielded = false;
+		while(true) {
+			lock(gate) {
+				slots.ThrowIfStopped(ct);
+				if(!IsPaused) {
+					if(yielded) SetStatus(AgentStatus.Running);
+					commit();
+					return;
+				}
+			}
+			slots.ReleaseAgent();
+			yielded = true;
+			await WaitWhilePaused(ct);
+		}
+	}
+
+	async Task<(ModelResult Result, List<Entry> View)> CallModel(TurnSlots slots, CancellationToken ct) {
 		var transientFailures = 0;
 		var quotaWait = TimeSpan.FromSeconds(30);
 		var recoveringOverflow = false;
@@ -413,13 +504,12 @@ public sealed partial class Agent : IPowerShellOwner {
 				SetStatus(AgentStatus.Running);
 				var result = await slots.Complete(request, ModelCallKind.Reply,
 					delta => manager.Publish(new { type = "delta", agentId = Info.Id, text = delta }), null, ct);
-				RecordUsage(result, view);
 				// Keep each call's usage in the log, on its last item.
 				if(result.Usage != null && result.Items.Count > 0)
 					result = result with { Items = [.. result.Items.SkipLast(1), result.Items[^1] with { Usage = result.Usage }] };
-				return result;
-			} catch(Exception) when(ct.IsCancellationRequested) {
-				ct.ThrowIfCancellationRequested();
+				return (result, view);
+			} catch(Exception) when(ct.IsCancellationRequested || slots.TurnToken.IsCancellationRequested) {
+				slots.ThrowIfStopped(ct);
 				throw;
 			} catch(ContextFullException) when(!recoveringOverflow) {
 				// Keep the forced compaction inside the retry loop, including its own quota/transient failures.

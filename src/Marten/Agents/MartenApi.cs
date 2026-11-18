@@ -6,7 +6,8 @@ using Marten.Tools;
 namespace Marten.Agents;
 
 /// <summary>The $Marten object in every runspace: the runtime, as seen by one agent.</summary>
-public sealed class MartenApi(Agent agent, AgentManager manager, CancellationToken runCancellation = default) {
+public sealed class MartenApi(Agent agent, AgentManager manager, CancellationToken runCancellation = default,
+	CancellationToken turnCancellation = default, bool manualReplay = false) {
 	bool insideSlot;
 	public string[] Slots => manager.Resources.Names;
 	public string AgentId => agent.Info.Id;
@@ -58,11 +59,19 @@ public sealed class MartenApi(Agent agent, AgentManager manager, CancellationTok
 
 	/// <summary>Call any Marten tool by name. Arguments are plain data; failures throw so PowerShell reports them.</summary>
 	public string CallTool(string name, IDictionary? arguments) {
+		void Admit() {
+			if(manualReplay) runCancellation.ThrowIfCancellationRequested();
+			else agent.CheckNestedTool(turnCancellation, runCancellation);
+		}
+		Admit();
 		var tool = manager.Tools.Find(agent, name) ?? throw new ArgumentException($"Unknown tool: {name}");
 		if(tool.PowerShellBody != null) throw new InvalidOperationException($"{name} runs inline in PowerShell; call it as a function: {name} -param value.");
 		if(!tool.CallableFromPowerShell) throw new InvalidOperationException($"{name} can't be called from PowerShell.");
 		var args = StateJson.FromPowerShell(arguments ?? new Hashtable(), "arguments")?.ToJsonString() ?? "{}";
-		var result = manager.Tools.InvokeAsync(agent, name, args, runCancellation).GetAwaiter().GetResult();
+		var result = manager.Tools.InvokeAsync(agent, name, args, runCancellation, () => {
+			Admit();
+			return Task.CompletedTask;
+		}).GetAwaiter().GetResult();
 		if(result.IsError) throw new InvalidOperationException(result.Text);
 		return result.Text;
 	}

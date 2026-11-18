@@ -73,7 +73,7 @@ public sealed partial class Agent {
 		public ToolRegistry Tools => agent.Tools;
 		public JsonNode? PowerShellState { get; set; } = cell.StateIn?.DeepClone();
 		public object MartenObject => agent.MartenObject;
-		public object MartenObjectForRun(CancellationToken ct) => agent.MartenObjectForRun(ct);
+		public object MartenObjectForRun(CancellationToken ct) => new MartenApi(agent, agent.manager, ct, manualReplay: true);
 		public void RunspaceAbandoned(string command) => agent.RunspaceAbandoned(command);
 		public NotebookCell? Recorded { get; private set; }
 		public void RecordCell(NotebookCell run) => Recorded = run;

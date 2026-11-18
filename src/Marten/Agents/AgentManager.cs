@@ -70,7 +70,8 @@ public sealed class AgentManager {
 	readonly object pauseGate = new();
 	TaskCompletionSource pauseTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-	public bool PausedAll { get; private set; }
+	volatile bool pausedAll;
+	public bool PausedAll { get => pausedAll; private set => pausedAll = value; }
 
 	/// <summary>Completes at the next pause or resume anywhere; agents holding on a pause wait on it.</summary>
 	public Task PauseSignal { get { lock(pauseGate) return pauseTcs.Task; } }

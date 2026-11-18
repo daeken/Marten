@@ -35,7 +35,7 @@ public class PauseTests {
 	}
 
 	[Fact]
-	public async Task PausingMidTurnLetsTheToolFinishThenHoldsBeforeTheNextModelCall() {
+	public async Task PausingDuringTheModelHoldsBeforeTheFirstTool() {
 		using var dir = new TempDir();
 		File.WriteAllText(dir.File("f.txt"), "content\n");
 		var backend = new FakeBackend { Gate = new() };
@@ -47,7 +47,7 @@ public class PauseTests {
 		agent.SetPaused(true);
 		backend.Gate.SetResult();
 		await Wait.Until(() => agent.Status == AgentStatus.Paused);
-		Assert.Equal(EntryKind.ToolResult, agent.Transcript.Last!.Kind);
+		Assert.DoesNotContain(agent.Transcript.Entries, e => e.Kind is EntryKind.ToolCall or EntryKind.ToolResult);
 		Assert.Single(backend.Requests);
 
 		agent.SetPaused(false);
