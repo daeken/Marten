@@ -37,6 +37,49 @@ Marten is project-centric: each project has one orchestrator, which spins up tas
 - **Shared tree by default.** Worktrees are supported as a per-spawn option, and the default is a project setting. Orchestrator rule: concurrent writers get worktrees.
 - **Finished task agents stay around.** Once one is marked closed (term not final), only its orchestrator can wake it, and can do so at any time.
 
+## Project memory
+
+Each project has one shared memory that every agent in it reads, and it survives every compaction. It holds what an agent would otherwise have to ask Sera again.
+
+- **One file.** The memory is `MEMORY.md` in the project's place in `~/.marten`. It is a Markdown list, and each entry is one line.
+- **Always in context.** The memory is injected after the project prompt in every agent's system prompt. Compaction and elision never touch it.
+- **A size cap.** The cap is set in config, around 16 KB. An edit that would go past it fails loudly, so an agent has to prune before it can add. Without a cap, memory turns into a second transcript.
+- **Edited with the atomic file editor.** Agents use the same anchored edits as on any file, so two agents can't overwrite each other. The edit fails if memory changed since the agent last saw it, and the agent re-reads and tries again. There is no whole-file replace.
+- **Fresh at each turn.** An edit becomes visible to other agents at the start of their next turn, not mid-turn. This keeps prompt caching intact.
+- **Committed at once.** Each edit is its own commit, made by the agent that edited it, with the agent's id and reason in the message. `git log -p MEMORY.md` is the audit trail.
+
+### Entry shape
+
+An entry leads with a short CAPS tag, then says what it is about, and cites its source when Sera said it:
+
+```
+- WINE PAUSED (Sera, 2026-11-18 02:54Z, msg_…): stop running DA:O in Wine until she says go.
+```
+
+- **Sera's words are cited.** An entry that records something Sera decided carries the time and the message id, and quotes her where the wording matters. Agents treat cited entries as Sera's standing rules and uncited entries as notes.
+- **Only orchestrators and Sera delete cited entries.** A task agent may add a cited entry, or edit an uncited one, but only an orchestrator or Sera may remove a cited one. Removing one tells Sera through the UI.
+- **Pointers, not payloads.** Long material lives in files in the bound repo or in `~/.marten`, and memory links to them, for example "Merge rule: see CLAUDE.md" or "Accepted parity list: docs/ACCEPTED.md".
+
+### Suggested sections
+
+These are conventions for the project prompt, not enforced by the runtime:
+
+1. **Standing asks and north star.** Sera's goal for the project and how continuously to work.
+2. **Rules.** Hard constraints, such as forbidden code, secrets, the merge rule and machine etiquette.
+3. **Roster.** Each long-lived task agent, what it owns and what it may do, such as merge or post externally.
+4. **Live state.** What's pinned, deployed or parked right now, and what waits on Sera.
+5. **Settled.** Things that were decided or accepted, so nobody re-files them.
+
+### Agent notes
+
+Beside the shared memory, each task agent keeps a `NOTES.md` in its own state. It is injected only into that agent's context and also survives compaction. It holds the agent's working knowledge: traces, open leads, how its tools behave. When a fact matters beyond one agent, the agent promotes it to the shared memory.
+
+### Not day 0
+
+- Structured or queryable memory, embeddings or search.
+- Locking finer than one file.
+- Memory shared across projects. Facts about Sera that hold in every project go in the Marten-wide prompt.
+
 ## PowerShell and tools
 
 PowerShell is embedded in-process and is the default way agents act on the world.
@@ -144,6 +187,7 @@ The UI is how Sera watches and steers the system, so it has to show everything t
 - Each agent's task list, with blocked tasks and their reasons.
 - An abandoned runspace, and an agent whose nudges have stopped.
 - Background processes, and which agent owns each.
+- Each project's memory, with its history and who changed each line.
 
 **Lets Sera**
 
