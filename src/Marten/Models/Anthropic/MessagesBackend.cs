@@ -50,7 +50,7 @@ public sealed record MessagesProvider {
 
 /// <summary>An Anthropic Messages API backend. Stateless: the full history goes up each call, streamed back.</summary>
 /// <param name="extraModels">Models Sera added in config for this provider, listed first.</param>
-public sealed class MessagesBackend(MessagesProvider provider, Home home, Func<string, IReadOnlyList<string>>? extraModels = null) : IModelBackend {
+public sealed class MessagesBackend(MessagesProvider provider, Home home, Func<string, IReadOnlyList<string>>? extraModels = null, HttpClient? modelHttp = null) : IModelBackend {
 	IReadOnlyList<string>? liveModels;
 	DateTimeOffset liveModelsAt;
 
@@ -83,7 +83,11 @@ public sealed class MessagesBackend(MessagesProvider provider, Home home, Func<s
 		// Set every credential explicitly, so an ANTHROPIC_* variable in the environment never reaches another provider.
 		var client = provider.Bearer ? new AnthropicClient { ApiKey = null, AuthToken = key } : new AnthropicClient { ApiKey = key, AuthToken = null };
 		// Marten's own loop retries with backoff and shows the wait; the SDK shouldn't retry underneath it.
-		return client.WithOptions(o => o with { BaseUrl = provider.BaseUrl ?? o.BaseUrl, MaxRetries = 0, Timeout = TimeSpan.FromMinutes(30) });
+		// The injected transport sets phase-specific deadlines; neither the SDK nor HttpClient sets a total timeout.
+		return client.WithOptions(o => o with {
+			BaseUrl = provider.BaseUrl ?? o.BaseUrl, MaxRetries = 0, Timeout = Timeout.InfiniteTimeSpan,
+			HttpClient = modelHttp ?? ModelHttp.DefaultClient,
+		});
 	}
 
 	/// <summary>

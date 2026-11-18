@@ -19,7 +19,7 @@ public sealed class ResponsesBackend(ChatGptAuth auth, HttpClient http) : IModel
 
 	async Task<HttpResponseMessage> SendAsync(Func<HttpRequestMessage> build, CancellationToken ct) {
 		for(var attempt = 0; ; attempt++) {
-			var request = build();
+			using var request = build();
 			request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await auth.TokenAsync(attempt == 1, ct));
 			HttpResponseMessage response;
 			try {
@@ -42,7 +42,7 @@ public sealed class ResponsesBackend(ChatGptAuth auth, HttpClient http) : IModel
 		try {
 			var body = JsonNode.Parse(await response.Content.ReadAsStringAsync(ct));
 			code = body?["error"]?["code"]?.GetValue<string>() ?? body?["error"]?["type"]?.GetValue<string>();
-		} catch { }
+		} catch(Exception e) when(e is not OperationCanceledException and not TransientModelException) { }
 		if(status == 413 || (code != null && ContextCodes.Contains(code))) return new ContextFullException();
 		if(status == 429 || (code != null && QuotaCodes.Contains(code)))
 			return new RateLimitedException($"ChatGPT usage limit reached ({code ?? "429"}).", response.Headers.RetryAfter?.Delta);

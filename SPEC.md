@@ -179,6 +179,7 @@ Four model backends are supported, and model choice is a setting rather than som
 - **Who sets model and effort.** An agent can change its own when asked. An orchestrator can change them for its task agents.
 - **Defaults and exceptions** live in config and belong to Sera. Agents do not weigh cost or context windows.
 - **Rate limits.** When a backend refuses a request or a subscription quota runs out, the agent waits and retries. It does not fail or switch models. This is a default Sera can adjust.
+- **Model HTTP timeouts.** Every backend allows 30 seconds to establish a connection and 120 seconds per request to receive response headers. While reading the body, `modelIdleTimeoutSeconds` (default 300) bounds the wait for the next bytes, not the next SSE event. There is no total stream deadline. These deadlines are transient failures handled by the agent's retry loop; stopping a turn remains user cancellation.
 - **MCP is stdio only.** No OAuth and no external services.
 - **MCP is lazy, per agent.** A server is started once to read and cache its schema. It is launched for real only when an agent first calls one of its tools.
 

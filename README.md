@@ -25,6 +25,8 @@ State lives in `~/.marten` (override with `MARTEN_HOME`):
 | `inbox.jsonl` | Messages agents sent to Sera |
 | `prompts/*.md.default` | The shipped default each prompt came from; prompts you haven't edited are upgraded with Marten |
 
+Model API calls allow up to 30 seconds to connect and 120 seconds to receive response headers. Set `"modelIdleTimeoutSeconds": 300` in `config.json` to adjust how long a response can go without delivering bytes (300 seconds by default; nonpositive values use the default). A stream that keeps delivering bytes has no total time limit.
+
 Agents outside Marten (e.g. Claude Code sessions) can create projects and message agents with a client token: see [docs/outside-agents.md](docs/outside-agents.md) and `scripts/marten-ext`.
 
 ## As an app (desktop and phone)

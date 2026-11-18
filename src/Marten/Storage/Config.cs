@@ -8,6 +8,8 @@ public sealed record Config {
 	public string? Effort { get; init; }
 	public int Port { get; init; } = 7450;
 	public int CommandTimeoutSeconds { get; init; } = 120;
+	/// <summary>How long to wait for the next bytes of a model response, not for the whole response.</summary>
+	public int ModelIdleTimeoutSeconds { get; init; } = Marten.Models.ModelHttp.DefaultIdleTimeoutSeconds;
 	/// <summary>How long a stopped pipeline gets to return before its runspace is abandoned.</summary>
 	public int StopGraceSeconds { get; init; } = 5;
 	/// <summary>Tool results longer than this are truncated on arrival, with a pointer to the full text.</summary>

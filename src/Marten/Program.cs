@@ -18,7 +18,7 @@ if(args is ["backup", ..]) {
 	return;
 }
 if(args is ["client", "add" or "rotate", var clientName, ..]) {
-	var m = new AgentManager(home, config, new BackendRouter(new ResponsesBackend(new ChatGptAuth(home, new HttpClient()), new HttpClient()), [], null), new ToolRegistry());
+	var m = new AgentManager(home, config, new BackendRouter(new ResponsesBackend(new ChatGptAuth(home, new HttpClient()), ModelHttp.DefaultClient), [], null), new ToolRegistry());
 	var c = m.Outside.Register(clientName, rotate: args[1] == "rotate");
 	Console.WriteLine($"Client {c.Name}: token in {m.Outside.TokenPath(c.Name)}");
 	return;
@@ -34,10 +34,12 @@ if(args is ["restore", var archive, ..]) {
 var http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
 http.DefaultRequestHeaders.UserAgent.ParseAdd("Marten/0.1");
 var auth = new ChatGptAuth(home, http);
+using var modelHttp = ModelHttp.CreateClient(() => (managerRef?.Config ?? config).ModelIdleTimeoutSeconds);
+modelHttp.DefaultRequestHeaders.UserAgent.ParseAdd("Marten/0.1");
 var messagesBackends = MessagesProvider.All.Select(p => new MessagesBackend(p, home,
-	name => managerRef?.Config.Models.GetValueOrDefault(name) ?? [])).ToList();
+	name => managerRef?.Config.Models.GetValueOrDefault(name) ?? [], modelHttp)).ToList();
 var ledger = new UsageLedger(home, () => managerRef?.Config ?? config);
-var backend = new BackendRouter(new ResponsesBackend(auth, http), messagesBackends.Select(b => ((IModelBackend) b, b.Settings.Prefixes)).ToList(), ledger);
+var backend = new BackendRouter(new ResponsesBackend(auth, modelHttp), messagesBackends.Select(b => ((IModelBackend) b, b.Settings.Prefixes)).ToList(), ledger);
 Func<AgentManager> getManager = () => managerRef!;
 var childWatcher = new ChildProcessWatcher();
 var scriptTools = new ScriptToolSource(getManager);
