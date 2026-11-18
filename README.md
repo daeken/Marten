@@ -11,7 +11,7 @@ Needs the .NET 10 SDK and Node 20+.
 dotnet run --project src/Marten
 ```
 
-Marten prints a URL like `http://127.0.0.1:7450/#token=…`. Open it once; the page keeps the token. Click **Connect ChatGPT** to sign in with your subscription, then start a chat, or create a project (from the sidebar, or by asking a chat agent) and talk to its orchestrator.
+Marten prints a URL like `http://127.0.0.1:7450/` without the UI token, even when output goes to a terminal. On first use, open the URL and paste the token from `~/.marten/secrets/ui-token` (or `secrets/ui-token` under `MARTEN_HOME`) into the page. It remembers the token for that origin. Older startup logs may still contain the token; protect those logs and treat the old token as exposed if anyone else had access. Click **Connect ChatGPT** to sign in with your subscription, then start a chat, or create a project (from the sidebar, or by asking a chat agent) and talk to its orchestrator.
 
 State lives in `~/.marten` (override with `MARTEN_HOME`):
 
@@ -35,7 +35,7 @@ Marten's UI is an installable web app.
 - **Phone:** Marten listens only on 127.0.0.1, so reach it through an HTTPS proxy on the Mac. [Tailscale](https://tailscale.com) is the easy one:
   1. On the Mac, run `tailscale serve --bg 7450`. It prints a URL like `https://your-mac.your-tailnet.ts.net`.
   2. Add `"remoteHosts": ["your-mac.your-tailnet.ts.net"]` to `~/.marten/config.json` and restart Marten.
-  3. On the phone, which must be on the same tailnet, open that URL. Paste the printed link or the token from `~/.marten/secrets/ui-token` into the box, then use **Add to Home Screen**.
+  3. On the phone, which must be on the same tailnet, open that URL. Paste the token from `~/.marten/secrets/ui-token` into the box, then use **Add to Home Screen**.
 
   `remoteHosts` only tells Marten to accept requests carrying that name. The API still needs the token, and nothing is exposed beyond your tailnet.
 
