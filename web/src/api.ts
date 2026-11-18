@@ -58,6 +58,8 @@ export interface BackgroundProcess {
   state: 'running' | 'exited' | 'stopped';
 }
 
+export interface ScriptToolInfo { name: string; scope: 'global' | 'project'; path: string; script: string; description?: string; error?: string; modified: string }
+
 export interface TaskItem {
   id: number;
   title: string;
@@ -109,6 +111,7 @@ export type ServerEvent =
   | { type: 'tasks'; agentId: string }
   | { type: 'schedules'; agentId: string }
   | { type: 'processes'; agentId: string }
+  | { type: 'tools' }
   | { type: 'memory'; projectId: string }
   | { type: 'sera_message'; message: SeraMessage }
   | { type: 'config' };
@@ -163,6 +166,7 @@ export class Api {
     const res = await fetch(`/api/agents/${id}/processes/${n}/log?lines=${lines}`, { headers: { Authorization: `Bearer ${this.token}` } });
     return res.ok ? res.text() : '';
   };
+  scriptTools = (projectId?: string) => this.call<ScriptToolInfo[]>('GET', `/tools${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`);
   removeSchedule = (id: string, scheduleId: number) => this.call<void>('DELETE', `/agents/${id}/schedules/${scheduleId}`);
   createProject = (p: { name: string; bindings: string[]; prompt: string | null; worktreesByDefault: boolean; brief: string | null }) =>
     this.call<Project>('POST', '/projects', p);

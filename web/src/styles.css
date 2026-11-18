@@ -206,3 +206,4 @@ button.small { padding: 2px 8px; font-size: 12px; }
 .proc .link { margin-left: 4px; }
 .doc.wide { max-width: 1000px; }
 .log-tail { max-height: 420px; overflow: auto; font-size: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px; white-space: pre-wrap; }
+.tool-def { margin: 6px 0; } .tool-def summary { cursor: pointer; }

@@ -25,25 +25,49 @@ public interface ITool {
 	bool CallableFromPowerShell => true;
 	/// <summary>Whether this agent gets the tool at all, e.g. spawning is for orchestrators only.</summary>
 	bool AvailableTo(IToolContext ctx) => true;
+	/// <summary>Script to define the tool's PowerShell function inline, instead of a call back through $Marten.</summary>
+	string? PowerShellBody => null;
 	Task<ToolOutput> InvokeAsync(IToolContext ctx, JsonObject args, CancellationToken ct);
+}
+
+/// <summary>Tools that come and go at runtime: tools agents write, MCP servers' tools.</summary>
+public interface IToolSource {
+	IEnumerable<ITool> ToolsFor(IToolContext ctx);
 }
 
 public sealed class ToolRegistry {
 	readonly Dictionary<string, ITool> tools = new();
+	readonly List<IToolSource> sources = new();
 
 	public ToolRegistry Add(ITool tool) {
 		tools[tool.Name] = tool;
 		return this;
 	}
 
+	public ToolRegistry AddSource(IToolSource source) {
+		sources.Add(source);
+		return this;
+	}
+
 	public IEnumerable<ITool> All => tools.Values;
+	/// <summary>A built-in tool by name.</summary>
 	public ITool? Get(string name) => tools.GetValueOrDefault(name);
-	public IReadOnlyList<ToolSpec> Specs => tools.Values.Select(t => new ToolSpec(t.Name, t.Description, t.Parameters)).ToList();
-	public IEnumerable<ITool> For(IToolContext ctx) => tools.Values.Where(t => t.AvailableTo(ctx));
-	public IReadOnlyList<ToolSpec> SpecsFor(IToolContext ctx) => For(ctx).Select(t => new ToolSpec(t.Name, t.Description, t.Parameters)).ToList();
+	public bool IsBuiltIn(string name) => tools.ContainsKey(name);
+	public IReadOnlyList<ToolSpec> Specs => tools.Values.Select(Spec).ToList();
+	public static ToolSpec Spec(ITool t) => new(t.Name, t.Description, t.Parameters);
+
+	/// <summary>Built-in tools first; a dynamic tool never shadows one.</summary>
+	public IEnumerable<ITool> For(IToolContext ctx) =>
+		tools.Values.Where(t => t.AvailableTo(ctx))
+			.Concat(sources.SelectMany(s => s.ToolsFor(ctx)).Where(t => !tools.ContainsKey(t.Name)).DistinctBy(t => t.Name));
+	public IEnumerable<ITool> DynamicFor(IToolContext ctx) => For(ctx).Where(t => !tools.ContainsKey(t.Name));
+	public ITool? Find(IToolContext ctx, string name) =>
+		tools.TryGetValue(name, out var t) ? (t.AvailableTo(ctx) ? t : null) : DynamicFor(ctx).FirstOrDefault(d => d.Name == name);
+	public IReadOnlyList<ToolSpec> SpecsFor(IToolContext ctx) => For(ctx).Select(Spec).ToList();
+	public IReadOnlyList<ToolSpec> BuiltInSpecsFor(IToolContext ctx) => tools.Values.Where(t => t.AvailableTo(ctx)).Select(Spec).ToList();
 
 	public async Task<ToolOutput> InvokeAsync(IToolContext ctx, string name, string? arguments, CancellationToken ct) {
-		if(Get(name) is not { } tool || !tool.AvailableTo(ctx)) return ToolOutput.Error($"Unknown tool: {name}");
+		if(Find(ctx, name) is not { } tool) return ToolOutput.Error($"Unknown tool: {name}");
 		JsonObject args;
 		try {
 			args = JsonNode.Parse(string.IsNullOrWhiteSpace(arguments) ? "{}" : arguments) as JsonObject

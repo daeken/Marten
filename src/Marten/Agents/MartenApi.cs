@@ -21,7 +21,8 @@ public sealed class MartenApi(Agent agent, AgentManager manager) {
 
 	/// <summary>Call any Marten tool by name. Arguments are plain data; failures throw so PowerShell reports them.</summary>
 	public string CallTool(string name, IDictionary? arguments) {
-		var tool = manager.Tools.Get(name) is { } t && t.AvailableTo(agent) ? t : throw new ArgumentException($"Unknown tool: {name}");
+		var tool = manager.Tools.Find(agent, name) ?? throw new ArgumentException($"Unknown tool: {name}");
+		if(tool.PowerShellBody != null) throw new InvalidOperationException($"{name} runs inline in PowerShell; call it as a function: {name} -param value.");
 		if(!tool.CallableFromPowerShell) throw new InvalidOperationException($"{name} can't be called from PowerShell.");
 		var args = StateJson.FromPowerShell(arguments ?? new Hashtable(), "arguments")?.ToJsonString() ?? "{}";
 		var result = manager.Tools.InvokeAsync(agent, name, args, CancellationToken.None).GetAwaiter().GetResult();
