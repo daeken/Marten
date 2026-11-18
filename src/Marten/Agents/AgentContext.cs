@@ -137,7 +137,10 @@ public sealed partial class Agent {
 		var request = new ModelRequest(model, Info.Effort ?? manager.Config.Effort, Instructions,
 			[.. prefix, new Entry { Kind = EntryKind.Message, From = NudgeSender, Text = ask }],
 			RequestTools(), CacheKey: $"marten:{Info.Id}");
+		manager.Restart.ThrowIfStopping();
+		ct.ThrowIfCancellationRequested();
 		var result = await manager.Backend.CompleteAsync(request, _ => { }, ct);
+		ct.ThrowIfCancellationRequested();
 		var summary = string.Join("\n\n", result.Items.Where(i => i.Kind == EntryKind.Assistant && !string.IsNullOrWhiteSpace(i.Text)).Select(i => i.Text));
 		if(summary.Length == 0) throw new InvalidOperationException("Compaction produced no summary.");
 		var upTo = cut < view.Count ? view[cut].Seq - 1 : Transcript.Last!.Seq;

@@ -19,6 +19,7 @@ public sealed record Schedule {
 	public DateTimeOffset? LastRun { get; init; }
 	/// <summary>How the last run went: "output delivered", "no output", "skipped: ...".</summary>
 	public string? LastResult { get; init; }
+	public bool InProgress { get; init; }
 	/// <summary>A one-shot that has run.</summary>
 	public bool Done { get; init; }
 }
@@ -89,6 +90,13 @@ public sealed partial class Agent {
 		manager.Publish(new { type = "schedules", agentId = Info.Id });
 	}
 
+	string RecoverSchedules() {
+		var interrupted = Schedules.Where(s => s.InProgress).ToList();
+		foreach(var s in interrupted)
+			UpdateSchedule(s.Id, x => x with { InProgress = false, LastResult = "interrupted by restart; not re-run" });
+		return interrupted.Count == 0 ? "" : $" Interrupted schedule runs: {string.Join(", ", interrupted.Select(s => $"#{s.Id}"))}.";
+	}
+
 	/// <summary>Whether a message is still in the inbox, undelivered.</summary>
 	internal bool Holds(Inbound message) { lock(gate) return inbox.Contains(message); }
 }
@@ -138,6 +146,7 @@ public sealed class Scheduler(AgentManager manager) {
 	/// <summary>Start every due run. Returns the runs started, so tests can await them.</summary>
 	public List<Task> Tick(DateTimeOffset now) {
 		var started = new List<Task>();
+		if(manager.Restart.IsStopping) return started;
 		foreach(var a in manager.Agents) {
 			foreach(var s in a.Schedules.Where(s => !s.Done && s.NextRun <= now)) {
 				string? skip = a.Info.Closed ? "skipped: agent closed" : a.IsPaused ? "skipped: paused" : Busy(a, s) ? "skipped: previous run still going or undelivered" : null;
@@ -146,8 +155,9 @@ public sealed class Scheduler(AgentManager manager) {
 					if(s.EverySeconds != null) a.UpdateSchedule(s.Id, x => x with { NextRun = Next(x, now), LastResult = skip });
 					continue;
 				}
-				a.UpdateSchedule(s.Id, x => x with { LastRun = now, Done = x.EverySeconds == null, NextRun = x.EverySeconds == null ? x.NextRun : Next(x, now) });
-				var run = Run(a, s);
+				var lease = manager.Restart.Enter();
+				if(lease == null) return started;
+				var run = Run(a, s, now, lease);
 				lock(running) running[(a.Info.Id, s.Id)] = run;
 				started.Add(run);
 			}
@@ -155,17 +165,24 @@ public sealed class Scheduler(AgentManager manager) {
 		return started;
 	}
 
-	async Task Run(Agent a, Schedule s) {
-		if(manager.Tools.Get("powershell") is not PowerShellTool ps) return;
+	async Task Run(Agent a, Schedule s, DateTimeOffset now, IDisposable lease) {
+		using var operation = lease;
+		a.UpdateSchedule(s.Id, x => x with { LastRun = now, InProgress = true, Done = x.EverySeconds == null, NextRun = x.EverySeconds == null ? x.NextRun : Next(x, now) });
+		if(manager.Tools.Get("powershell") is not PowerShellTool ps) {
+			a.UpdateSchedule(s.Id, x => x with { InProgress = false, LastResult = "PowerShell unavailable" });
+			return;
+		}
 		ToolOutput output;
 		try {
-			output = await ps.RunAsync(a, s.Command, TimeSpan.FromSeconds(s.TimeoutSeconds ?? manager.Config.CommandTimeoutSeconds), CancellationToken.None);
+			output = await ps.RunAsync(a, s.Command, TimeSpan.FromSeconds(s.TimeoutSeconds ?? manager.Config.CommandTimeoutSeconds), manager.Restart.CancelTools);
 		} catch(Exception e) {
 			output = ToolOutput.Error($"error: {e.Message}");
 		}
+		// Leave the durable marker for Recover to announce. Even cancelled one-shots are never replayed.
+		if(manager.Restart.CancelTools.IsCancellationRequested) return;
 		var text = output.Text.Trim();
 		if(text.Length == 0 || (text == "[no output]" && !output.IsError)) {
-			a.UpdateSchedule(s.Id, x => x with { LastResult = "no output" });
+			a.UpdateSchedule(s.Id, x => x with { InProgress = false, LastResult = "no output" });
 			return;
 		}
 		var (body, full) = a.Truncate($"schedule-{s.Id}-{DateTime.UtcNow:yyyyMMddHHmmss}", text);
@@ -173,7 +190,7 @@ public sealed class Scheduler(AgentManager manager) {
 		var message = new Inbound(Agent.NudgeSender, $"{label}{(output.IsError ? " failed" : "")}:\n{body}", SendMode.Queued, "schedule");
 		lock(running) waiting[(a.Info.Id, s.Id)] = message;
 		a.Send(message);
-		a.UpdateSchedule(s.Id, x => x with { LastResult = output.IsError ? "error delivered" : "output delivered" });
+		a.UpdateSchedule(s.Id, x => x with { InProgress = false, LastResult = output.IsError ? "error delivered" : "output delivered" });
 	}
 }
 

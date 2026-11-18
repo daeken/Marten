@@ -165,10 +165,13 @@ public sealed partial class Agent : IPowerShellOwner {
 		var entries = Transcript.Entries;
 		var lastWake = entries.LastOrDefault(e => e.Kind == EntryKind.Wake)?.Seq ?? 0;
 		var lastIdle = entries.LastOrDefault(e => e.Kind == EntryKind.Idle)?.Seq ?? 0;
-		if(lastWake > lastIdle) {
-			if(Transcript.Last?.Kind == EntryKind.Assistant) Append(new Entry { Kind = EntryKind.Idle });
-			else resumeReason = "restart";
-		}
+		var interruptedTurn = lastWake > lastIdle && Transcript.Last?.Kind != EntryKind.Assistant;
+		if(lastWake > lastIdle && !interruptedTurn) Append(new Entry { Kind = EntryKind.Idle });
+		var interruptedOperations = RecoverSchedules() + RecoverNotebookReplays();
+		Append(new Entry { Kind = EntryKind.Message, From = NudgeSender, Text =
+			"Marten restarted. Interrupted calls were not re-run. Check logs, files, and external state before retrying; partial effects are possible." +
+			(interruptedTurn ? " Your previous turn was interrupted." : "") + interruptedOperations });
+		if(!Info.Closed && (interruptedTurn || interruptedOperations.Length > 0)) resumeReason = "restart";
 	}
 
 	/// <summary>Every tool call needs a result before the next model call; give unanswered ones an error.</summary>
@@ -230,8 +233,10 @@ public sealed partial class Agent : IPowerShellOwner {
 	}
 
 	async Task Loop() {
-		while(true) {
-			await signal.WaitAsync();
+		var stopping = manager.Restart.Stopping;
+		while(!manager.Restart.IsStopping) {
+			try { await signal.WaitAsync(stopping); }
+			catch(OperationCanceledException) when(stopping.IsCancellationRequested) { return; }
 			string? reason;
 			lock(gate) {
 				var reasons = inbox.Select(m => m.Reason ?? (m.From == NudgeSender ? "nudge" : "message")).Distinct().ToList();
@@ -239,9 +244,15 @@ public sealed partial class Agent : IPowerShellOwner {
 				resumeReason = null;
 			}
 			if(reason == null) continue;
-			await WaitWhilePaused(CancellationToken.None);
+			using var turn = manager.Restart.Enter();
+			if(turn == null) return;
 			try {
+				await WaitWhilePaused(stopping);
+				manager.Restart.ThrowIfStopping();
 				await RunTurn(reason);
+			} catch(OperationCanceledException) when(manager.Restart.IsStopping) {
+				// Leave the Wake and any unanswered calls for Recover, not the Sera interrupt path.
+				return;
 			} catch(Exception e) {
 				Append(new Entry { Kind = EntryKind.Error, Text = $"Turn failed: {e.Message}" });
 				Append(new Entry { Kind = EntryKind.Idle });
@@ -253,6 +264,8 @@ public sealed partial class Agent : IPowerShellOwner {
 	async Task RunTurn(string reason) {
 		using var cts = new CancellationTokenSource();
 		turnCts = cts;
+		using var modelCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, manager.Restart.Stopping);
+		using var toolCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, manager.Restart.CancelTools);
 		try {
 			SetStatus(AgentStatus.Running);
 			Append(new Entry { Kind = EntryKind.Wake, Reason = reason });
@@ -262,8 +275,10 @@ public sealed partial class Agent : IPowerShellOwner {
 			var changesAtStart = taskChanges;
 			var failed = false;
 			while(true) {
-				await WaitWhilePaused(cts.Token);
-				var result = await CallModel(cts.Token);
+				manager.Restart.ThrowIfStopping();
+				await WaitWhilePaused(modelCts.Token);
+				var result = await CallModel(modelCts.Token);
+				modelCts.Token.ThrowIfCancellationRequested();
 				if(result == null) {
 					failed = true;
 					break;
@@ -275,7 +290,10 @@ public sealed partial class Agent : IPowerShellOwner {
 				}
 				// No tool boundary left in this turn: anything that arrived during the reply wakes a new one.
 				if(calls.Count == 0) break;
-				foreach(var call in calls) await RunTool(call, cts.Token);
+				foreach(var call in calls) {
+					manager.Restart.ThrowIfStopping();
+					await RunTool(call, toolCts.Token);
+				}
 				Deliver(Take(m => m.Mode == SendMode.Immediate));
 			}
 			Append(new Entry { Kind = EntryKind.Idle });
@@ -283,7 +301,7 @@ public sealed partial class Agent : IPowerShellOwner {
 				SetStatus(AgentStatus.Idle);
 				MaybeNudge(changesAtStart);
 			}
-		} catch(OperationCanceledException) when(cts.IsCancellationRequested) {
+		} catch(OperationCanceledException) when(cts.IsCancellationRequested && !manager.Restart.IsStopping) {
 			AnswerDanglingCalls("Interrupted by Sera before this finished.");
 			Append(new Entry { Kind = EntryKind.Idle, Reason = "interrupted" });
 			SetStatus(AgentStatus.Idle, "Interrupted");
@@ -300,7 +318,7 @@ public sealed partial class Agent : IPowerShellOwner {
 	/// task changing state, nudging stops and the agent is flagged. Closed agents are never nudged.
 	/// </summary>
 	void MaybeNudge(int changesAtStart) {
-		if(Info.Closed || IsPaused || PendingCount > 0) return;
+		if(manager.Restart.IsStopping || Info.Closed || IsPaused || PendingCount > 0) return;
 		var open = Tasks.Where(t => t.State == TaskState.Open).ToList();
 		if(open.Count == 0) return;
 		bool stop;
@@ -361,6 +379,7 @@ public sealed partial class Agent : IPowerShellOwner {
 		} catch(Exception e) {
 			output = ToolOutput.Error($"Tool crashed: {e.GetType().Name}: {e.Message}");
 		}
+		manager.Restart.CancelTools.ThrowIfCancellationRequested();
 		ct.ThrowIfCancellationRequested();
 		var (text, full) = Truncate(call.CallId ?? Guid.NewGuid().ToString("N"), output.Text);
 		List<ImageRef> images = [.. output.Images ?? [], .. TakeViewedImages()];
@@ -389,6 +408,7 @@ public sealed partial class Agent : IPowerShellOwner {
 		var quotaWait = TimeSpan.FromSeconds(30);
 		var compactedForOverflow = false;
 		while(true) {
+			manager.Restart.ThrowIfStopping();
 			ct.ThrowIfCancellationRequested();
 			try {
 				var model = Info.Model ?? await manager.DefaultModel(ct);
@@ -397,6 +417,8 @@ public sealed partial class Agent : IPowerShellOwner {
 				var request = new ModelRequest(model, Info.Effort ?? manager.Config.Effort, Instructions,
 					view, RequestTools(), CacheKey: $"marten:{Info.Id}");
 				SetStatus(AgentStatus.Running);
+				manager.Restart.ThrowIfStopping();
+				ct.ThrowIfCancellationRequested();
 				var result = await manager.Backend.CompleteAsync(request,
 					delta => manager.Publish(new { type = "delta", agentId = Info.Id, text = delta }), ct);
 				RecordUsage(result, view);

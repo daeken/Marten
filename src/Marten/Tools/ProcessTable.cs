@@ -102,6 +102,7 @@ public sealed class ChildProcessWatcher {
 	static readonly List<Lease> active = new();
 	static HashSet<int> known = ProcessTable.ChildrenOf(ProcessTable.Self);
 	static readonly HashSet<int> excluded = new();
+	static readonly HashSet<int> foreground = new();
 	static Timer? timer;
 
 	/// <summary>
@@ -130,6 +131,7 @@ public sealed class ChildProcessWatcher {
 
 	static void Release(Lease lease) {
 		lock(gate) {
+			Poll();
 			active.Remove(lease);
 			if(active.Count == 0) {
 				timer?.Dispose();
@@ -138,13 +140,35 @@ public sealed class ChildProcessWatcher {
 		}
 	}
 
-	/// <summary>Poll now; call before acting on a lease so the freshest children are attributed.</summary>
-	public void Refresh() { lock(gate) Poll(); }
+	/// <summary>Take a fresh snapshot while holding the attribution lock.</summary>
+	public (int[] Owned, int[] Ambiguous) Snapshot(Lease lease) {
+		lock(gate) {
+			Poll();
+			return (lease.Owned.ToArray(), lease.Ambiguous.ToArray());
+		}
+	}
+
+	// At shutdown all runspaces are stopping, so shared/ambiguous foreground children can be
+	// killed too. Explicitly excluded runtime children and detached process_start jobs are not swept.
+	public void CleanForeground() {
+		int[] roots;
+		lock(gate) {
+			Poll();
+			roots = foreground.ToArray();
+		}
+		foreach(var pid in roots) {
+			var map = ProcessTable.ParentMap();
+			if(map.GetValueOrDefault(pid) == ProcessTable.Self && !IsExcluded(pid))
+				ProcessTable.KillTree(pid);
+		}
+	}
 
 	static void Poll() {
 		var now = ProcessTable.ChildrenOf(ProcessTable.Self);
+		foreground.IntersectWith(now);
 		foreach(var pid in now) {
-			if(known.Contains(pid) || IsExcluded(pid)) continue;
+			if(active.Count == 0 || known.Contains(pid) || IsExcluded(pid)) continue;
+			foreground.Add(pid);
 			if(active.Count == 1) active[0].Owned.Add(pid);
 			else foreach(var lease in active) lease.Ambiguous.Add(pid);
 		}

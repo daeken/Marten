@@ -36,6 +36,7 @@ public sealed class AgentManager {
 	public ProcessLauncher Launcher { get; init; } = new();
 	/// <summary>MCP servers' per-agent instances; set by Program.</summary>
 	public Marten.Mcp.McpHub? Mcp { get; set; }
+	internal RestartDrain Restart { get; init; } = new();
 	public LoopBreaker Loops { get; }
 	public Guard Guard { get; }
 	public Outside Outside { get; }
@@ -120,6 +121,7 @@ public sealed class AgentManager {
 		if(resolvedDefaultModel != null) return resolvedDefaultModel;
 		await modelGate.WaitAsync(ct);
 		try {
+			Restart.ThrowIfStopping();
 			resolvedDefaultModel ??= (await Backend.ListModelsAsync(ct)).FirstOrDefault()
 				?? throw new InvalidOperationException("The backend lists no models. Set one in config.json.");
 			return resolvedDefaultModel;
@@ -141,10 +143,8 @@ public sealed class AgentManager {
 			var agent = new Agent(this, dir, info, instructions);
 			agents[info.Id] = agent;
 		}
-		foreach(var agent in agents.Values) {
-			agent.Recover();
-			agent.Start();
-		}
+		foreach(var agent in agents.Values) agent.Recover();
+		foreach(var agent in agents.Values) agent.Start();
 	}
 
 	static string NewId(string prefix) => $"{prefix}-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..6]}";

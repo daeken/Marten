@@ -8,7 +8,7 @@ public sealed record Config {
 	public string? Effort { get; init; }
 	public int Port { get; init; } = 7450;
 	public int CommandTimeoutSeconds { get; init; } = 120;
-	/// <summary>How long a stopped pipeline gets to return before its runspace is abandoned.</summary>
+	/// <summary>Shutdown tool-drain grace, and how long a stopped pipeline gets before its runspace is abandoned.</summary>
 	public int StopGraceSeconds { get; init; } = 5;
 	/// <summary>Tool results longer than this are truncated on arrival, with a pointer to the full text.</summary>
 	public int ToolResultMaxChars { get; init; } = 30_000;
