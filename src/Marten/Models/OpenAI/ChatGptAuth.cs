@@ -37,6 +37,15 @@ public sealed class ChatGptAuth {
 	Credentials creds;
 	PendingLogin? pending;
 
+	// OAuth replies are small and buffered. Unlike inference, bound the entire request and body.
+	internal static HttpClient CreateHttpClient() {
+		var client = new HttpClient(new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(30) }) {
+			Timeout = TimeSpan.FromSeconds(60),
+		};
+		client.DefaultRequestHeaders.UserAgent.ParseAdd("Marten/0.1");
+		return client;
+	}
+
 	public ChatGptAuth(Home home, HttpClient http) {
 		path = Path.Combine(home.Secrets, "openai.json");
 		this.http = http;
@@ -182,12 +191,25 @@ public sealed class ChatGptAuth {
 		Save();
 	}
 
-	async Task<JsonObject> Exchange(Dictionary<string, string> form) {
-		using var response = await http.PostAsync($"{Issuer}/api/accounts/oauth/token", new FormUrlEncodedContent(form));
-		if(!response.IsSuccessStatusCode)
-			throw new InvalidOperationException($"ChatGPT authorization failed ({(int) response.StatusCode}). Sign in again.");
-		var tokens = JsonNode.Parse(await response.Content.ReadAsStringAsync()) as JsonObject
-			?? throw new InvalidOperationException("ChatGPT returned an unreadable token response.");
+	async Task<JsonObject> Exchange(Dictionary<string, string> form, CancellationToken ct = default) {
+		JsonObject tokens;
+		try {
+			using var content = new FormUrlEncodedContent(form);
+			using var response = await http.PostAsync($"{Issuer}/api/accounts/oauth/token", content, ct);
+			var status = (int) response.StatusCode;
+			if(status is 408 or 429 or >= 500)
+				throw new TransientModelException($"ChatGPT authorization is temporarily unavailable ({status}).");
+			if(!response.IsSuccessStatusCode)
+				throw new InvalidOperationException($"ChatGPT authorization failed ({status}). Sign in again.");
+			tokens = JsonNode.Parse(await response.Content.ReadAsStringAsync(ct)) as JsonObject
+				?? throw new InvalidOperationException("ChatGPT returned an unreadable token response.");
+		} catch(OperationCanceledException e) {
+			ct.ThrowIfCancellationRequested();
+			throw new TransientModelException("Timed out waiting for ChatGPT authorization.", e);
+		} catch(Exception e) when(e is HttpRequestException or IOException) {
+			ct.ThrowIfCancellationRequested();
+			throw new TransientModelException("Could not reach ChatGPT authorization.", e);
+		}
 		if(tokens["access_token"] == null || tokens["expires_in"] == null ||
 		   !string.Equals(tokens["token_type"]?.GetValue<string>(), "bearer", StringComparison.OrdinalIgnoreCase))
 			throw new InvalidOperationException("ChatGPT returned an incomplete token response.");
@@ -220,7 +242,7 @@ public sealed class ChatGptAuth {
 				tokens = await Exchange(new() {
 					["grant_type"] = "refresh_token", ["client_id"] = creds.ClientId!,
 					["refresh_token"] = creds.RefreshToken, ["resource"] = Resource,
-				});
+				}, ct);
 			} catch(InvalidOperationException e) {
 				LastError = e.Message;
 				throw new NotConnectedException(e.Message);

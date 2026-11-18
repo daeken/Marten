@@ -16,8 +16,8 @@ public sealed partial class Agent : IPowerShellOwner {
 	public string Directory { get; }
 	public Transcript Transcript { get; }
 	public FileTracker Files { get; }
-	public AgentStatus Status { get; private set; } = AgentStatus.Idle;
-	public string? StatusDetail { get; private set; }
+	public AgentStatus Status => CurrentStatus.Status;
+	public string? StatusDetail => CurrentStatus.Detail;
 	public string Instructions { get; private set; }
 
 	readonly AgentManager manager;
@@ -60,6 +60,7 @@ public sealed partial class Agent : IPowerShellOwner {
 	public string WorkingDirectory => Info.WorkingDirectory;
 	public ToolRegistry Tools => manager.Tools;
 	public object MartenObject => api ??= new MartenApi(this, manager);
+	public object MartenObjectForRun(CancellationToken ct) => new MartenApi(this, manager, ct);
 	public IReadOnlyList<AbandonedRunspace> AbandonedRunspaces => state.AbandonedRunspaces;
 	public bool NudgesStopped => state.NudgesStopped;
 	public Project? Project => manager.ProjectOf(this);
@@ -153,22 +154,19 @@ public sealed partial class Agent : IPowerShellOwner {
 		return e;
 	}
 
-	void SetStatus(AgentStatus status, string? detail = null) {
-		Status = status;
-		StatusDetail = detail;
-		manager.Publish(new { type = "status", agentId = Info.Id, status, detail });
-	}
-
 	/// <summary>Repair the log after a restart and decide whether a turn was cut short.</summary>
 	public void Recover() {
 		AnswerDanglingCalls("Interrupted: Marten stopped while this was running. It was not re-run; check its effects before retrying.");
 		var entries = Transcript.Entries;
 		var lastWake = entries.LastOrDefault(e => e.Kind == EntryKind.Wake)?.Seq ?? 0;
 		var lastIdle = entries.LastOrDefault(e => e.Kind == EntryKind.Idle)?.Seq ?? 0;
-		if(lastWake > lastIdle) {
-			if(Transcript.Last?.Kind == EntryKind.Assistant) Append(new Entry { Kind = EntryKind.Idle });
-			else resumeReason = "restart";
-		}
+		var interruptedTurn = lastWake > lastIdle && Transcript.Last?.Kind != EntryKind.Assistant;
+		if(lastWake > lastIdle && !interruptedTurn) Append(new Entry { Kind = EntryKind.Idle });
+		var interruptedOperations = RecoverSchedules() + RecoverNotebookReplays();
+		Append(new Entry { Kind = EntryKind.Message, From = NudgeSender, Text =
+			"Marten restarted. Interrupted calls were not re-run. Check logs, files, and external state before retrying; partial effects are possible." +
+			(interruptedTurn ? " Your previous turn was interrupted." : "") + interruptedOperations });
+		if(!Info.Closed && (interruptedTurn || interruptedOperations.Length > 0)) resumeReason = "restart";
 	}
 
 	/// <summary>Every tool call needs a result before the next model call; give unanswered ones an error.</summary>
@@ -230,8 +228,10 @@ public sealed partial class Agent : IPowerShellOwner {
 	}
 
 	async Task Loop() {
-		while(true) {
-			await signal.WaitAsync();
+		var stopping = manager.Restart.Stopping;
+		while(!manager.Restart.IsStopping) {
+			try { await signal.WaitAsync(stopping); }
+			catch(OperationCanceledException) when(stopping.IsCancellationRequested) { return; }
 			string? reason;
 			lock(gate) {
 				var reasons = inbox.Select(m => m.Reason ?? (m.From == NudgeSender ? "nudge" : "message")).Distinct().ToList();
@@ -239,13 +239,17 @@ public sealed partial class Agent : IPowerShellOwner {
 				resumeReason = null;
 			}
 			if(reason == null) continue;
-			await WaitWhilePaused(CancellationToken.None);
+			using var turn = manager.Restart.Enter();
+			if(turn == null) return;
 			try {
+				await WaitWhilePaused(stopping);
+				manager.Restart.ThrowIfStopping();
 				await RunTurn(reason);
+			} catch(OperationCanceledException) when(manager.Restart.IsStopping) {
+				// Leave the Wake and any unanswered calls for Recover, not the Sera interrupt path.
+				return;
 			} catch(Exception e) {
-				Append(new Entry { Kind = EntryKind.Error, Text = $"Turn failed: {e.Message}" });
-				Append(new Entry { Kind = EntryKind.Idle });
-				SetStatus(AgentStatus.Error, e.Message);
+				FailTurn(e);
 			}
 		}
 	}
@@ -253,6 +257,10 @@ public sealed partial class Agent : IPowerShellOwner {
 	async Task RunTurn(string reason) {
 		using var cts = new CancellationTokenSource();
 		turnCts = cts;
+		using var slots = new TurnSlots(this);
+
+		using var modelCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, manager.Restart.Stopping);
+		using var toolCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, manager.Restart.CancelTools);
 		try {
 			SetStatus(AgentStatus.Running);
 			Append(new Entry { Kind = EntryKind.Wake, Reason = reason });
@@ -260,14 +268,10 @@ public sealed partial class Agent : IPowerShellOwner {
 			NoteToolChanges();
 			Deliver(Take(_ => true));
 			var changesAtStart = taskChanges;
-			var failed = false;
 			while(true) {
-				await WaitWhilePaused(cts.Token);
-				var result = await CallModel(cts.Token);
-				if(result == null) {
-					failed = true;
-					break;
-				}
+				manager.Restart.ThrowIfStopping();
+				var result = await CallModel(slots, modelCts.Token);
+				modelCts.Token.ThrowIfCancellationRequested();
 				var calls = new List<Entry>();
 				foreach(var item in result.Items) {
 					var e = Append(item);
@@ -275,15 +279,16 @@ public sealed partial class Agent : IPowerShellOwner {
 				}
 				// No tool boundary left in this turn: anything that arrived during the reply wakes a new one.
 				if(calls.Count == 0) break;
-				foreach(var call in calls) await RunTool(call, cts.Token);
+				foreach(var call in calls) {
+					manager.Restart.ThrowIfStopping();
+					await RunTool(call, toolCts.Token);
+				}
 				Deliver(Take(m => m.Mode == SendMode.Immediate));
 			}
 			Append(new Entry { Kind = EntryKind.Idle });
-			if(!failed) {
-				SetStatus(AgentStatus.Idle);
-				MaybeNudge(changesAtStart);
-			}
-		} catch(OperationCanceledException) when(cts.IsCancellationRequested) {
+			SetStatus(AgentStatus.Idle);
+			MaybeNudge(changesAtStart);
+		} catch(OperationCanceledException) when(cts.IsCancellationRequested && !manager.Restart.IsStopping) {
 			AnswerDanglingCalls("Interrupted by Sera before this finished.");
 			Append(new Entry { Kind = EntryKind.Idle, Reason = "interrupted" });
 			SetStatus(AgentStatus.Idle, "Interrupted");
@@ -300,7 +305,7 @@ public sealed partial class Agent : IPowerShellOwner {
 	/// task changing state, nudging stops and the agent is flagged. Closed agents are never nudged.
 	/// </summary>
 	void MaybeNudge(int changesAtStart) {
-		if(Info.Closed || IsPaused || PendingCount > 0) return;
+		if(manager.Restart.IsStopping || Info.Closed || IsPaused || PendingCount > 0) return;
 		var open = Tasks.Where(t => t.State == TaskState.Open).ToList();
 		if(open.Count == 0) return;
 		bool stop;
@@ -328,25 +333,27 @@ public sealed partial class Agent : IPowerShellOwner {
 	void NoteMemoryChanges() {
 		if(Project is not { } project) return;
 		var current = project.Memory;
+		var topics = project.MemoryTopics();
 		string? seen;
-		lock(gate) seen = state.MemorySeen;
-		if(seen == null) {
-			lock(gate) state = state with { MemorySeen = current };
-			SaveState();
-			return;
+		List<string>? topicsSeen;
+		lock(gate) (seen, topicsSeen) = (state.MemorySeen, state.MemoryTopicsSeen);
+		var topicsChanged = topicsSeen == null || !topicsSeen.SequenceEqual(topics);
+		if(seen == current && !topicsChanged) return;
+		SawMemory(current, topics);
+		if(seen != null && seen != current) {
+			var (added, removed) = LineDiff.Of(seen, current);
+			if(added.Count > 0 || removed.Count > 0) {
+				var lines = removed.Select(l => $"- removed: {l}").Concat(added.Select(l => $"+ added: {l}"));
+				Append(new Entry { Kind = EntryKind.Message, From = NudgeSender, Text = $"Project memory changed since your last turn:\n{string.Join("\n", lines)}" });
+			}
 		}
-		if(seen == current) return;
-		var (added, removed) = LineDiff.Of(seen, current);
-		lock(gate) state = state with { MemorySeen = current };
-		SaveState();
-		if(added.Count == 0 && removed.Count == 0) return;
-		var lines = removed.Select(l => $"- removed: {l}").Concat(added.Select(l => $"+ added: {l}"));
-		Append(new Entry { Kind = EntryKind.Message, From = NudgeSender, Text = $"Project memory changed since your last turn:\n{string.Join("\n", lines)}" });
+		if(topicsChanged)
+			Append(new Entry { Kind = EntryKind.Message, From = NudgeSender, Text = AgentManager.DescribeMemoryTopics(project, topics) });
 	}
 
 	/// <summary>Called after this agent edits memory itself, so its own edit isn't reported back to it.</summary>
-	public void SawMemory(string text) {
-		lock(gate) state = state with { MemorySeen = text };
+	public void SawMemory(string text, List<string>? topics = null) {
+		lock(gate) state = state with { MemorySeen = text, MemoryTopicsSeen = topics ?? state.MemoryTopicsSeen };
 		SaveState();
 	}
 
@@ -361,6 +368,7 @@ public sealed partial class Agent : IPowerShellOwner {
 		} catch(Exception e) {
 			output = ToolOutput.Error($"Tool crashed: {e.GetType().Name}: {e.Message}");
 		}
+		manager.Restart.CancelTools.ThrowIfCancellationRequested();
 		ct.ThrowIfCancellationRequested();
 		var (text, full) = Truncate(call.CallId ?? Guid.NewGuid().ToString("N"), output.Text);
 		List<ImageRef> images = [.. output.Images ?? [], .. TakeViewedImages()];
@@ -384,43 +392,49 @@ public sealed partial class Agent : IPowerShellOwner {
 		return (head + note + tail, Path.GetRelativePath(Directory, path));
 	}
 
-	async Task<ModelResult?> CallModel(CancellationToken ct) {
+	async Task<ModelResult> CallModel(TurnSlots slots, CancellationToken ct) {
 		var transientFailures = 0;
 		var quotaWait = TimeSpan.FromSeconds(30);
-		var compactedForOverflow = false;
+		var recoveringOverflow = false;
+		var forceCompaction = false;
 		while(true) {
+			manager.Restart.ThrowIfStopping();
 			ct.ThrowIfCancellationRequested();
 			try {
+				await slots.EnsureAgent(ct);
 				var model = Info.Model ?? await manager.DefaultModel(ct);
-				await ManageContext(model, ct);
+				if(forceCompaction) {
+					await Compact(model, slots, ct);
+					forceCompaction = false;
+				} else if(!recoveringOverflow) await ManageContext(model, slots, ct);
 				var view = View();
 				var request = new ModelRequest(model, Info.Effort ?? manager.Config.Effort, Instructions,
 					view, RequestTools(), CacheKey: $"marten:{Info.Id}");
 				SetStatus(AgentStatus.Running);
-				var result = await manager.Backend.CompleteAsync(request,
-					delta => manager.Publish(new { type = "delta", agentId = Info.Id, text = delta }), ct);
+				var result = await slots.Complete(request, ModelCallKind.Reply,
+					delta => manager.Publish(new { type = "delta", agentId = Info.Id, text = delta }), null, ct);
 				RecordUsage(result, view);
 				// Keep each call's usage in the log, on its last item.
 				if(result.Usage != null && result.Items.Count > 0)
 					result = result with { Items = [.. result.Items.SkipLast(1), result.Items[^1] with { Usage = result.Usage }] };
 				return result;
-			} catch(ContextFullException) when(!compactedForOverflow) {
-				// The estimate was off; compact now and try once more.
-				compactedForOverflow = true;
-				await Compact(Info.Model ?? await manager.DefaultModel(ct), ct);
+			} catch(Exception) when(ct.IsCancellationRequested) {
+				ct.ThrowIfCancellationRequested();
+				throw;
+			} catch(ContextFullException) when(!recoveringOverflow) {
+				// Keep the forced compaction inside the retry loop, including its own quota/transient failures.
+				recoveringOverflow = forceCompaction = true;
 			} catch(RateLimitedException e) {
+				slots.ReleaseAgent();
 				// Wait it out; never fail and never switch models.
 				var wait = e.RetryAfter ?? quotaWait;
 				SetStatus(AgentStatus.WaitingForQuota, $"{e.Message} Retrying at {DateTimeOffset.Now + wait:HH:mm}.");
-				await Task.Delay(wait, ct);
+				await manager.ModelRetryDelay(wait, ct);
 				quotaWait = TimeSpan.FromSeconds(Math.Min(quotaWait.TotalSeconds * 2, 15 * 60));
 			} catch(TransientModelException e) when(++transientFailures <= 5) {
+				slots.ReleaseAgent();
 				SetStatus(AgentStatus.Running, $"{e.Message} Retrying.");
-				await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, transientFailures)), ct);
-			} catch(Exception e) when(e is TransientModelException or NotConnectedException or ContextFullException or InvalidOperationException) {
-				Append(new Entry { Kind = EntryKind.Error, Text = e.Message });
-				SetStatus(AgentStatus.Error, e.Message);
-				return null;
+				await manager.ModelRetryDelay(TimeSpan.FromSeconds(Math.Pow(2, transientFailures)), ct);
 			}
 		}
 	}

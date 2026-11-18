@@ -5,7 +5,7 @@ namespace Marten.Agents;
 
 public enum AgentKind { Chat, Orchestrator, Task }
 
-public enum AgentStatus { Idle, Running, WaitingForQuota, Paused, Error }
+public enum AgentStatus { Idle, Running, WaitingForQuota, Paused, Error, WaitingForSlot }
 
 /// <summary>Who an agent is. Written once at spawn; agent.json.</summary>
 public sealed record AgentInfo {
@@ -36,6 +36,8 @@ public sealed record AgentState {
 	public List<AbandonedRunspace> AbandonedRunspaces { get; init; } = new();
 	/// <summary>Project memory as this agent last saw it, so each turn can tell it what changed.</summary>
 	public string? MemorySeen { get; init; }
+	/// <summary>Topic paths last shown to the agent. Null in pre-topic state files.</summary>
+	public List<string>? MemoryTopicsSeen { get; init; }
 	/// <summary>Nudges sent in a row with no task changing state.</summary>
 	public int NudgeStreak { get; init; }
 	public bool NudgesStopped { get; init; }

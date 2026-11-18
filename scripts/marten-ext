@@ -5,7 +5,7 @@ Auth: an outside-client token. Set MARTEN_CLIENT=<name> (the token is read from
 ~/.marten/secrets/clients/<name>.token) or MARTEN_TOKEN=<token>. MARTEN_URL defaults
 to http://127.0.0.1:7450. See docs/outside-agents.md.
 """
-import argparse, json, os, sys, urllib.error, urllib.parse, urllib.request
+import argparse, http.client, json, os, sys, urllib.error, urllib.parse, urllib.request
 from pathlib import Path
 
 HOME = Path(os.environ.get("MARTEN_HOME", Path.home() / ".marten"))
@@ -44,8 +44,11 @@ def call(method, path, body=None, query=None, timeout=150):
         except Exception:
             pass
         sys.exit(f"{method} {path}: HTTP {e.code} {detail}")
-    except urllib.error.URLError as e:
-        sys.exit(f"Can't reach Marten at {URL}: {e.reason}. Is it running?")
+    except (OSError, http.client.HTTPException):
+        # A restart can interrupt urlopen() or the subsequent response body read.
+        # Don't retry automatically: even GET /ext/inbox can acknowledge replies.
+        print(f"{method} {path}: connection to Marten failed. Is Marten running?", file=sys.stderr)
+        sys.exit(2)
 
 
 def show(x):

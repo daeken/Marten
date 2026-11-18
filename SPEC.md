@@ -8,15 +8,17 @@ Marten is a small agent runtime that replaces all of Sera's agentic coding. It i
 
 - **Wide open by default.** Agents are trusted: no sandbox, and with no `rules` and `reviewTools` off, no approvals. Sera's filter is opt-in. `rules` in config.json is an ordered list of `{tool, match, agents, projects, action, reason}`. `tool` is a name with `*` wildcards; `match` is a regex tried against the call's string arguments, such as a PowerShell command. `action` is `allow`, `deny` or `ask`, and the first matching rule wins. `ask` puts an Allow once / Deny card in Sera's inbox and fails the call; after she allows it, the identical call goes through once. The filter is a guardrail against mistakes, not a sandbox: it sees tool calls, not what a script does once running.
 - **Not reproducible, on purpose.** Agents may mutate process state. Reproducibility is a non-goal for now.
-- **Restart to change the core.** New C# tools are compiled in. There is no C# hot reloading. A restart resumes agents where they were.
-- **What a turn is.** For steering, a turn is one model call: immediate messages land between model calls, at a tool boundary. Everywhere else, a turn runs from a wake until the agent goes idle. A tool call that was running when Marten stopped is reported to the agent as interrupted on restart, and is never re-run.
+- **Restart to change the core.** New C# tools are compiled in. There is no C# hot reloading. On a normal stop (SIGTERM or Ctrl-C), Marten stops admitting model calls and cancels model requests and retry waits. Active tools get `stopGraceSeconds` (default 5) to finish and save results. After that, Marten cancels remaining work, makes a bounded wait for cleanup, and kills tracked foreground process trees, including those shared by overlapping PowerShell runs. It does not stop detached `process_start` jobs.
+- **Startup recovery.** Existing agents get a restart notice in their transcript, visible in their next model context. An open agent with interrupted work can resume from the recorded history, respecting pause; merely announcing a restart does not wake an idle agent. Unanswered tool calls receive an interruption result, and interrupted schedule runs and manual notebook replays are reported when there is a durable record. Old invocations are never re-executed by recovery; recurring schedules can still run at their next due time.
+- **Abrupt stops.** SIGKILL, power loss and host reboots bypass the drain. Recovery can only use what made it to disk; streamed text, pending in-memory messages and a tool's result can be lost even if the tool had side effects. Work that escaped tracking (for example, a child that reparented itself) can outlive the runtime, and a host reboot terminates detached jobs too. Marten does not kill old PIDs from disk or relaunch jobs on startup. Check actual state before retrying.
+- **What a turn is.** For steering, a turn is one model call: immediate messages land between model calls, at a tool boundary. Everywhere else, a turn runs from a wake until the agent goes idle. A recorded tool call without a saved result is reported to the agent as interrupted on restart, and is never automatically re-run.
 
 ## Shape and storage
 
 Marten is a C# monolith with a separate web frontend, and all of its state lives in `~/.marten`.
 
 - **Backend:** a single C# process.
-- **Exposure:** the backend listens on localhost only. Every request carries a random token, and the Host and Origin headers are checked, so a web page Sera visits cannot drive an agent. The backend serves the built frontend, so the UI is same-origin.
+- **Exposure:** the backend listens on localhost only. Every request carries a random token, and the Host and Origin headers are checked, so a web page Sera visits cannot drive an agent. The backend serves the built frontend, so the UI is same-origin. The startup banner prints the UI URL without the token; users enter the token from `secrets/ui-token`.
 - **Platforms:** macOS first, Linux a close second. Windows is not a target.
 - **Frontend:** a simple, clean React web app, separate from the backend. Mobile and desktop apps come later.
 - **Storage:** everything lives in `~/.marten`: config, secrets, prompts, tools, transcripts, agent state, screenshots and full tool output. It is plain files, not a git repo. Durability comes from snapshots: every `backup.intervalMinutes` (60), when anything changed, Marten writes `~/.marten-backups/marten-<utc stamp>.tar.gz`, leaving out secrets, browser profiles and worktrees. It keeps the newest 48 plus one a day for 30 days. With a passphrase saved (in the UI, stored in `secrets/backup-passphrase`), snapshots are AES-256-GCM encrypted. `marten backup` takes one now; `marten restore <file> [<dir>]` extracts one into a new folder, never over a live home.
@@ -42,16 +44,16 @@ Marten is project-centric: each project has one orchestrator, which spins up tas
 
 Each project has one shared memory that every agent in it reads, and it survives every compaction. It holds what an agent would otherwise have to ask Sera again.
 
-- **One file.** The memory is `MEMORY.md` in the project's place in `~/.marten`. It is a Markdown list, and each entry is one line.
-- **Always in context.** The memory is injected after the project prompt in every agent's system prompt when the agent is spawned and each time it is compacted. Compaction and elision never touch it.
-- **A size cap.** The cap is set in config, around 16 KB. An edit that would go past it fails loudly, so an agent has to prune before it can add. Without a cap, memory turns into a second transcript.
-- **Edited with the atomic file editor.** Agents use the same anchored edits as on any file, so two agents can't overwrite each other. The edit fails if memory changed since the agent last saw it, and the agent re-reads and tries again. There is no whole-file replace.
-- **Fresh at each turn.** An edit becomes visible to other agents at the start of their next turn, not mid-turn. It arrives as a short note at the end of the context listing the lines added and removed, not as a change to the system prompt, so the cached prefix stays intact. The next compaction folds the current memory back into the system prompt. Agent notes and tool list changes work the same way.
-- **Audited.** Each edit is recorded with the agent's id, its reason and the lines changed, so the UI can show who changed each line.
+- **An index and optional topics.** `MEMORY.md` in the project's directory in `~/.marten` holds standing rules and pointers. Link details as `[Topic](memory/topic.md)` in the index. Topics are direct Markdown files in the sibling `memory/` directory, not nested files or symlinks.
+- **Index in context, topic bodies on demand.** At spawn and compaction, agents get the index and a sorted list of topic paths. The runtime never injects topic bodies; use `read_file` on the relevant file for its latest contents.
+- **A size cap on the index.** The `memoryCapBytes` setting defaults to 16 KiB. An edit cannot grow the index beyond the cap; prune or move details to topics. Topic files do not count toward the index cap.
+- **Edited with the atomic file editor.** Use `edit_file` on either the index or a topic. If the file changed since the agent read it, re-read and retry. Use `create` for a missing file. To initialize a zero-byte file such as a new `MEMORY.md`, read it first, then pass a single `replace` with an empty string anchor.
+- **Fresh without invalidating the cached prefix.** At the start of a turn agents see the index's changed lines and, if the inventory changed, the current topic paths. Existing agents get the topic list at their first turn after upgrade, without rewriting saved prompts. Topic edits do not inject diffs into agent context: re-read the topic when needed.
+- **Audited.** Edits to both the index and topics use one audit log with the agent's id, reason, relative path and changed lines. Old records without a path refer to `MEMORY.md`.
 
 ### Entry shape
 
-An entry leads with a short CAPS tag, then says what it is about, and cites its source when Sera said it:
+A memory entry in the index or a topic occupies one line, leads with a short CAPS tag, then says what it is about, and cites its source when Sera said it:
 
 ```
 - WINE PAUSED (Sera, 2026-11-18 02:54Z, msg_…): stop running DA:O in Wine until she says go.
@@ -91,6 +93,7 @@ PowerShell is embedded in-process and is the default way agents act on the world
 - **A `$Marten` object in every runspace.** It exposes the project, the agent roster and the message bus, for introspection and scripting. Messaging, elision, model changes and spawning are direct tools, and scripts can reach them through it.
 - **One-off commands.** Each command runs in a fresh runspace. No PowerShell variables carry from one run to the next. Process-wide state, such as environment variables and loaded assemblies, is shared by every agent and the core; that is accepted for now.
 - **One command at a time.** PowerShell commands for one agent never overlap, so the state variable has one writer. A scheduled command runs as its owner and waits its turn.
+- **Named command slots.** Config's `slots` maps case-sensitive names to positive capacities shared by all agents. `$Marten.WithSlot(name, { ... })` runs foreground work under one slot, releasing it when the script block exits, including on failure. The queue uses the command's cancellation and timeout; scheduled runs use their command timeout. Nested slots are rejected to prevent self-deadlock and inconsistent acquisition order. A hung, abandoned script block retains its slot until it actually exits, so live work does not exceed the configured cap.
 - **One state variable per agent.** A single named global is serialized to JSON and stored with the agent's state. It may hold only JSON-serializable types; anything else is a loud error.
 - **Timeouts.** Every command has a timeout, set in config and overridable per call. On timeout the runtime stops the pipeline and kills any child process the command started.
 - **Hung commands are abandoned.** If the stop does not return within a few seconds, the runspace is left behind and flagged in the UI, and the agent gets a timeout error. The runtime never restarts itself; that is Sera's call.
@@ -179,6 +182,12 @@ Four model backends are supported, and model choice is a setting rather than som
 - **Who sets model and effort.** An agent can change its own when asked. An orchestrator can change them for its task agents.
 - **Defaults and exceptions** live in config and belong to Sera. Agents do not weigh cost or context windows.
 - **Rate limits.** When a backend refuses a request or a subscription quota runs out, the agent waits and retries. It does not fail or switch models. This is a default Sera can adjust.
+- **Model HTTP timeouts.** Every backend allows 30 seconds to establish a connection and 120 seconds per request to receive response headers. While reading the body, `modelIdleTimeoutSeconds` (default 300) bounds the wait for the next bytes, not the next SSE event. There is no total stream deadline. These deadlines are transient failures handled by the agent's retry loop; stopping a turn remains user cancellation.
+- **ChatGPT authorization.** The OAuth client has a separate 30-second connect deadline and 60-second total deadline for its buffered replies. Turn cancellation also cancels refresh, releasing the refresh gate. Timeouts and network failures during refresh are transient; rejected credentials still require signing in again.
+- **Failed turns.** A terminal error, including a missing model or exhaustion of the five transient retries, ends the turn without nudging or changing tasks. Marten queues one notice each to the parent and to distinct other agent assigners of unfinished tasks, waking them if idle. Quota waits and an explicit interrupt are not terminal errors. A model setting is not rejected based on an advisory provider catalog.
+- **Model calls.** Per agent, the runtime exposes the latest completion attempt, including retries and context compaction: model, kind, start time, end time, and outcome (`succeeded`, `failed`, or `cancelled`). An attempt is in flight when it has no end time. Time spent waiting for quota or backoff is not in flight. This status is process-local, not transcript history.
+
+- **Concurrent work.** The process-wide `maxRunningAgents` limits active turns (model work and tools), and `maxConcurrentModelCalls` limits model completions, including compaction, across providers. Both default to unlimited (`0`). A turn can hold an agent slot while queued for a model slot, but acquires them in that order; compaction and retries never reacquire a held model slot. Pause and retry backoff give up capacity. Slot queues can be cancelled by interrupting the turn, and the UI and APIs report `waiting_for_slot` with the limit or named slot being waited on. Schedules, notebook replays and detached processes are not agent turns.
 - **MCP is stdio only.** No OAuth and no external services.
 - **MCP is lazy, per agent.** A server is started once to read and cache its schema. It is launched for real only when an agent first calls one of its tools.
 
@@ -200,7 +209,7 @@ The UI is how Sera watches and steers the system, so it has to show everything t
 - Message any agent in either mode.
 - Pause an agent, a project or everything. Pausing also stops nudges and schedules.
 
-**Outside agents.** Agents outside Marten, such as Claude Code sessions, get a named client token (`client add NAME`, or the UI). It reaches only the `/api/ext` routes: status, create project, message an agent, read replies, transcripts and tasks. To Marten agents they're peers named `NAME (outside)`, never Sera, and agents answer them with `send_message` to `client:NAME`. Exchanges count toward the loop breaker. See docs/outside-agents.md.
+**Outside agents.** Agents outside Marten, such as Claude Code sessions, get a named client token (`client add NAME`, or the UI). It reaches only the `/api/ext` routes: status, create project, message an agent, read replies, transcripts and tasks. To Marten agents they're peers named `NAME (outside)`, never Sera, and agents answer them with `send_message` to `client:NAME`. Exchanges count toward the loop breaker. If the connection drops, `marten-ext` exits with a short error and exit code 2 instead of silently replaying a command. See docs/outside-agents.md.
 
 **Question cards.** An orchestrator or chat agent can put a structured question to Sera as a card, and she answers on the card. Task agents cannot ask Sera directly; they pass questions up to their orchestrator.
 

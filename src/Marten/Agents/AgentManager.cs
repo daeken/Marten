@@ -31,14 +31,17 @@ public sealed class AgentManager {
 	public Home Home { get; }
 	public Config Config { get; private set; }
 	public IModelBackend Backend { get; }
+	internal Func<TimeSpan, CancellationToken, Task> ModelRetryDelay { get; init; } = Task.Delay;
 	public ToolRegistry Tools { get; }
 	/// <summary>Starts agents' background processes; Program shares the PowerShell tool's child watcher with it.</summary>
 	public ProcessLauncher Launcher { get; init; } = new();
 	/// <summary>MCP servers' per-agent instances; set by Program.</summary>
 	public Marten.Mcp.McpHub? Mcp { get; set; }
+	internal RestartDrain Restart { get; init; } = new();
 	public LoopBreaker Loops { get; }
 	public Guard Guard { get; }
 	public Outside Outside { get; }
+	internal ResourceSlots Resources { get; }
 	readonly ConcurrentDictionary<string, Agent> agents = new();
 	readonly ConcurrentDictionary<string, Project> projects = new();
 	readonly SemaphoreSlim modelGate = new(1, 1);
@@ -51,6 +54,7 @@ public sealed class AgentManager {
 	public AgentManager(Home home, Config config, IModelBackend backend, ToolRegistry tools) {
 		Home = home;
 		Config = config;
+		Resources = new ResourceSlots(config);
 		Backend = backend;
 		Loops = new LoopBreaker(() => Config);
 		Guard = new Guard(this);
@@ -101,7 +105,6 @@ public sealed class AgentManager {
 	public IEnumerable<Project> Projects => projects.Values.OrderBy(p => p.Info.Created);
 	public Project? GetProject(string? id) => id == null ? null : projects.GetValueOrDefault(id);
 	public Project? ProjectOf(Agent agent) => GetProject(agent.Info.ProjectId);
-	public Project? ProjectByMemoryPath(string path) => projects.Values.FirstOrDefault(p => p.MemoryPath == path);
 
 	public void Publish(object ev) => Events?.Invoke(ev);
 
@@ -120,6 +123,7 @@ public sealed class AgentManager {
 		if(resolvedDefaultModel != null) return resolvedDefaultModel;
 		await modelGate.WaitAsync(ct);
 		try {
+			Restart.ThrowIfStopping();
 			resolvedDefaultModel ??= (await Backend.ListModelsAsync(ct)).FirstOrDefault()
 				?? throw new InvalidOperationException("The backend lists no models. Set one in config.json.");
 			return resolvedDefaultModel;
@@ -141,10 +145,8 @@ public sealed class AgentManager {
 			var agent = new Agent(this, dir, info, instructions);
 			agents[info.Id] = agent;
 		}
-		foreach(var agent in agents.Values) {
-			agent.Recover();
-			agent.Start();
-		}
+		foreach(var agent in agents.Values) agent.Recover();
+		foreach(var agent in agents.Values) agent.Start();
 	}
 
 	static string NewId(string prefix) => $"{prefix}-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..6]}";
@@ -213,11 +215,11 @@ public sealed class AgentManager {
 		Directory.CreateDirectory(dir);
 		if(info.Kind == AgentKind.Task) AtomicFile.Write(Path.Combine(dir, "NOTES.md"), "");
 		// The system prompt is fixed at spawn so the cached prefix stays stable; compaction rebuilds it.
-		var instructions = BuildInstructions(info, dir);
+		var instructions = BuildInstructions(info, dir, out var memory);
 		AtomicFile.Write(Path.Combine(dir, "system.md"), instructions);
 		JsonIO.Save(Path.Combine(dir, "agent.json"), info);
 		var agent = new Agent(this, dir, info, instructions);
-		if(GetProject(info.ProjectId) is { } p) agent.SawMemory(p.Memory);
+		if(memory is { } snapshot) agent.SawMemory(snapshot.Index, snapshot.Topics);
 		agents[info.Id] = agent;
 		agent.Start();
 		Publish(new { type = "agents" });
@@ -225,9 +227,11 @@ public sealed class AgentManager {
 	}
 
 	/// <summary>A fresh system prompt for compaction: current project prompt, AGENTS.md, memory and notes.</summary>
-	public string RebuildInstructions(Agent agent) => BuildInstructions(agent.Info, agent.Directory);
+	internal string RebuildInstructions(Agent agent, out (string Index, List<string> Topics)? memory) =>
+		BuildInstructions(agent.Info, agent.Directory, out memory);
 
-	string BuildInstructions(AgentInfo info, string dir) {
+	string BuildInstructions(AgentInfo info, string dir, out (string Index, List<string> Topics)? memory) {
+		memory = null;
 		var kind = info.Kind.ToString().ToLowerInvariant();
 		var parts = new List<string> { ReadPrompt("marten.md"), ReadPrompt($"{kind}.md") };
 		var project = GetProject(info.ProjectId);
@@ -241,7 +245,10 @@ public sealed class AgentManager {
 			parts.Add(sb.ToString().TrimEnd());
 			foreach(var (path, text) in project.AgentsFiles())
 				if(text.Length > 0) parts.Add($"# {path}\n\n{text}");
-			parts.Add($"# Project memory\n\nThe shared memory lives at {project.MemoryPath}. This is how it stood when this prompt was built; changes since then reach you as notes at the start of a turn.\n\n{(project.Memory.Trim() is { Length: > 0 } m ? m : "(empty)")}");
+			var index = project.Memory;
+			var topics = project.MemoryTopics();
+			memory = (index, topics);
+			parts.Add($"# Project memory\n\nThe shared index lives at {project.MemoryPath}. This is how it stood when this prompt was built; changes since then reach you as notes at the start of a turn.\n\n{(index.Trim() is { Length: > 0 } m ? m : "(empty)")}\n\n{DescribeMemoryTopics(project, topics)}");
 			if(info.Kind == AgentKind.Task) {
 				var notesPath = Path.Combine(dir, "NOTES.md");
 				var notes = File.Exists(notesPath) ? File.ReadAllText(notesPath).Trim() : "";
@@ -258,6 +265,11 @@ public sealed class AgentManager {
 			""".Trim());
 		return string.Join("\n\n", parts);
 	}
+
+	internal static string DescribeMemoryTopics(Project project, List<string> topics) =>
+		$"Memory topics (paths relative to the index's directory, {project.Directory}; use read_file for current contents):\n" +
+		(topics.Count == 0 ? "(none yet; use edit_file to create a file under memory/ and link it from the index)" :
+			string.Join("\n", topics.Select(t => $"- {JsonIO.Serialize(t)}")));
 
 	string ReadPrompt(string file) {
 		var path = Path.Combine(Home.Prompts, file);
