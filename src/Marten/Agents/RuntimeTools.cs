@@ -280,22 +280,51 @@ public static class CompletionCheck {
 	}
 }
 
-/// <summary>Rules for MEMORY.md: a size cap, cited entries removable only by orchestrators, and an audit log.</summary>
+/// <summary>Rules for the memory index and its topic files.</summary>
 public sealed class MemoryGuard(Func<AgentManager> manager) : IEditGuard {
-	public bool Applies(string path) => manager().ProjectByMemoryPath(path) != null;
+	const StringComparison PathComparison = StringComparison.OrdinalIgnoreCase;
+
+	(Project Project, string RelativePath, string LockPath)? Find(string path) {
+		var name = Path.GetFileName(path);
+		if(!Path.GetExtension(name).Equals(".md", PathComparison)) return null;
+		var parent = Path.GetDirectoryName(path)!;
+		var projects = manager().Projects.Select(p => (Project: p, Root: Paths.PhysicalDirectory(p.Directory))).ToList();
+		// Reject a redirected storage directory before matching its target (which could belong to another project).
+		if(Path.GetFileName(parent).Equals("memory", PathComparison) && Paths.IsLink(parent)) {
+			var container = Paths.PhysicalDirectory(Path.GetDirectoryName(parent)!);
+			if(projects.Any(p => p.Root.Equals(container, PathComparison)))
+				throw new ToolException("The project memory topics directory cannot be a link.");
+		}
+		var physicalParent = Paths.PhysicalDirectory(parent);
+		foreach(var (project, root) in projects) {
+			var topicDir = Path.Combine(root, "memory");
+			if(name.Equals("MEMORY.md", PathComparison) && physicalParent.Equals(root, PathComparison)) {
+				if(Paths.IsLink(path)) throw new ToolException("The project memory index cannot be a link.");
+				return (project, "MEMORY.md", Path.Combine(root, "MEMORY.md"));
+			}
+			if(physicalParent.Equals(topicDir, PathComparison)) {
+				if(Paths.IsLink(path)) throw new ToolException("Project memory topics cannot be links.");
+				return (project, $"memory/{name}", Path.Combine(topicDir, name));
+			}
+		}
+		return null;
+	}
+
+	public string? LockPath(string path) => Find(path)?.LockPath;
 
 	static bool IsCited(string line) => System.Text.RegularExpressions.Regex.IsMatch(line, @"^\s*-\s*[^()]*\(Sera,");
 
 	public void Validate(IToolContext ctx, string path, string before, string after) {
-		var m = manager();
-		var cap = m.Config.MemoryCapBytes;
-		var size = System.Text.Encoding.UTF8.GetByteCount(after);
-		if(size > cap && size > System.Text.Encoding.UTF8.GetByteCount(before))
-			throw new ToolException($"Project memory would be {size:N0} bytes, over its {cap:N0}-byte cap. Prune stale entries first.");
+		var (project, relativePath, _) = Find(path) ?? throw new ToolException("Project memory path changed. Retry the edit.");
 		var agent = ctx as Agent;
-		var project = m.ProjectByMemoryPath(path)!;
 		if(agent?.Info.ProjectId != project.Info.Id)
 			throw new ToolException("Only agents in this project may edit its memory.");
+		if(relativePath == "MEMORY.md") {
+			var cap = manager().Config.MemoryCapBytes;
+			var size = System.Text.Encoding.UTF8.GetByteCount(after);
+			if(size > cap && size > System.Text.Encoding.UTF8.GetByteCount(before))
+				throw new ToolException($"Project memory index would be {size:N0} bytes, over its {cap:N0}-byte cap. Prune or move details into topics first.");
+		}
 		var (_, removed) = LineDiff.Of(before, after);
 		var cited = removed.Where(IsCited).ToList();
 		if(cited.Count > 0 && agent.Info.Kind != AgentKind.Orchestrator)
@@ -304,14 +333,14 @@ public sealed class MemoryGuard(Func<AgentManager> manager) : IEditGuard {
 
 	public void Committed(IToolContext ctx, string path, string before, string after, string? reason) {
 		var m = manager();
-		var project = m.ProjectByMemoryPath(path)!;
+		var (project, relativePath, _) = Find(path) ?? throw new ToolException("Project memory path changed during the edit.");
 		var (added, removed) = LineDiff.Of(before, after);
-		project.LogMemoryEdit(new MemoryEdit(DateTimeOffset.UtcNow, ctx.AgentId, reason, added, removed));
-		(ctx as Agent)?.SawMemory(after);
+		project.LogMemoryEdit(new MemoryEdit(DateTimeOffset.UtcNow, ctx.AgentId, reason, added, removed) { Path = relativePath });
+		if(relativePath == "MEMORY.md") (ctx as Agent)?.SawMemory(after);
 		m.Publish(new { type = "memory", projectId = project.Info.Id });
 		var cited = removed.Where(IsCited).ToList();
 		if(cited.Count > 0 && ctx is Agent agent)
-			m.MessageSera(agent, $"Removed cited memory entr{(cited.Count == 1 ? "y" : "ies")}{(reason != null ? $" ({reason})" : "")}:\n{string.Join("\n", cited)}");
+			m.MessageSera(agent, $"Removed cited memory entr{(cited.Count == 1 ? "y" : "ies")} in {Marten.Storage.JsonIO.Serialize(relativePath)}{(reason != null ? $" ({reason})" : "")}:\n{string.Join("\n", cited)}");
 	}
 }
 

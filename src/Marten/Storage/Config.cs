@@ -20,7 +20,7 @@ public sealed record Config {
 	public double CompactAt { get; init; } = 0.75;
 	/// <summary>Elide old tool results, in one batch, when they pass this fraction of the window.</summary>
 	public double ElideAt { get; init; } = 0.3;
-	/// <summary>Project memory size cap. An edit past it fails, so agents prune before adding.</summary>
+	/// <summary>Size cap on the project memory index (MEMORY.md), excluding topic files.</summary>
 	public int MemoryCapBytes { get; init; } = 16 * 1024;
 	/// <summary>Extra model ids per backend (anthropic, zai, deepseek), listed ahead of what the provider reports.</summary>
 	public Dictionary<string, List<string>> Models { get; init; } = new();

@@ -130,7 +130,6 @@ public class ProjectTests {
 		var (project, orch) = m.CreateProject("p", [dir.File("repo")], null, false);
 		var task = m.SpawnTask(orch, "t", false, null, null);
 		File.WriteAllText(project.MemoryPath, "- WINE PAUSED (Sera, 2026-11-18 02:54Z, msg_1): no Wine.\n- NOTE: builds are slow.\n");
-		var edit = new EditFileTool(new MemoryGuard(() => m));
 		async Task<ToolOutput> Edit(Agent who, object edits) {
 			await m.Tools.InvokeAsync(who, "read_file", Args(new { path = project.MemoryPath, start_line = (int?) null, end_line = (int?) null }), default);
 			return await m.Tools.InvokeAsync(who, "edit_file", Args(new { path = project.MemoryPath, edits = new[] { edits }, reason = "test" }), default);
@@ -155,6 +154,135 @@ public class ProjectTests {
 		Assert.Equal(2, log.Count);
 		Assert.Equal(task.Info.Id, log[0].AgentId);
 		Assert.Equal(["- NOTE: builds take 4 minutes."], log[0].Added);
+	}
+
+	[Fact]
+	public async Task LinkedMemoryHolds170KbAcross21TopicsWithoutInjectingBodies() {
+		using var dir = RepoDir();
+		var backend = new RoutedBackend();
+		var m = Manager(dir, backend);
+		var (project, orch) = m.CreateProject("p", [dir.File("repo")], null, false);
+		var originalInstructions = orch.Instructions;
+		Assert.Equal(0, new FileInfo(project.MemoryPath).Length);
+		await m.Tools.InvokeAsync(orch, "read_file", Args(new { path = project.MemoryPath }), default);
+		const string pointer = "- RENDERER: [See topic](memory/topic-00.md)\n";
+		var bootstrap = await EditMemory(m, orch, project.MemoryPath, "replace", "", pointer);
+		Assert.False(bootstrap.IsError, bootstrap.Text);
+		Assert.Equal(pointer, project.Memory);
+		Assert.Equal("MEMORY.md", Assert.Single(project.MemoryLog()).Path);
+
+		const string body = "PRIVATE_TOPIC_BODY_FOR_TEST";
+		for(var i = 20; i >= 0; i--) {
+			var path = Path.Combine(project.MemoryTopicsDirectory, $"topic-{i:D2}.md");
+			var created = await EditMemory(m, orch, path, "create", null, body.PadRight(i == 0 ? 20_000 : 7_500, 'x'));
+			Assert.False(created.IsError, created.Text);
+		}
+		Assert.Equal(170_000, Directory.GetFiles(project.MemoryTopicsDirectory).Sum(p => new FileInfo(p).Length));
+		var topics = Enumerable.Range(0, 21).Select(i => $"memory/topic-{i:D2}.md").ToArray();
+		Assert.Equal(topics, project.MemoryTopics());
+		var task = m.SpawnTask(orch, "reader", false, null, null);
+		Assert.Contains(pointer.Trim(), task.Instructions);
+		Assert.All(topics, t => Assert.Contains(t, task.Instructions));
+		Assert.DoesNotContain(body, task.Instructions);
+		var rebuilt = m.RebuildInstructions(orch, out _);
+		Assert.All(topics, t => Assert.Contains(t, rebuilt));
+		Assert.DoesNotContain(body, rebuilt);
+		orch.Send(new Inbound("Sera", "check topics", SendMode.Queued));
+		await Wait.Until(() => Idle(orch));
+		var note = Assert.Single(orch.Transcript.Entries, e => e.From == Agent.NudgeSender);
+		Assert.All(topics, t => Assert.Contains(t, note.Text));
+		Assert.DoesNotContain(body, note.Text);
+		Assert.Equal(originalInstructions, Assert.Single(backend.Requests).Instructions);
+		var read = await m.Tools.InvokeAsync(task, "read_file", Args(new { path = Path.Combine(project.MemoryTopicsDirectory, "topic-00.md") }), default);
+		Assert.Contains(body, read.Text);
+	}
+
+	[Fact]
+	public async Task ExistingAgentDiscoversTopicsWithoutChangingItsSavedPrompt() {
+		using var dir = RepoDir();
+		var old = Manager(dir, new RoutedBackend());
+		var (project, orch) = old.CreateProject("p", [dir.File("repo")], null, false);
+		const string legacyPrompt = "An existing agent's prompt without linked memory";
+		File.WriteAllText(Path.Combine(orch.Directory, "system.md"), legacyPrompt);
+		JsonIO.Save(Path.Combine(orch.Directory, "state.json"), new AgentState { MemorySeen = "" });
+		Directory.CreateDirectory(project.MemoryTopicsDirectory);
+		File.WriteAllText(Path.Combine(project.MemoryTopicsDirectory, "existing.md"), "Existing topic payload");
+		var backend = new RoutedBackend();
+		var m = Manager(dir, backend);
+		m.LoadAll();
+		var loaded = m.Get(orch.Info.Id)!;
+		loaded.Send(new Inbound("Sera", "hi", SendMode.Queued));
+		await Wait.Until(() => Idle(loaded));
+		loaded.Send(new Inbound("Sera", "once more", SendMode.Queued));
+		await Wait.Until(() => Idle(loaded));
+		var note = Assert.Single(loaded.Transcript.Entries, e => e.From == Agent.NudgeSender);
+		Assert.Contains("memory/existing.md", note.Text);
+		Assert.DoesNotContain("Existing topic payload", note.Text);
+		Assert.All(backend.Requests, r => Assert.Equal(legacyPrompt, r.Instructions));
+	}
+
+	static Task<ToolOutput> EditMemory(AgentManager m, Agent who, string path, string op, string? anchor, string? text) =>
+		m.Tools.InvokeAsync(who, "edit_file", Args(new { path, edits = new[] { new { op, anchor, text } }, reason = "test" }), default);
+
+	[Fact]
+	public async Task TopicsEnforceProjectMembershipAndCitationsAndAuditTheirPaths() {
+		using var dir = RepoDir();
+		var m = Manager(dir, new RoutedBackend());
+		var (project, orch) = m.CreateProject("p", [dir.File("repo")], null, false);
+		var (_, outsider) = m.CreateProject("other", [dir.File("repo")], null, false);
+		var task = m.SpawnTask(orch, "t", false, null, null);
+		var path = Path.Combine(project.MemoryTopicsDirectory, "decisions.md");
+		const string cited = "- RULE (Sera, 2026-11-18 02:54Z, msg_1): no Wine.\n";
+		var deniedCreate = await EditMemory(m, outsider, path, "create", null, cited);
+		Assert.True(deniedCreate.IsError);
+		Assert.Contains("Only agents in this project", deniedCreate.Text);
+		Assert.False(File.Exists(path));
+		Assert.False((await EditMemory(m, task, path, "create", null, cited + "- NOTE: slow\n")).IsError);
+		Assert.Contains("cited", (await EditMemory(m, task, path, "delete", cited, null)).Text);
+		await m.Tools.InvokeAsync(orch, "read_file", Args(new { path }), default);
+		Assert.False((await EditMemory(m, task, path, "replace", "slow", "fast")).IsError);
+		Assert.Contains("changed since", (await EditMemory(m, orch, path, "delete", cited, null)).Text);
+		await m.Tools.InvokeAsync(orch, "read_file", Args(new { path }), default);
+		Assert.False((await EditMemory(m, orch, path, "delete", cited, null)).IsError);
+		Assert.Equal("- NOTE: fast\n", File.ReadAllText(path));
+		Assert.Contains(m.SeraInbox(), msg => msg.Text.Contains("memory/decisions.md") && msg.Text.Contains(cited.Trim()));
+		var log = project.MemoryLog();
+		Assert.Equal(3, log.Count);
+		Assert.All(log, e => Assert.Equal("memory/decisions.md", e.Path));
+		Assert.Equal([cited.Trim()], log[^1].Removed);
+	}
+
+	[Fact]
+	public async Task LinkedMemoryRejectsSymlinkStorageAndGuardsDirectoryAliases() {
+		if(OperatingSystem.IsWindows()) return; // Creating symlinks may require elevated privileges.
+		using var dir = RepoDir();
+		var m = Manager(dir, new RoutedBackend());
+		var (project, orch) = m.CreateProject("p", [dir.File("repo")], null, false);
+		var (_, outsider) = m.CreateProject("other", [dir.File("repo")], null, false);
+		var repo = dir.File("repo");
+		Directory.CreateSymbolicLink(project.MemoryTopicsDirectory, repo);
+		var result = await EditMemory(m, orch, Path.Combine(project.MemoryTopicsDirectory, "escape.md"), "create", null, "escape");
+		Assert.Contains("cannot be a link", result.Text);
+		Assert.False(File.Exists(Path.Combine(repo, "escape.md")));
+		Assert.Empty(project.MemoryTopics());
+		Directory.Delete(project.MemoryTopicsDirectory);
+		Directory.CreateDirectory(project.MemoryTopicsDirectory);
+		var leaf = Path.Combine(project.MemoryTopicsDirectory, "link.md");
+		File.CreateSymbolicLink(leaf, dir.File("no-target.md"));
+		Assert.Contains("cannot be links", (await EditMemory(m, orch, leaf, "create", null, "overwrite link")).Text);
+		Assert.Empty(project.MemoryTopics());
+
+		var alias = dir.File("alias");
+		Directory.CreateSymbolicLink(alias, project.MemoryTopicsDirectory);
+		var topic = Path.Combine(alias, "topic.md");
+		Assert.Contains("Only agents in this project", (await EditMemory(m, outsider, topic, "create", null, "bypass")).Text);
+		Assert.False((await EditMemory(m, orch, topic, "create", null, "valid")).IsError);
+		Assert.Equal(["memory/topic.md"], project.MemoryTopics());
+		Assert.Equal("memory/topic.md", Assert.Single(project.MemoryLog()).Path);
+
+		var sibling = Path.Combine(project.Directory, "memory-other", "file.md");
+		Assert.False((await EditMemory(m, outsider, sibling, "create", null, "not project memory")).IsError);
+		Assert.Single(project.MemoryLog());
 	}
 
 	[Fact]

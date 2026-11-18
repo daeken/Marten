@@ -694,7 +694,7 @@ function MemoryView({ api, project, agents, tick }: { api: Api; project?: Projec
         <ul className="history">
           {memory?.log.slice().reverse().map((e, i) => (
             <li key={i}>
-              <div className="small"><strong>{name(e.agentId)}</strong> <span className="muted">{time(e.at)}{e.reason ? ` · ${e.reason}` : ''}</span></div>
+              <div className="small"><strong>{name(e.agentId)}</strong> <code>{e.path ?? 'MEMORY.md'}</code> <span className="muted">{time(e.at)}{e.reason ? ` · ${e.reason}` : ''}</span></div>
               {e.removed.map((l, j) => <div key={`r${j}`} className="diff del">− {l}</div>)}
               {e.added.map((l, j) => <div key={`a${j}`} className="diff add">+ {l}</div>)}
             </li>

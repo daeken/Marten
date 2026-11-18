@@ -17,7 +17,10 @@ public sealed record ProjectInfo {
 	public bool Paused { get; init; }
 }
 
-public sealed record MemoryEdit(DateTimeOffset At, string AgentId, string? Reason, List<string> Added, List<string> Removed);
+public sealed record MemoryEdit(DateTimeOffset At, string AgentId, string? Reason, List<string> Added, List<string> Removed) {
+	// Absent in older audit records, which all refer to MEMORY.md.
+	public string? Path { get; init; }
+}
 
 /// <summary>A project's place in ~/.marten: project.json, prompt.md, MEMORY.md and the memory audit log.</summary>
 public sealed partial class Project {
@@ -32,6 +35,7 @@ public sealed partial class Project {
 
 	public string PromptPath => Path.Combine(Directory, "prompt.md");
 	public string MemoryPath => Path.Combine(Directory, "MEMORY.md");
+	public string MemoryTopicsDirectory => Path.Combine(Directory, "memory");
 	string MemoryLogPath => Path.Combine(Directory, "memory-log.jsonl");
 	public string WorktreesDir => Path.Combine(Directory, "worktrees");
 
@@ -67,7 +71,20 @@ public sealed partial class Project {
 	void Save() => JsonIO.Save(Path.Combine(Directory, "project.json"), Info);
 
 	public string Prompt => File.Exists(PromptPath) ? File.ReadAllText(PromptPath).Trim() : "";
-	public string Memory => File.Exists(MemoryPath) ? File.ReadAllText(MemoryPath) : "";
+	public string Memory => !Tools.Paths.IsLink(MemoryPath) && File.Exists(MemoryPath) ? File.ReadAllText(MemoryPath) : "";
+
+	/// <summary>Only direct Markdown files, never links or their targets. No topic content is read here.</summary>
+	public List<string> MemoryTopics() {
+		var dir = new DirectoryInfo(MemoryTopicsDirectory);
+		if(dir.LinkTarget != null || !dir.Exists) return [];
+		try {
+			return dir.EnumerateFiles()
+				.Where(f => f.Extension.Equals(".md", StringComparison.OrdinalIgnoreCase) && f.LinkTarget == null)
+				.Select(f => $"memory/{f.Name}").Order(StringComparer.Ordinal).ToList();
+		} catch(DirectoryNotFoundException) {
+			return [];
+		}
+	}
 
 	public void LogMemoryEdit(MemoryEdit edit) {
 		lock(gate) File.AppendAllText(MemoryLogPath, JsonIO.Serialize(edit) + "\n", Encoding.UTF8);
