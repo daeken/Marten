@@ -199,7 +199,7 @@ public class ProjectTests {
 		void Git(params string[] args) {
 			var psi = new ProcessStartInfo("git") { WorkingDirectory = dir.File("repo"), RedirectStandardOutput = true, RedirectStandardError = true };
 			foreach(var a in args) psi.ArgumentList.Add(a);
-			using var p = Process.Start(psi)!;
+			using var p = Marten.Tools.ChildProcessWatcher.StartExcluded(psi)!;
 			p.WaitForExit();
 			Assert.Equal(0, p.ExitCode);
 		}

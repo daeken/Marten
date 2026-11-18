@@ -49,8 +49,7 @@ public sealed class ProcessLauncher {
 		psi.ArgumentList.Add("set -m; ( eval \"$MARTEN_CMD\" ) >> \"$MARTEN_LOG\" 2>&1 < /dev/null & echo $!");
 		psi.Environment["MARTEN_CMD"] = command;
 		psi.Environment["MARTEN_LOG"] = logPath;
-		using var launcher = Process.Start(psi) ?? throw new ToolException("Couldn't start the shell.");
-		ChildProcessWatcher.Exclude(launcher.Id);
+		using var launcher = ChildProcessWatcher.StartExcluded(psi) ?? throw new ToolException("Couldn't start the shell.");
 		launcher.StandardInput.Close();
 		var output = launcher.StandardOutput.ReadToEnd();
 		launcher.WaitForExit();

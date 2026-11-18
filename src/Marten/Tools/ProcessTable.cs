@@ -88,38 +88,47 @@ public static partial class ProcessTable {
 /// The OS can't say which thread forked a child (on macOS), so while commands run we poll for new
 /// children and give each to the commands running when it appeared. A child seen while only one
 /// command ran is that command's; one seen during overlap is ambiguous and is reported, not killed.
+/// Children Marten starts itself (git, MCP servers, background launchers) go through StartExcluded
+/// and are never attributed. All state is process-wide: every watcher sees every child of this process.
 /// </summary>
 public sealed class ChildProcessWatcher {
-	public sealed class Lease(ChildProcessWatcher owner) : IDisposable {
+	public sealed class Lease : IDisposable {
 		public readonly HashSet<int> Owned = new();
 		public readonly HashSet<int> Ambiguous = new();
-		public void Dispose() => owner.Release(this);
+		public void Dispose() => Release(this);
 	}
 
-	readonly object gate = new();
-	readonly List<Lease> active = new();
-	HashSet<int> known = ProcessTable.ChildrenOf(ProcessTable.Self);
-	/// <summary>
-	/// Children Marten started on purpose (background processes, MCP servers), never attributed to a command.
-	/// Process-wide, because every watcher sees every child of this process.
-	/// </summary>
+	static readonly object gate = new();
+	static readonly List<Lease> active = new();
+	static HashSet<int> known = ProcessTable.ChildrenOf(ProcessTable.Self);
 	static readonly HashSet<int> excluded = new();
-	Timer? timer;
+	static Timer? timer;
 
-	public static void Exclude(int pid) { lock(excluded) excluded.Add(pid); }
+	/// <summary>
+	/// Start a process Marten owns, excluded before any poll can see it: the start and the exclusion
+	/// happen under the lock IsExcluded takes, so a poll that sees the new pid waits for its exclusion.
+	/// </summary>
+	public static Process? StartExcluded(ProcessStartInfo psi) {
+		lock(excluded) {
+			var p = Process.Start(psi);
+			if(p != null) excluded.Add(p.Id);
+			return p;
+		}
+	}
+
 	public static bool IsExcluded(int pid) { lock(excluded) return excluded.Contains(pid); }
 
 	public Lease Begin() {
 		lock(gate) {
 			Poll();
-			var lease = new Lease(this);
+			var lease = new Lease();
 			active.Add(lease);
 			timer ??= new Timer(_ => { lock(gate) Poll(); }, null, 200, 200);
 			return lease;
 		}
 	}
 
-	void Release(Lease lease) {
+	static void Release(Lease lease) {
 		lock(gate) {
 			active.Remove(lease);
 			if(active.Count == 0) {
@@ -132,7 +141,7 @@ public sealed class ChildProcessWatcher {
 	/// <summary>Poll now; call before acting on a lease so the freshest children are attributed.</summary>
 	public void Refresh() { lock(gate) Poll(); }
 
-	void Poll() {
+	static void Poll() {
 		var now = ProcessTable.ChildrenOf(ProcessTable.Self);
 		foreach(var pid in now) {
 			if(known.Contains(pid) || IsExcluded(pid)) continue;

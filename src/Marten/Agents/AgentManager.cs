@@ -186,7 +186,7 @@ public sealed class AgentManager {
 	static void Git(string repo, params string[] args) {
 		var psi = new ProcessStartInfo("git") { WorkingDirectory = repo, RedirectStandardOutput = true, RedirectStandardError = true };
 		foreach(var a in args) psi.ArgumentList.Add(a);
-		using var p = Process.Start(psi)!;
+		using var p = Marten.Tools.ChildProcessWatcher.StartExcluded(psi)!;
 		var err = p.StandardError.ReadToEnd();
 		p.StandardOutput.ReadToEnd();
 		p.WaitForExit();
