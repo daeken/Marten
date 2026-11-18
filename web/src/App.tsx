@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { AgentSummary, Api, Entry, Project, ProjectMemory, Schedule, SeraMessage, ServerEvent, Status_, TaskItem, takeToken } from './api';
+import { AgentSummary, Api, BackgroundProcess, Entry, Project, ProjectMemory, Schedule, SeraMessage, ServerEvent, Status_, TaskItem, takeToken } from './api';
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh'];
 
@@ -78,6 +78,7 @@ export function App() {
           break;
         case 'tasks':
         case 'schedules':
+        case 'processes':
         case 'memory':
           setTick(t => t + 1);
           break;
@@ -115,6 +116,8 @@ export function App() {
   let main;
   if (agent)
     main = <AgentView api={api} agent={agent} project={project} agents={status.agents} models={models} tick={tick} defaultModel={status.config.model ?? status.config.defaultModel ?? models[0]} defaultEffort={status.config.effort} onChange={refresh} onSelect={setSelected} entries={transcripts[agent.id] ?? []} streaming={streaming[agent.id] ?? ''} runningCall={running[agent.id]} />;
+  else if (selected === 'processes')
+    main = <ProcessesView api={api} tick={tick} onSelect={setSelected} />;
   else if (selected === 'inbox')
     main = <InboxView api={api} status={status} tick={status.inbox} onSelect={setSelected} />;
   else if (selected?.startsWith('memory:'))
@@ -185,6 +188,9 @@ function Sidebar({ api, status, selected, onSelect, onChange }: {
           <span className="name">Inbox</span>
           {status.inbox > 0 && <span className="badge">{status.inbox}</span>}
         </button>
+        <button className={`agent inbox ${selected === 'processes' ? 'active' : ''}`} onClick={() => onSelect('processes')}>
+          <span className="name">Processes</span>
+        </button>
         <div className="row">
           <span className="muted small">Projects</span>
           <button className="link" onClick={() => onSelect('new:project')}>New</button>
@@ -235,6 +241,8 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
 }) {
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   useEffect(() => { api.tasks(agent.id).then(setTasks).catch(() => setTasks([])); }, [api, agent.id, tick]);
+  const [procs, setProcs] = useState<BackgroundProcess[]>([]);
+  useEffect(() => { api.agentProcesses(agent.id).then(setProcs).catch(() => setProcs([])); }, [api, agent.id, tick]);
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   useEffect(() => { api.schedules(agent.id).then(setSchedules).catch(() => setSchedules([])); }, [api, agent.id, tick]);
   const parent = agents.find(a => a.id === agent.parentId);
@@ -296,6 +304,17 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
           {tasks.map(t => (
             <span key={t.id} className={`task ${t.state}`} title={t.reason ?? ''}>
               <span className="task-state">{t.state}</span> #{t.id} {t.title}{t.reason && t.state !== 'open' ? ` · ${t.reason}` : ''}
+            </span>
+          ))}
+        </div>
+      )}
+      {procs.length > 0 && (
+        <div className="tasks processes">
+          {procs.map(p => (
+            <span key={p.id} className={`task proc ${p.state}`} title={`${p.command}\n${p.workingDirectory}\nLog: ${p.logPath}`}>
+              <span className="task-state">{p.state}</span> #{p.id} {p.name} <span className="muted">pid {p.pid}</span>
+              <button className="link small" onClick={() => onSelect('processes')}>log</button>
+              <button className="link small" title="Stop it and everything it spawned" onClick={() => api.stopProcess(agent.id, p.id)}>stop</button>
             </span>
           ))}
         </div>
@@ -510,6 +529,52 @@ function MemoryView({ api, project, agents, tick }: { api: Api; project?: Projec
             </li>
           ))}
         </ul>
+      </div>
+    </div>
+  );
+}
+
+function ProcessesView({ api, tick, onSelect }: { api: Api; tick: number; onSelect: (id: string) => void }) {
+  const [procs, setProcs] = useState<BackgroundProcess[]>([]);
+  const [open, setOpen] = useState<string | null>(null);
+  const [log, setLog] = useState('');
+  const [showStopped, setShowStopped] = useState(false);
+  useEffect(() => { api.processes().then(setProcs).catch(() => setProcs([])); }, [api, tick]);
+  useEffect(() => {
+    if (!open) return;
+    const [agentId, n] = open.split('#');
+    const load = () => api.processLog(agentId, Number(n)).then(setLog);
+    load();
+    const timer = setInterval(load, 2000);
+    return () => clearInterval(timer);
+  }, [api, open]);
+  const shown = procs.filter(p => showStopped || p.state !== 'stopped');
+  return (
+    <div className="page">
+      <div className="doc wide">
+        <h2>Background processes</h2>
+        <label className="small muted"><input type="checkbox" checked={showStopped} onChange={e => setShowStopped(e.target.checked)} /> Show stopped</label>
+        {shown.length === 0 && <div className="muted">Nothing running. Agents start long-lived work like dev servers with process_start.</div>}
+        {shown.map(p => {
+          const key = `${p.agentId}#${p.id}`;
+          return (
+            <div key={key} className="inbox-item">
+              <div className="row">
+                <div>
+                  <span className={`dot ${p.state === 'running' ? 'running' : p.state === 'exited' ? 'error' : 'idle'}`} />{' '}
+                  <strong>{p.name}</strong> <span className="muted small">pid {p.pid} · {p.state} · started {time(p.started)} · by </span>
+                  <button className="link small" onClick={() => onSelect(p.agentId)}>{p.agentName}</button>
+                </div>
+                <div>
+                  <button className="link small" onClick={() => setOpen(open === key ? null : key)}>{open === key ? 'Hide log' : 'Log'}</button>
+                  {p.state !== 'stopped' && <button className="link small" onClick={() => api.stopProcess(p.agentId, p.id).then(() => api.processes().then(setProcs))}>Stop</button>}
+                </div>
+              </div>
+              <div className="small muted"><code>{p.command}</code> in {p.workingDirectory}</div>
+              {open === key && <pre className="output log-tail">{log || '(empty)'}</pre>}
+            </div>
+          );
+        })}
       </div>
     </div>
   );

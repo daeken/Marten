@@ -112,6 +112,7 @@ public sealed partial class Agent : IPowerShellOwner {
 			Info = Info with { Closed = closed };
 			JsonIO.Save(Path.Combine(Directory, "agent.json"), Info);
 		}
+		if(closed) _ = StopAllProcesses();
 		manager.Publish(new { type = "agents" });
 	}
 

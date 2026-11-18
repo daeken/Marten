@@ -15,10 +15,11 @@ var auth = new ChatGptAuth(home, http);
 var backend = new ResponsesBackend(auth, http);
 AgentManager? managerRef = null;
 Func<AgentManager> getManager = () => managerRef!;
+var childWatcher = new ChildProcessWatcher();
 var tools = new ToolRegistry()
 	.Add(new ReadFileTool())
 	.Add(new EditFileTool(new MemoryGuard(getManager)))
-	.Add(new PowerShellTool(() => managerRef!.Config.CommandTimeoutSeconds, () => managerRef!.Config.StopGraceSeconds, new ChildProcessWatcher()))
+	.Add(new PowerShellTool(() => managerRef!.Config.CommandTimeoutSeconds, () => managerRef!.Config.StopGraceSeconds, childWatcher))
 	.Add(new SendMessageTool(getManager))
 	.Add(new TaskAddTool(getManager))
 	.Add(new TaskUpdateTool(getManager))
@@ -29,8 +30,11 @@ var tools = new ToolRegistry()
 	.Add(new SetModelTool(getManager))
 	.Add(new ScheduleAddTool())
 	.Add(new ScheduleListTool())
-	.Add(new ScheduleRemoveTool());
-var manager = managerRef = new AgentManager(home, config, backend, tools);
+	.Add(new ScheduleRemoveTool())
+	.Add(new ProcessStartTool())
+	.Add(new ProcessListTool())
+	.Add(new ProcessStopTool());
+var manager = managerRef = new AgentManager(home, config, backend, tools) { Launcher = new ProcessLauncher(childWatcher) };
 var hub = new EventHub();
 manager.Events += hub.Broadcast;
 var security = new Security(home, config);
@@ -125,6 +129,25 @@ api.MapGet("/agents/{id}/schedules", (string id) =>
 	manager.Get(id) is { } a ? Results.Ok(a.Schedules.Where(s => !s.Done)) : Results.NotFound());
 api.MapDelete("/agents/{id}/schedules/{scheduleId:int}", (string id, int scheduleId) =>
 	manager.Get(id) is { } a && a.RemoveSchedule(scheduleId) ? Results.Ok() : Results.NotFound());
+object ProcessSummary(Agent a, BackgroundProcess p) => new {
+	agentId = a.Info.Id, agentName = a.Info.Name, p.Id, p.Name, p.Command, p.WorkingDirectory, p.Pid, p.Started, p.Stopped, p.LogPath,
+	state = p.Stopped != null ? "stopped" : Posix.Alive(p.Pid) ? "running" : "exited",
+};
+api.MapGet("/processes", () => manager.Agents.SelectMany(a => a.Processes.OrderByDescending(p => p.Started).Select(p => ProcessSummary(a, p))));
+api.MapGet("/agents/{id}/processes", (string id) =>
+	manager.Get(id) is { } a ? Results.Ok(a.Processes.Where(p => p.Stopped == null).Select(p => ProcessSummary(a, p))) : Results.NotFound());
+api.MapPost("/agents/{id}/processes/{n:int}/stop", async (string id, int n) =>
+	manager.Get(id) is { } a && await a.StopProcess(n) is { } p ? Results.Ok(ProcessSummary(a, p)) : Results.NotFound());
+api.MapGet("/agents/{id}/processes/{n:int}/log", (string id, int n, int? lines) => {
+	if(manager.Get(id)?.Processes.FirstOrDefault(p => p.Id == n) is not { } p) return Results.NotFound();
+	if(!File.Exists(p.LogPath)) return Results.Text("");
+	using var stream = new FileStream(p.LogPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+	var take = Math.Min(stream.Length, 256 * 1024);
+	stream.Seek(-take, SeekOrigin.End);
+	var text = new StreamReader(stream).ReadToEnd();
+	var all = text.Split('\n');
+	return Results.Text(string.Join('\n', all.TakeLast(Math.Clamp(lines ?? 200, 1, 5000))));
+});
 api.MapPost("/projects", (CreateProject req) => {
 	try {
 		var (project, orchestrator) = manager.CreateProject(req.Name ?? "", req.Bindings ?? [], req.Prompt, req.WorktreesByDefault ?? false);

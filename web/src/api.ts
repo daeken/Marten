@@ -44,6 +44,20 @@ export interface Schedule {
   lastResult?: string;
 }
 
+export interface BackgroundProcess {
+  agentId: string;
+  agentName: string;
+  id: number;
+  name: string;
+  command: string;
+  workingDirectory: string;
+  pid: number;
+  started: string;
+  stopped?: string;
+  logPath: string;
+  state: 'running' | 'exited' | 'stopped';
+}
+
 export interface TaskItem {
   id: number;
   title: string;
@@ -94,6 +108,7 @@ export type ServerEvent =
   | { type: 'projects' }
   | { type: 'tasks'; agentId: string }
   | { type: 'schedules'; agentId: string }
+  | { type: 'processes'; agentId: string }
   | { type: 'memory'; projectId: string }
   | { type: 'sera_message'; message: SeraMessage }
   | { type: 'config' };
@@ -141,6 +156,13 @@ export class Api {
     this.call<AgentSummary>('PUT', `/agents/${id}/settings`, { model, effort });
   tasks = (id: string) => this.call<TaskItem[]>('GET', `/agents/${id}/tasks`);
   schedules = (id: string) => this.call<Schedule[]>('GET', `/agents/${id}/schedules`);
+  processes = () => this.call<BackgroundProcess[]>('GET', '/processes');
+  agentProcesses = (id: string) => this.call<BackgroundProcess[]>('GET', `/agents/${id}/processes`);
+  stopProcess = (id: string, n: number) => this.call<BackgroundProcess>('POST', `/agents/${id}/processes/${n}/stop`);
+  processLog = async (id: string, n: number, lines = 200) => {
+    const res = await fetch(`/api/agents/${id}/processes/${n}/log?lines=${lines}`, { headers: { Authorization: `Bearer ${this.token}` } });
+    return res.ok ? res.text() : '';
+  };
   removeSchedule = (id: string, scheduleId: number) => this.call<void>('DELETE', `/agents/${id}/schedules/${scheduleId}`);
   createProject = (p: { name: string; bindings: string[]; prompt: string | null; worktreesByDefault: boolean; brief: string | null }) =>
     this.call<Project>('POST', '/projects', p);

@@ -18,6 +18,8 @@ public sealed class AgentManager {
 	public Config Config { get; private set; }
 	public IModelBackend Backend { get; }
 	public ToolRegistry Tools { get; }
+	/// <summary>Starts agents' background processes; Program shares the PowerShell tool's child watcher with it.</summary>
+	public ProcessLauncher Launcher { get; init; } = new();
 	readonly ConcurrentDictionary<string, Agent> agents = new();
 	readonly ConcurrentDictionary<string, Project> projects = new();
 	readonly SemaphoreSlim modelGate = new(1, 1);
