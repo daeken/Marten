@@ -1,5 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import Markdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { AgentSummary, Api, Entry, ServerEvent, Status_, takeToken } from './api';
+
+const EFFORTS = ['low', 'medium', 'high', 'xhigh'];
+
+/** Merge entries by sequence number, so a late HTTP snapshot never erases live websocket entries. */
+function mergeEntries(a: Entry[], b: Entry[]): Entry[] {
+  const bySeq = new Map<number, Entry>();
+  for (const e of a) bySeq.set(e.seq, e);
+  for (const e of b) bySeq.set(e.seq, e);
+  return [...bySeq.values()].sort((x, y) => x.seq - y.seq);
+}
 
 const statusLabel: Record<AgentSummary['status'], string> = {
   idle: 'Idle', running: 'Working', waiting_for_quota: 'Waiting for quota', error: 'Error',
@@ -14,6 +26,11 @@ export function App() {
   const [transcripts, setTranscripts] = useState<Record<string, Entry[]>>({});
   const [streaming, setStreaming] = useState<Record<string, string>>({});
   const [running, setRunning] = useState<Record<string, string>>({});
+  const [models, setModels] = useState<string[]>([]);
+  const connected = status?.auth.connected ?? false;
+  useEffect(() => {
+    if (api && connected) api.models().then(setModels).catch(() => setModels([]));
+  }, [api, connected]);
 
   const refresh = useCallback(async () => {
     if (!api) return;
@@ -30,7 +47,7 @@ export function App() {
   const loadTranscript = useCallback(async (id: string) => {
     if (!api) return;
     const entries = await api.transcript(id);
-    setTranscripts(t => ({ ...t, [id]: entries }));
+    setTranscripts(t => ({ ...t, [id]: mergeEntries(t[id] ?? [], entries) }));
   }, [api]);
 
   useEffect(() => { refresh(); }, [refresh]);
@@ -45,7 +62,7 @@ export function App() {
     const onEvent = (e: ServerEvent) => {
       switch (e.type) {
         case 'entry':
-          setTranscripts(t => t[e.agentId] ? { ...t, [e.agentId]: [...t[e.agentId].filter(x => x.seq !== e.entry.seq), e.entry] } : t);
+          setTranscripts(t => t[e.agentId] ? { ...t, [e.agentId]: mergeEntries(t[e.agentId], [e.entry]) } : t);
           if (e.entry.kind === 'assistant' || e.entry.kind === 'tool_call' || e.entry.kind === 'idle' || e.entry.kind === 'error')
             setStreaming(s => ({ ...s, [e.agentId]: '' }));
           if (e.entry.kind === 'tool_result') setRunning(r => { const { [e.agentId]: _, ...rest } = r; return rest; });
@@ -87,7 +104,7 @@ export function App() {
       <Sidebar api={api} status={status} selected={selected} onSelect={setSelected} onChange={refresh} />
       <main className="main">
         {agent
-          ? <AgentView api={api} agent={agent} entries={transcripts[agent.id] ?? []} streaming={streaming[agent.id] ?? ''} runningCall={running[agent.id]} />
+          ? <AgentView api={api} agent={agent} models={models} defaultModel={status.config.model ?? status.config.defaultModel ?? models[0]} defaultEffort={status.config.effort} onChange={refresh} entries={transcripts[agent.id] ?? []} streaming={streaming[agent.id] ?? ''} runningCall={running[agent.id]} />
           : <div className="empty">Start a chat to begin.</div>}
       </main>
     </div>
@@ -97,11 +114,6 @@ export function App() {
 function Sidebar({ api, status, selected, onSelect, onChange }: {
   api: Api; status: Status_; selected: string | null; onSelect: (id: string) => void; onChange: () => void;
 }) {
-  const [models, setModels] = useState<string[]>([]);
-  useEffect(() => {
-    if (status.auth.connected) api.models().then(setModels).catch(() => setModels([]));
-  }, [api, status.auth.connected]);
-
   const connect = async () => {
     const { url } = await api.login();
     window.open(url, '_blank', 'noopener');
@@ -129,14 +141,6 @@ function Sidebar({ api, status, selected, onSelect, onChange }: {
         {status.auth.connected ? (
           <>
             <div className="muted small">ChatGPT · {status.auth.email ?? 'connected'}</div>
-            <select value={status.config.model ?? ''} onChange={e => api.setConfig(e.target.value || null, status.config.effort ?? null).then(onChange)}>
-              <option value="">Default model{models[0] ? ` (${models[0]})` : ''}</option>
-              {models.map(m => <option key={m} value={m}>{m}</option>)}
-            </select>
-            <select value={status.config.effort ?? ''} onChange={e => api.setConfig(status.config.model ?? null, e.target.value || null).then(onChange)}>
-              <option value="">Default effort</option>
-              {['low', 'medium', 'high', 'xhigh'].map(x => <option key={x} value={x}>{x}</option>)}
-            </select>
             <button className="link" onClick={() => api.logout().then(onChange)}>Sign out</button>
           </>
         ) : (
@@ -166,8 +170,9 @@ function Sidebar({ api, status, selected, onSelect, onChange }: {
   );
 }
 
-function AgentView({ api, agent, entries, streaming, runningCall }: {
-  api: Api; agent: AgentSummary; entries: Entry[]; streaming: string; runningCall?: string;
+function AgentView({ api, agent, models, defaultModel, defaultEffort, onChange, entries, streaming, runningCall }: {
+  api: Api; agent: AgentSummary; models: string[]; defaultModel?: string; defaultEffort?: string; onChange: () => void;
+  entries: Entry[]; streaming: string; runningCall?: string;
 }) {
   const [text, setText] = useState('');
   const [mode, setMode] = useState<'queued' | 'immediate'>('queued');
@@ -196,7 +201,19 @@ function AgentView({ api, agent, entries, streaming, runningCall }: {
           <div className="title">{agent.name}</div>
           <div className="muted small">{agent.workingDirectory}</div>
         </div>
-        <div className={`state ${agent.status}`}>{statusLabel[agent.status]}{agent.statusDetail ? ` · ${agent.statusDetail}` : ''}</div>
+        <div className="head-right">
+          <div className="pickers">
+            <select title="Model for this agent" value={agent.model ?? ''} onChange={e => api.setAgentSettings(agent.id, e.target.value || null, agent.effort ?? null).then(onChange)}>
+              <option value="">{defaultModel ? `Default (${defaultModel})` : 'Default model'}</option>
+              {[...new Set([...(agent.model ? [agent.model] : []), ...models])].map(m => <option key={m} value={m}>{m}</option>)}
+            </select>
+            <select title="Reasoning effort for this agent" value={agent.effort ?? ''} onChange={e => api.setAgentSettings(agent.id, agent.model ?? null, e.target.value || null).then(onChange)}>
+              <option value="">{defaultEffort ? `Default (${defaultEffort})` : 'Default effort'}</option>
+              {EFFORTS.map(x => <option key={x} value={x}>{x}</option>)}
+            </select>
+          </div>
+          <div className={`state ${agent.status}`}>{statusLabel[agent.status]}{agent.statusDetail ? ` · ${agent.statusDetail}` : ''}</div>
+        </div>
       </header>
       {agent.abandonedRunspaces.length > 0 && (
         <div className="banner">
@@ -205,26 +222,30 @@ function AgentView({ api, agent, entries, streaming, runningCall }: {
       )}
       <div className="log" ref={scroller}>
         {entries.map(e => <EntryView key={e.seq} entry={e} result={e.kind === 'tool_call' ? results.get(e.callId) : undefined} running={e.callId === runningCall} />)}
-        {streaming && <div className="assistant streaming">{streaming}</div>}
+        {streaming && <div className="assistant streaming"><Md text={streaming} /></div>}
+        {agent.status === 'running' && !streaming && !runningCall && <Thinking />}
+        {agent.status === 'waiting_for_quota' && <Thinking label="Waiting for quota" />}
       </div>
       <footer className="composer">
-        <textarea
-          value={text}
-          placeholder={busy ? 'Message (agent is working)' : 'Message'}
-          onChange={e => setText(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
-          rows={3}
-        />
-        <div className="actions">
-          {busy && (
-            <div className="modes">
-              <label><input type="radio" checked={mode === 'queued'} onChange={() => setMode('queued')} /> Queue</label>
-              <label><input type="radio" checked={mode === 'immediate'} onChange={() => setMode('immediate')} /> Steer now</label>
-            </div>
-          )}
-          {busy && <button onClick={() => api.interrupt(agent.id)}>Stop</button>}
-          <button className="primary" onClick={send} disabled={!text.trim()}>Send</button>
+        <div className="composer-row">
+          <textarea
+            value={text}
+            placeholder={busy ? 'Message (agent is working)' : 'Message'}
+            onChange={e => setText(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
+            rows={3}
+          />
+          <div className="actions">
+            <button className="primary" onClick={send} disabled={!text.trim()}>Send</button>
+            {busy && <button onClick={() => api.interrupt(agent.id)}>Stop</button>}
+          </div>
         </div>
+        {busy && (
+          <div className="modes">
+            <label><input type="radio" checked={mode === 'queued'} onChange={() => setMode('queued')} /> Queue</label>
+            <label><input type="radio" checked={mode === 'immediate'} onChange={() => setMode('immediate')} /> Steer now</label>
+          </div>
+        )}
       </footer>
     </div>
   );
@@ -233,11 +254,13 @@ function AgentView({ api, agent, entries, streaming, runningCall }: {
 function EntryView({ entry: e, result, running }: { entry: Entry; result?: Entry; running: boolean }) {
   switch (e.kind) {
     case 'message':
-      return <div className={`message ${e.from === 'Sera' ? 'mine' : 'other'}`}>{e.from !== 'Sera' && <div className="from">{e.from}</div>}{e.text}</div>;
+      return e.from === 'Sera'
+        ? <div className="message mine">{e.text}</div>
+        : <div className="message other"><div className="from">{e.from}</div><Md text={e.text ?? ''} /></div>;
     case 'assistant':
-      return e.text ? <div className="assistant">{e.text}</div> : null;
+      return e.text ? <div className="assistant"><Md text={e.text} /></div> : null;
     case 'reasoning':
-      return e.text ? <details className="reasoning"><summary>Reasoning</summary><div>{e.text}</div></details> : null;
+      return e.text ? <details className="reasoning"><summary>Reasoning</summary><div><Md text={e.text} /></div></details> : null;
     case 'tool_call':
       return <ToolCall call={e} result={result} running={running} />;
     case 'error':
@@ -265,5 +288,25 @@ function ToolCall({ call, result, running }: { call: Entry; result?: Entry; runn
       <pre className="args">{typeof args === 'string' ? args : call.name === 'powershell' ? args.command : JSON.stringify(args, null, 2)}</pre>
       {result && <pre className="output">{result.text}</pre>}
     </details>
+  );
+}
+
+/** Markdown without raw HTML: react-markdown escapes HTML unless a plugin allows it, so model output can't inject markup. */
+function Md({ text }: { text: string }) {
+  return (
+    <div className="md">
+      <Markdown remarkPlugins={[remarkGfm]} components={{ a: ({ node: _, ...props }) => <a {...props} target="_blank" rel="noreferrer" /> }}>
+        {text}
+      </Markdown>
+    </div>
+  );
+}
+
+function Thinking({ label = 'Thinking' }: { label?: string }) {
+  return (
+    <div className="thinking" aria-live="polite">
+      <span className="blob" /><span className="blob" /><span className="blob" />
+      <span className="label">{label}</span>
+    </div>
   );
 }

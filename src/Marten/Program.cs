@@ -42,14 +42,14 @@ if(webRoot != null) {
 }
 
 object AgentSummary(Agent a) => new {
-	a.Info.Id, a.Info.Kind, a.Info.Name, a.Info.Created, a.Info.WorkingDirectory, a.Info.Model,
+	a.Info.Id, a.Info.Kind, a.Info.Name, a.Info.Created, a.Info.WorkingDirectory, a.Info.Model, a.Info.Effort,
 	a.Status, a.StatusDetail, Pending = a.PendingCount, a.AbandonedRunspaces,
 };
 
 var api = app.MapGroup("/api");
 api.MapGet("/status", () => new {
 	auth = new { connected = auth.Connected, email = auth.Email, signingIn = auth.SigningIn, lastError = auth.LastError },
-	config = new { manager.Config.Model, manager.Config.Effort },
+	config = new { manager.Config.Model, manager.Config.Effort, DefaultModel = manager.KnownDefaultModel },
 	agents = manager.Agents.Select(AgentSummary),
 });
 api.MapPost("/auth/login", () => new { url = auth.BeginLogin() });
@@ -74,6 +74,11 @@ api.MapPost("/agents/{id}/messages", (string id, SendMessage req) => {
 	if(string.IsNullOrWhiteSpace(req.Text)) return Results.BadRequest();
 	a.Send(new Inbound("Sera", req.Text, req.Mode ?? SendMode.Queued));
 	return Results.Accepted();
+});
+api.MapPut("/agents/{id}/settings", (string id, ConfigUpdate update) => {
+	if(manager.Get(id) is not { } a) return Results.NotFound();
+	a.UpdateSettings(Blank(update.Model), Blank(update.Effort));
+	return Results.Ok(AgentSummary(a));
 });
 api.MapPost("/agents/{id}/interrupt", (string id) => {
 	if(manager.Get(id) is not { } a) return Results.NotFound();

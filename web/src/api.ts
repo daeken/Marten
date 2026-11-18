@@ -8,6 +8,7 @@ export interface AgentSummary {
   created: string;
   workingDirectory: string;
   model?: string;
+  effort?: string;
   status: Status;
   statusDetail?: string;
   pending: number;
@@ -31,7 +32,7 @@ export interface Entry {
 
 export interface Status_ {
   auth: { connected: boolean; email?: string; signingIn: boolean; lastError?: string };
-  config: { model?: string; effort?: string };
+  config: { model?: string; effort?: string; defaultModel?: string };
   agents: AgentSummary[];
 }
 
@@ -84,6 +85,8 @@ export class Api {
   createChat = (name: string) => this.call<AgentSummary>('POST', '/agents', { name });
   transcript = (id: string) => this.call<Entry[]>('GET', `/agents/${id}/transcript`);
   send = (id: string, text: string, mode: 'immediate' | 'queued') => this.call<void>('POST', `/agents/${id}/messages`, { text, mode });
+  setAgentSettings = (id: string, model: string | null, effort: string | null) =>
+    this.call<AgentSummary>('PUT', `/agents/${id}/settings`, { model, effort });
   interrupt = (id: string) => this.call<void>('POST', `/agents/${id}/interrupt`);
 
   /** Subscribe to runtime events, reconnecting with backoff. Returns an unsubscribe function. */
