@@ -70,9 +70,8 @@ public sealed class McpClient : IAsyncDisposable {
 		foreach(var (k, v) in config.Env) psi.Environment[k] = v;
 		Process process;
 		try {
-			process = Process.Start(psi) ?? throw new McpException($"Couldn't start {config.Command}.");
 			// Never let a timed-out PowerShell command that ran meanwhile take an MCP server down with it.
-			Marten.Tools.ChildProcessWatcher.Exclude(process.Id);
+			process = Marten.Tools.ChildProcessWatcher.StartExcluded(psi) ?? throw new McpException($"Couldn't start {config.Command}.");
 		} catch(System.ComponentModel.Win32Exception e) {
 			throw new McpException($"Couldn't start {config.Command}: {e.Message}");
 		}
