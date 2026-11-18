@@ -22,6 +22,8 @@ public sealed record Config {
 	public double ElideAt { get; init; } = 0.3;
 	/// <summary>Project memory size cap. An edit past it fails, so agents prune before adding.</summary>
 	public int MemoryCapBytes { get; init; } = 16 * 1024;
+	/// <summary>Extra model ids per backend (anthropic, zai, deepseek), listed ahead of what the provider reports.</summary>
+	public Dictionary<string, List<string>> Models { get; init; } = new();
 	/// <summary>MCP servers by name (stdio only). Their tools appear to agents as name__tool.</summary>
 	public Dictionary<string, Marten.Mcp.McpServerConfig> Mcp { get; init; } = new();
 	/// <summary>Extra Origin allowed to call the API, e.g. the Vite dev server.</summary>

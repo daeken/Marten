@@ -22,7 +22,7 @@ public sealed record MessagesProvider {
 	public bool ClaudeFeatures { get; init; }
 	/// <summary>Map the agent's effort onto output_config.effort.</summary>
 	public bool SendEffort { get; init; }
-	/// <summary>Models to list when the provider has no models endpoint we use.</summary>
+	/// <summary>Models to list when the provider's models endpoint fails or isn't there.</summary>
 	public IReadOnlyList<string> Models { get; init; } = [];
 	/// <summary>Bare model names this provider owns, by prefix.</summary>
 	public IReadOnlyList<string> Prefixes { get; init; } = [];
@@ -34,7 +34,7 @@ public sealed record MessagesProvider {
 	// https://docs.z.ai/scenario-example (Anthropic-compatible endpoint, token auth)
 	public static readonly MessagesProvider Zai = new() {
 		Name = "zai", Label = "z.ai", BaseUrl = "https://api.z.ai/api/anthropic", Bearer = true, EnvVar = "ZAI_API_KEY",
-		Models = ["glm-4.7", "glm-4.5-air"], Prefixes = ["glm-"],
+		Models = ["glm-5.3", "glm-5.3-flash", "glm-4.7"], Prefixes = ["glm-"],
 	};
 	// https://api-docs.deepseek.com/guides/anthropic_api
 	public static readonly MessagesProvider DeepSeek = new() {
@@ -45,7 +45,11 @@ public sealed record MessagesProvider {
 }
 
 /// <summary>An Anthropic Messages API backend. Stateless: the full history goes up each call, streamed back.</summary>
-public sealed class MessagesBackend(MessagesProvider provider, Home home) : IModelBackend {
+/// <param name="extraModels">Models Sera added in config for this provider, listed first.</param>
+public sealed class MessagesBackend(MessagesProvider provider, Home home, Func<string, IReadOnlyList<string>>? extraModels = null) : IModelBackend {
+	IReadOnlyList<string>? liveModels;
+	DateTimeOffset liveModelsAt;
+
 	public string Provider => provider.Name;
 	public MessagesProvider Settings => provider;
 	string KeyPath => Path.Combine(home.Secrets, $"{provider.Name}-api-key");
@@ -78,14 +82,24 @@ public sealed class MessagesBackend(MessagesProvider provider, Home home) : IMod
 		return client.WithOptions(o => o with { BaseUrl = provider.BaseUrl ?? o.BaseUrl, MaxRetries = 0, Timeout = TimeSpan.FromMinutes(30) });
 	}
 
+	/// <summary>
+	/// Config extras, then the provider's own list from its models endpoint (cached for an hour),
+	/// or the built-in list when the endpoint fails or isn't there.
+	/// </summary>
 	public async Task<IReadOnlyList<string>> ListModelsAsync(CancellationToken ct) {
-		if(provider.Models.Count > 0 || !Connected) return provider.Models;
-		try {
-			var page = await Client().Models.List(cancellationToken: ct);
-			return page.Items.Select(m => m.ID).ToList();
-		} catch(Exception e) when(e is not OperationCanceledException) {
-			throw Map(e);
+		if(!Connected) return [];
+		if(liveModels == null || DateTimeOffset.UtcNow - liveModelsAt > TimeSpan.FromHours(1)) {
+			try {
+				var page = await Client().Models.List(cancellationToken: ct);
+				var ids = page.Items.Select(m => m.ID).ToList();
+				liveModels = ids.Count > 0 ? ids : null;
+			} catch(Exception e) when(e is not OperationCanceledException) {
+				if(provider.Models.Count == 0) throw Map(e);
+				liveModels = null;
+			}
+			liveModelsAt = DateTimeOffset.UtcNow;
 		}
+		return (extraModels?.Invoke(provider.Name) ?? []).Concat(liveModels ?? provider.Models).Distinct().ToList();
 	}
 
 	public async Task<ModelResult> CompleteAsync(ModelRequest req, Action<string> onTextDelta, CancellationToken ct) {

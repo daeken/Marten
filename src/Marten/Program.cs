@@ -13,9 +13,10 @@ var config = Config.Load(home);
 var http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
 http.DefaultRequestHeaders.UserAgent.ParseAdd("Marten/0.1");
 var auth = new ChatGptAuth(home, http);
-var messagesBackends = MessagesProvider.All.Select(p => new MessagesBackend(p, home)).ToList();
-var backend = new BackendRouter(new ResponsesBackend(auth, http), messagesBackends.Select(b => ((IModelBackend) b, b.Settings.Prefixes)).ToList());
 AgentManager? managerRef = null;
+var messagesBackends = MessagesProvider.All.Select(p => new MessagesBackend(p, home,
+	name => managerRef?.Config.Models.GetValueOrDefault(name) ?? [])).ToList();
+var backend = new BackendRouter(new ResponsesBackend(auth, http), messagesBackends.Select(b => ((IModelBackend) b, b.Settings.Prefixes)).ToList());
 Func<AgentManager> getManager = () => managerRef!;
 var childWatcher = new ChildProcessWatcher();
 var scriptTools = new ScriptToolSource(getManager);
@@ -92,6 +93,11 @@ api.MapGet("/status", () => new {
 api.MapPost("/pause", (PauseRequest req) => {
 	manager.SetPausedAll(req.Paused);
 	return Results.Ok();
+});
+api.MapPost("/agents/{id}/close", (string id, CloseRequest req) => {
+	if(manager.Get(id) is not { } a) return Results.NotFound();
+	a.SetClosed(req.Closed);
+	return Results.Ok(AgentSummary(a));
 });
 api.MapPost("/agents/{id}/pause", (string id, PauseRequest req) => {
 	if(manager.Get(id) is not { } a) return Results.NotFound();
@@ -260,3 +266,4 @@ record SendMessage(string Text, SendMode? Mode);
 record PauseRequest(bool Paused);
 record AnswerRequest(int? Choice, string? Text);
 record BackendKey(string? Key);
+record CloseRequest(bool Closed);
