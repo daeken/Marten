@@ -19,6 +19,11 @@ public sealed class MartenApi(Agent agent, AgentManager manager) {
 		a.Info.Id, Kind = a.Info.Kind.ToString(), a.Info.Name, Status = a.Status.ToString(), a.Info.ProjectId, a.Info.ParentId, a.Info.Closed,
 	}).ToArray<object>();
 
+	/// <summary>Your last few PowerShell runs: command, directory, $State in and out, output. Re-run one by pasting its command with its state.</summary>
+	public object[] Notebook(int last = 10) => agent.Notebook().TakeLast(Math.Clamp(last, 1, 200)).Select(c => new {
+		c.Id, c.At, c.Command, c.WorkingDirectory, StateIn = c.StateIn?.ToJsonString(), StateOut = c.StateOut?.ToJsonString(), c.Output, c.IsError, c.DurationMs,
+	}).ToArray<object>();
+
 	/// <summary>Show an image file to the model with this command's result. View-Image wraps it.</summary>
 	public string ViewImage(string path) => agent.ViewImage(path).Path;
 

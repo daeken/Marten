@@ -76,6 +76,11 @@ export interface McpServer {
   running: { agentId: string; agentName?: string; pid: number }[];
 }
 
+export interface NotebookCell {
+  id: number; at: string; command: string; workingDirectory: string; stateIn?: unknown; stateOut?: unknown;
+  output: string; isError: boolean; durationMs: number;
+}
+
 export interface TaskItem {
   id: number;
   title: string;
@@ -201,6 +206,13 @@ export class Api {
   send = (id: string, text: string, mode: 'immediate' | 'queued') => this.call<void>('POST', `/agents/${id}/messages`, { text, mode });
   setAgentSettings = (id: string, model: string | null, effort: string | null) =>
     this.call<AgentSummary>('PUT', `/agents/${id}/settings`, { model, effort });
+  notebook = (id: string) => this.call<NotebookCell[]>('GET', `/agents/${id}/notebook?limit=300`);
+  rerunCell = (id: string, n: number) => this.call<{ run: NotebookCell; sameOutput: boolean; sameState: boolean }>('POST', `/agents/${id}/notebook/${n}/rerun`);
+  notebookFile = async (id: string) => {
+    const res = await fetch(`/api/agents/${id}/notebook.ipynb`, { headers: { Authorization: `Bearer ${this.token}` } });
+    if (!res.ok) throw new Error(`Export failed (${res.status})`);
+    return res.blob();
+  };
   tasks = (id: string) => this.call<TaskItem[]>('GET', `/agents/${id}/tasks`);
   schedules = (id: string) => this.call<Schedule[]>('GET', `/agents/${id}/schedules`);
   processes = () => this.call<BackgroundProcess[]>('GET', '/processes');

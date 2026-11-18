@@ -256,6 +256,19 @@ api.MapPost("/agents/{id}/interrupt", (string id) => {
 	a.Interrupt();
 	return Results.Ok();
 });
+api.MapGet("/agents/{id}/notebook", (string id, int? limit) =>
+	manager.Get(id) is { } a ? Results.Ok(a.Notebook().TakeLast(Math.Clamp(limit ?? 100, 1, 2000))) : Results.NotFound());
+api.MapPost("/agents/{id}/notebook/{n:int}/rerun", async (string id, int n, CancellationToken ct) => {
+	if(manager.Get(id) is not { } a) return Results.NotFound();
+	try {
+		var (run, sameOutput, sameState) = await a.RerunCell(n, ct);
+		return Results.Ok(new { run, sameOutput, sameState });
+	} catch(KeyNotFoundException) {
+		return Results.NotFound();
+	}
+});
+api.MapGet("/agents/{id}/notebook.ipynb", (string id) =>
+	manager.Get(id) is { } a ? Results.File(System.Text.Encoding.UTF8.GetBytes(a.NotebookIpynb()), "application/x-ipynb+json", $"{a.Info.Name}-notebook.ipynb") : Results.NotFound());
 api.MapGet("/agents/{id}/tasks", (string id) =>
 	manager.Get(id) is { } a ? Results.Ok(a.Tasks) : Results.NotFound());
 api.MapGet("/agents/{id}/schedules", (string id) =>

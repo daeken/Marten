@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { AgentMessage, AgentSummary, Api, Backend, BackgroundProcess, BackupStatus, Entry, OutsideClient, McpServer, Project, ProjectMemory, Schedule, ScriptToolInfo, SeraMessage, ServerEvent, Status_, TaskItem, takeToken } from './api';
+import { AgentMessage, AgentSummary, Api, Backend, BackgroundProcess, BackupStatus, Entry, NotebookCell, OutsideClient, McpServer, Project, ProjectMemory, Schedule, ScriptToolInfo, SeraMessage, ServerEvent, Status_, TaskItem, takeToken } from './api';
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh'];
 
@@ -302,6 +302,7 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
   const parent = agents.find(a => a.id === agent.parentId);
   const [text, setText] = useState('');
   const [mode, setMode] = useState<'queued' | 'immediate'>('queued');
+  const [showNotebook, setShowNotebook] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
   const busy = agent.status === 'running' || agent.status === 'waiting_for_quota';
 
@@ -347,6 +348,8 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
             </select>
           </div>
           <div className="head-actions">
+            <button className={`small ${showNotebook ? 'on' : ''}`} onClick={() => setShowNotebook(v => !v)}
+              title="Every PowerShell run with its $State in and out; re-run or export as a Jupyter notebook">{showNotebook ? 'Transcript' : 'Notebook'}</button>
             <button className="small" onClick={() => api.closeAgent(agent.id, !agent.closed).then(onChange)}
               title={agent.closed ? 'Reopen this agent' : 'Close this agent: it keeps its history, stops its processes and schedules, and wakes again when messaged'}>{agent.closed ? 'Reopen' : 'Close'}</button>
             <button className="small" onClick={() => api.pauseAgent(agent.id, !agent.paused).then(onChange)}
@@ -398,7 +401,8 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
           {agent.abandonedRunspaces.length} PowerShell runspace{agent.abandonedRunspaces.length > 1 ? 's' : ''} abandoned after a timeout. Last: <code>{agent.abandonedRunspaces.at(-1)!.command.slice(0, 120)}</code>. Restart Marten to reclaim them.
         </div>
       )}
-      <div className="log" ref={scroller}>
+      {showNotebook && <NotebookView api={api} agent={agent} tick={tick} />}
+      <div className="log" ref={scroller} style={showNotebook ? { display: 'none' } : undefined}>
         {entries.map(e => <EntryView key={e.seq} entry={e} result={e.kind === 'tool_call' ? results.get(e.callId) : undefined} running={e.callId === runningCall} imageUrl={p => api.imageUrl(agent.id, p)} />)}
         {streaming && <div className="assistant streaming"><Md text={streaming} /></div>}
         {agent.status === 'running' && !streaming && !runningCall && <Thinking />}
@@ -426,6 +430,62 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
           </div>
         )}
       </footer>
+    </div>
+  );
+}
+
+/** The agent's PowerShell runs as cells: what went in ($State, directory, command), what came out, and a re-run to check it reproduces. */
+function NotebookView({ api, agent, tick }: { api: Api; agent: AgentSummary; tick: number }) {
+  const [cells, setCells] = useState<NotebookCell[]>([]);
+  const [reruns, setReruns] = useState<Record<number, { run: NotebookCell; sameOutput: boolean; sameState: boolean } | 'running' | string>>({});
+  useEffect(() => { api.notebook(agent.id).then(setCells).catch(() => setCells([])); }, [api, agent.id, tick]);
+  const rerun = async (n: number) => {
+    setReruns(r => ({ ...r, [n]: 'running' }));
+    try { const res = await api.rerunCell(agent.id, n); setReruns(r => ({ ...r, [n]: res })); }
+    catch (e) { setReruns(r => ({ ...r, [n]: String((e as Error).message ?? e) })); }
+  };
+  const exportIpynb = async () => {
+    const blob = await api.notebookFile(agent.id);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${agent.name}-notebook.ipynb`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+  const json = (v: unknown) => v === undefined || v === null ? 'null' : JSON.stringify(v, null, 2);
+  return (
+    <div className="log notebook">
+      <div className="row">
+        <span className="muted small">{cells.length} PowerShell run{cells.length === 1 ? '' : 's'}. Each ran in a fresh runspace, so its directory, $State and command are everything it depended on inside Marten.</span>
+        {cells.length > 0 && <button className="small" onClick={exportIpynb}>Export .ipynb</button>}
+      </div>
+      {cells.length === 0 && <div className="muted">No PowerShell runs yet.</div>}
+      {cells.slice().reverse().map(c => {
+        const r = reruns[c.id];
+        return (
+          <div key={c.id} className={`cell ${c.isError ? 'error' : ''}`}>
+            <div className="row small">
+              <strong>[{c.id}]</strong>
+              <span className="muted">{formatWhen(c.at)} · {c.durationMs} ms · <code>{c.workingDirectory}</code></span>
+              <button className="small" disabled={r === 'running'} onClick={() => rerun(c.id)}
+                title="Run this command again with the same directory and $State going in. It really runs: files it writes get written again. The agent's own $State is untouched.">
+                {r === 'running' ? 'Running…' : 'Re-run'}</button>
+            </div>
+            <pre className="output">{c.command}</pre>
+            <details><summary className="small muted">Output{c.isError ? ' (error)' : ''}</summary><pre className="output log-tail">{c.output}</pre></details>
+            <details><summary className="small muted">$State in / out</summary>
+              <div className="state-diff"><pre className="output">{json(c.stateIn)}</pre><pre className="output">{json(c.stateOut)}</pre></div>
+            </details>
+            {r && r !== 'running' && (typeof r === 'string'
+              ? <div className="error small">{r}</div>
+              : <div className="small">
+                  Re-run: <span className={r.sameOutput ? 'ok' : 'warn'}>{r.sameOutput ? 'same output' : 'different output'}</span>,{' '}
+                  <span className={r.sameState ? 'ok' : 'warn'}>{r.sameState ? 'same $State' : 'different $State'}</span> ({r.run.durationMs} ms)
+                  {!r.sameOutput && <details><summary className="muted">New output</summary><pre className="output log-tail">{r.run.output}</pre></details>}
+                </div>)}
+          </div>
+        );
+      })}
     </div>
   );
 }

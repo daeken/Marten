@@ -224,3 +224,11 @@ button.small { padding: 2px 8px; font-size: 12px; }
 .task .check { margin-left: 6px; font-size: 0.85em; opacity: 0.8; }
 .task .check.pass { color: var(--ok); }
 .task .check.fail { color: var(--bad); }
+
+.notebook .cell { border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; margin: 8px 0; background: var(--panel); }
+.notebook .cell.error { border-color: var(--bad); }
+.notebook .cell pre.output { margin: 6px 0; }
+.notebook .state-diff { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.notebook .ok { color: var(--ok); }
+.notebook .warn { color: var(--warn); }
+button.on { border-color: var(--accent); }

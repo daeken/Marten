@@ -11,6 +11,24 @@ public interface IPowerShellOwner : IToolContext {
 	JsonNode? PowerShellState { get; set; }
 	object MartenObject { get; }
 	void RunspaceAbandoned(string command);
+	/// <summary>Called after every run with what went in and what came out, for the agent's notebook.</summary>
+	void RecordCell(NotebookCell cell) { }
+}
+
+/// <summary>
+/// One PowerShell run, kept so it can be read back, re-run and exported: a fresh runspace means the command, its
+/// working directory and $State going in are everything it depended on inside Marten.
+/// </summary>
+public sealed record NotebookCell {
+	public int Id { get; init; }
+	public DateTimeOffset At { get; init; }
+	public required string Command { get; init; }
+	public required string WorkingDirectory { get; init; }
+	public JsonNode? StateIn { get; init; }
+	public JsonNode? StateOut { get; init; }
+	public required string Output { get; init; }
+	public bool IsError { get; init; }
+	public long DurationMs { get; init; }
 }
 
 /// <summary>
@@ -54,7 +72,17 @@ public sealed class PowerShellTool(Func<int> defaultTimeoutSeconds, Func<int> st
 		var gate = GateFor(owner.AgentId);
 		await gate.WaitAsync(ct);
 		try {
-			return await RunLockedAsync(owner, command, timeout, ct);
+			var stateIn = owner.PowerShellState;
+			var started = DateTimeOffset.UtcNow;
+			var clock = System.Diagnostics.Stopwatch.StartNew();
+			var result = await RunLockedAsync(owner, command, timeout, ct);
+			try {
+				owner.RecordCell(new NotebookCell {
+					At = started, Command = command, WorkingDirectory = owner.WorkingDirectory, StateIn = stateIn, StateOut = owner.PowerShellState,
+					Output = result.Text, IsError = result.IsError, DurationMs = clock.ElapsedMilliseconds,
+				});
+			} catch(IOException) { }
+			return result;
 		} finally {
 			gate.Release();
 		}
