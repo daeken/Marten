@@ -1,0 +1,180 @@
+using System.Collections.Concurrent;
+using System.Text.Json.Nodes;
+using Marten.Agents;
+using Marten.Models;
+using Marten.Storage;
+using Marten.Tools;
+
+namespace Marten.Tests;
+
+public class TurnLifecycleTests {
+	static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
+	static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
+	static void Tell(Agent a, string text) => a.Send(new Inbound("Sera", text, SendMode.Queued));
+	static bool Idle(Agent a) => a.Status == AgentStatus.Idle && a.Transcript.Last?.Kind == EntryKind.Idle;
+	static ModelResult Batch => new([.. FakeBackend.Call("first", "held", "{}").Items,
+		.. FakeBackend.Call("second", "held", "{}").Items], null);
+
+	[Fact]
+	public async Task CloseCancelsStuckModelReleasesSlotsAndFencesLateOutputAfterReopen() {
+		using var dir = new TempDir();
+		var entered = Signal();
+		var cancelled = Signal();
+		var release = Signal();
+		var returned = Signal();
+		var backend = new Backend(async (_, delta, ct) => {
+			using var registration = ct.Register(() => cancelled.TrySetResult());
+			entered.SetResult();
+			await release.Task; // Deliberately ignores cancellation.
+			delta("stale delta");
+			returned.SetResult();
+			return new([.. FakeBackend.Say("stale reply").Items, .. Batch.Items], null);
+		});
+		var tool = new HeldTool();
+		var (m, project, parent, agent) = Create(dir, backend, tool, new Config {
+			Model = "fake-1", MaxRunningAgents = 1, MaxConcurrentModelCalls = 1,
+		});
+		var deltas = new ConcurrentQueue<string>();
+		m.Events += ev => {
+			if(ev.GetType().GetProperty("type")?.GetValue(ev) as string == "delta")
+				deltas.Enqueue((string) ev.GetType().GetProperty("text")!.GetValue(ev)!);
+		};
+		agent.Send(Inbound.FromAgent(parent, "old wake", SendMode.Queued));
+		await entered.Task.WaitAsync(Timeout);
+		await new CloseAgentTool(() => m).InvokeAsync(parent, new JsonObject { ["agent"] = agent.Info.Id }, default);
+		await cancelled.Task.WaitAsync(Timeout);
+		await Wait.Until(() => Idle(agent));
+		Assert.True(agent.Info.Closed);
+		Assert.Equal("interrupted", agent.Transcript.Last!.Reason);
+		Assert.Equal(ModelCallOutcome.Cancelled, agent.ModelCall!.Outcome);
+
+		// Reopen alone doesn't replay the old wake. A deliberate new message starts a new turn
+		// even though the abandoned completion is still outstanding.
+		agent.SetClosed(false);
+		agent.SetClosed(true);
+		agent.Send(Inbound.FromAgent(parent, "new wake", SendMode.Immediate));
+		Assert.False(agent.Info.Closed);
+		await Wait.Until(() => Idle(agent) && agent.Transcript.Entries.Any(e => e.Text == "fresh reply"));
+		release.SetResult();
+		await returned.Task.WaitAsync(Timeout);
+		Assert.Equal(2, backend.Calls);
+		Assert.Equal(2, agent.Transcript.Entries.Count(e => e.Kind == EntryKind.Wake));
+		Assert.DoesNotContain(agent.Transcript.Entries, e => e.Text == "stale reply" || e.Kind == EntryKind.ToolCall);
+		Assert.Equal(0, tool.Calls);
+		Assert.Empty(deltas);
+	}
+
+	[Fact]
+	public async Task CloseAndImmediateReopenDuringAToolFencesTheRestOfTheBatch() {
+		using var dir = new TempDir();
+		var tool = new HeldTool();
+		var backend = new Backend((_, _, _) => Task.FromResult(Batch));
+		var (_, _, parent, agent) = Create(dir, backend, tool);
+		Tell(agent, "old wake");
+		await tool.Started.Task.WaitAsync(Timeout);
+		agent.SetClosed(true);
+		agent.Send(Inbound.FromAgent(parent, "new wake", SendMode.Immediate));
+		await tool.Cancelled.Task.WaitAsync(Timeout);
+		tool.Release.SetResult();
+		await Wait.Until(() => Idle(agent) && agent.Transcript.Entries.Any(e => e.Text == "fresh reply"));
+		Assert.Equal(1, tool.Calls);
+		var entries = agent.Transcript.Entries;
+		Assert.All(entries.Where(e => e.Kind == EntryKind.ToolResult), e => {
+			Assert.True(e.IsError);
+			Assert.Contains("closed", e.Text);
+		});
+		Assert.Equal(new[] { "first", "second" }, entries.Where(e => e.Kind == EntryKind.ToolResult).Select(e => e.CallId));
+		var stopped = Assert.Single(entries, e => e.Kind == EntryKind.Idle && e.Reason == "interrupted");
+		Assert.True(stopped.Seq < Assert.Single(entries, e => e.Text == "new wake").Seq);
+	}
+
+	[Theory]
+	[InlineData("agent")]
+	[InlineData("project")]
+	[InlineData("global")]
+	public async Task EffectivePauseDuringAToolRecordsItsResultAndParksTheRemainingBatch(string scope) {
+		using var dir = new TempDir();
+		var tool = new HeldTool();
+		var backend = new Backend((_, _, _) => Task.FromResult(Batch));
+		var (m, p, _, agent) = Create(dir, backend, tool, new Config { Model = "fake-1", MaxRunningAgents = 1 });
+		Action<bool> pause = scope switch {
+			"agent" => agent.SetPaused,
+			"project" => paused => m.SetProjectPaused(p, paused),
+			_ => m.SetPausedAll,
+		};
+		Tell(agent, "go");
+		await tool.Started.Task.WaitAsync(Timeout);
+		pause(true);
+		tool.Release.SetResult();
+		await Wait.Until(() => agent.Status == AgentStatus.Paused);
+		var first = Assert.Single(agent.Transcript.Entries, e => e.Kind == EntryKind.ToolResult);
+		Assert.Equal("first", first.CallId);
+		Assert.Equal("finished", first.Text);
+		Assert.Equal(1, tool.Calls);
+		Assert.Equal(1, backend.Calls);
+		Assert.False(tool.Cancelled.Task.IsCompleted);
+		pause(false);
+		await Wait.Until(() => Idle(agent));
+		Assert.Equal(2, tool.Calls);
+		Assert.Equal(2, backend.Calls);
+		Assert.Equal(new[] { "first", "second" }, agent.Transcript.Entries.Where(e => e.Kind == EntryKind.ToolResult).Select(e => e.CallId));
+		Assert.Single(agent.Transcript.Entries, e => e.Kind == EntryKind.Wake);
+	}
+
+	[Theory]
+	[InlineData(true)]
+	[InlineData(false)]
+	public async Task CloseCancelsSlotWait(bool agentSlot) {
+		using var dir = new TempDir();
+		var backend = new FakeBackend { Gate = Signal() };
+		backend.Script.Enqueue(_ => FakeBackend.Say("unblocked"));
+		var m = new AgentManager(new Home(dir.File("home")), new Config {
+			Model = "fake-1", MaxRunningAgents = agentSlot ? 1 : 0, MaxConcurrentModelCalls = agentSlot ? 0 : 1,
+		}, backend, new ToolRegistry());
+		var holder = m.CreateChat("holder", dir.Path);
+		Tell(holder, "hold the slot");
+		await Wait.Until(() => backend.Requests.Count == 1);
+		var waiting = m.CreateChat("waiting", dir.Path);
+		Tell(waiting, "wait for the slot");
+		await Wait.Until(() => waiting.Status == AgentStatus.WaitingForSlot);
+		waiting.SetClosed(true);
+		await Wait.Until(() => Idle(waiting));
+		Assert.Equal("interrupted", waiting.Transcript.Last!.Reason);
+		backend.Gate.SetResult();
+		await Wait.Until(() => Idle(holder));
+		Assert.Single(backend.Requests);
+	}
+
+	static (AgentManager Manager, Marten.Projects.Project Project, Agent Parent, Agent Worker) Create(
+		TempDir dir, IModelBackend backend, HeldTool tool, Config? config = null) {
+		var m = new AgentManager(new Home(dir.File("home")), config ?? new Config { Model = "fake-1" }, backend, new ToolRegistry().Add(tool));
+		var (p, parent) = m.CreateProject("p", [dir.Path], null, false);
+		return (m, p, parent, m.SpawnTask(parent, "worker", false, null, null));
+	}
+
+	sealed class Backend(Func<ModelRequest, Action<string>, CancellationToken, Task<ModelResult>> first) : IModelBackend {
+		public int Calls;
+		public string Provider => "fake";
+		public bool Connected => true;
+		public Task<IReadOnlyList<string>> ListModelsAsync(CancellationToken ct) => throw new InvalidOperationException();
+		public Task<ModelResult> CompleteAsync(ModelRequest request, Action<string> onTextDelta, CancellationToken ct) =>
+			Interlocked.Increment(ref Calls) == 1 ? first(request, onTextDelta, ct) : Task.FromResult(FakeBackend.Say("fresh reply"));
+	}
+
+	sealed class HeldTool : ITool {
+		public readonly TaskCompletionSource Started = Signal();
+		public readonly TaskCompletionSource Release = Signal();
+		public readonly TaskCompletionSource Cancelled = Signal();
+		public int Calls;
+		public string Name => "held";
+		public string Description => "Wait for release";
+		public JsonObject Parameters => Schema.Object();
+		public async Task<ToolOutput> InvokeAsync(IToolContext ctx, JsonObject args, CancellationToken ct) {
+			Interlocked.Increment(ref Calls);
+			using var registration = ct.Register(() => Cancelled.TrySetResult());
+			Started.TrySetResult();
+			await Release.Task;
+			return new("finished");
+		}
+	}
+}

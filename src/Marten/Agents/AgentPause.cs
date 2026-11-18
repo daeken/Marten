@@ -3,8 +3,8 @@ using Marten.Storage;
 namespace Marten.Agents;
 
 /// <summary>
-/// Pausing holds an agent before its next model call: a running tool finishes and its result is
-/// recorded, then the agent waits. Messages queue up meanwhile. A paused agent isn't nudged, and
+/// Pausing holds an agent at the next model or tool dispatch: a running tool finishes and its result
+/// is recorded, then the agent waits. Messages queue up meanwhile. A paused agent isn't nudged, and
 /// its schedules don't fire. An agent is paused by itself, through its project, or with everything.
 /// </summary>
 public sealed partial class Agent {
@@ -22,6 +22,7 @@ public sealed partial class Agent {
 	async Task WaitWhilePaused(CancellationToken ct) {
 		while(true) {
 			// Take the signal before checking, so a resume between the two isn't missed.
+			ct.ThrowIfCancellationRequested();
 			var changed = manager.PauseSignal;
 			if(!IsPaused) return;
 			if(TurnStatus != AgentStatus.Paused) SetStatus(AgentStatus.Paused, "Paused");
@@ -31,7 +32,9 @@ public sealed partial class Agent {
 
 	/// <summary>After a resume: an agent that went idle with open tasks while paused gets the nudge it missed.</summary>
 	internal void PauseChangedHere() {
-		if(IsPaused || turnCts != null || TurnStatus != AgentStatus.Idle || state.NudgesStopped) return;
+		lock(gate) {
+			if(IsPaused || activeTurn != null || TurnStatus != AgentStatus.Idle || state.NudgesStopped) return;
+		}
 		MaybeNudge(taskChanges);
 	}
 }

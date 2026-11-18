@@ -73,7 +73,7 @@ public sealed class ToolRegistry {
 	public IReadOnlyList<ToolSpec> SpecsFor(IToolContext ctx) => For(ctx).Select(Spec).ToList();
 	public IReadOnlyList<ToolSpec> BuiltInSpecsFor(IToolContext ctx) => tools.Values.Where(t => t.AvailableTo(ctx)).Select(Spec).ToList();
 
-	public async Task<ToolOutput> InvokeAsync(IToolContext ctx, string name, string? arguments, CancellationToken ct) {
+	public async Task<ToolOutput> InvokeAsync(IToolContext ctx, string name, string? arguments, CancellationToken ct, Func<Task>? admit = null) {
 		if(Find(ctx, name) is not { } tool) return ToolOutput.Error($"Unknown tool: {name}");
 		JsonObject args;
 		try {
@@ -84,6 +84,8 @@ public sealed class ToolRegistry {
 		}
 		if(Gate?.Invoke(ctx, tool, args) is { } blocked) return blocked;
 		try {
+			if(admit != null) await admit();
+			ct.ThrowIfCancellationRequested();
 			return await tool.InvokeAsync(ctx, args, ct);
 		} catch(ToolException e) {
 			return ToolOutput.Error(e.Message);
