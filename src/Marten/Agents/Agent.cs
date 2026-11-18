@@ -72,17 +72,31 @@ public sealed partial class Agent : IPowerShellOwner {
 		}
 	}
 
-	public TaskItem AddTask(string title, string assignedBy) {
+	public TaskItem AddTask(string title, string assignedBy, string? check = null) {
 		TaskItem item;
 		lock(gate) {
 			tasks ??= JsonIO.Load(TasksPath, () => new List<TaskItem>());
-			item = new TaskItem { Id = tasks.Count == 0 ? 1 : tasks.Max(t => t.Id) + 1, Title = title.Trim(), AssignedBy = assignedBy, Updated = DateTimeOffset.UtcNow };
+			item = new TaskItem { Id = tasks.Count == 0 ? 1 : tasks.Max(t => t.Id) + 1, Title = title.Trim(), AssignedBy = assignedBy, Updated = DateTimeOffset.UtcNow,
+				Check = string.IsNullOrWhiteSpace(check) ? null : check.Trim() };
 			tasks.Add(item);
 			JsonIO.Save(TasksPath, tasks);
 			taskChanges++;
 		}
 		manager.Publish(new { type = "tasks", agentId = Info.Id });
 		return item;
+	}
+
+	public TaskItem? GetTask(int id) => Tasks.FirstOrDefault(t => t.Id == id);
+
+	public void RecordCheck(int id, CheckRun run) {
+		lock(gate) {
+			tasks ??= JsonIO.Load(TasksPath, () => new List<TaskItem>());
+			var i = tasks.FindIndex(t => t.Id == id);
+			if(i < 0) return;
+			tasks[i] = tasks[i] with { LastCheck = run };
+			JsonIO.Save(TasksPath, tasks);
+		}
+		manager.Publish(new { type = "tasks", agentId = Info.Id });
 	}
 
 	public (TaskItem Before, TaskItem After) UpdateTask(int id, TaskState taskState, string? reason) {

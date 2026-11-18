@@ -358,8 +358,9 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
       {tasks.length > 0 && (
         <div className="tasks">
           {tasks.map(t => (
-            <span key={t.id} className={`task ${t.state}`} title={t.reason ?? ''}>
+            <span key={t.id} className={`task ${t.state}`} title={[t.reason, t.check && `Done when \`${t.check}\` passes`, t.lastCheck && `Last check ${formatWhen(t.lastCheck.at)}: ${t.lastCheck.passed ? 'passed' : 'failed'}\n${t.lastCheck.output.slice(-1500)}`].filter(Boolean).join('\n\n')}>
               <span className="task-state">{t.state}</span> #{t.id} {t.title}{t.reason && t.state !== 'open' ? ` · ${t.reason}` : ''}
+              {t.check && <span className={`check ${t.lastCheck ? (t.lastCheck.passed ? 'pass' : 'fail') : ''}`}>{t.lastCheck ? (t.lastCheck.passed ? '✓' : '✗') : '◇'} check</span>}
             </span>
           ))}
         </div>

@@ -81,6 +81,8 @@ export interface TaskItem {
   reason?: string;
   assignedBy: string;
   updated: string;
+  check?: string;
+  lastCheck?: { at: string; passed: boolean; exitCode?: number; output: string };
 }
 
 export interface MemoryEdit { at: string; agentId: string; reason?: string; added: string[]; removed: string[] }
