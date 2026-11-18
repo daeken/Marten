@@ -167,6 +167,7 @@ code, pre { font: 12.5px/1.45 ui-monospace, "SF Mono", Menlo, monospace; }
 .agents .row { margin-top: 10px; }
 .crumb { color: var(--muted); font-weight: 500; }
 .tag { font-size: 11px; font-weight: 500; border: 1px solid var(--border); border-radius: 9px; padding: 0 6px; margin-left: 8px; color: var(--muted); }
+.tag.warn { color: var(--warn); border-color: var(--warn); }
 
 .tasks { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 24px; border-bottom: 1px solid var(--border); background: var(--panel); }
 .task { font-size: 12px; border: 1px solid var(--border); border-radius: 12px; padding: 1px 9px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

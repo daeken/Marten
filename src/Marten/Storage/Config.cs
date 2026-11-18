@@ -37,6 +37,10 @@ public sealed record Config {
 	public double LoopWindowMinutes { get; init; } = 10;
 	/// <summary>Snapshots of ~/.marten: where, how often, how many to keep.</summary>
 	public BackupSettings Backup { get; init; } = new();
+	/// <summary>Sera's filter on tool calls: the first matching rule allows, denies, or asks her. Empty means wide open.</summary>
+	public List<Marten.Agents.GuardRule> Rules { get; init; } = new();
+	/// <summary>Agent-written tools load only once Sera approves their exact text. Tools that exist when this is turned on are grandfathered.</summary>
+	public bool ReviewTools { get; init; }
 	/// <summary>MCP servers by name (stdio only). Their tools appear to agents as name__tool.</summary>
 	public Dictionary<string, Marten.Mcp.McpServerConfig> Mcp { get; init; } = new();
 	/// <summary>Extra Origin allowed to call the API, e.g. the Vite dev server.</summary>

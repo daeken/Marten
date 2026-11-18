@@ -55,6 +55,8 @@ public sealed class ToolRegistry {
 	}
 
 	public IEnumerable<ITool> All => tools.Values;
+	/// <summary>Sera's filter: returns the result to give instead of running the call, or null to let it run.</summary>
+	public Func<IToolContext, ITool, JsonObject, ToolOutput?>? Gate { get; set; }
 	/// <summary>A built-in tool by name.</summary>
 	public ITool? Get(string name) => tools.GetValueOrDefault(name);
 	public bool IsBuiltIn(string name) => tools.ContainsKey(name);
@@ -80,6 +82,7 @@ public sealed class ToolRegistry {
 		} catch(Exception e) when(e is System.Text.Json.JsonException or ArgumentException) {
 			return ToolOutput.Error($"Invalid arguments for {name}: {e.Message}");
 		}
+		if(Gate?.Invoke(ctx, tool, args) is { } blocked) return blocked;
 		try {
 			return await tool.InvokeAsync(ctx, args, ct);
 		} catch(ToolException e) {

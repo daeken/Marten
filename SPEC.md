@@ -6,7 +6,7 @@ Last updated 2026-11-18.
 
 Marten is a small agent runtime that replaces all of Sera's agentic coding. It is greenfield and stays tiny: build what is needed now, not what agents might need later.
 
-- **Wide open on day 0.** Agents are trusted. No approvals, no sandbox, no review of agent-written tools. A filter can come later.
+- **Wide open by default.** Agents are trusted: no sandbox, and with no `rules` and `reviewTools` off, no approvals. Sera's filter is opt-in. `rules` in config.json is an ordered list of `{tool, match, agents, projects, action, reason}`. `tool` is a name with `*` wildcards; `match` is a regex tried against the call's string arguments, such as a PowerShell command. `action` is `allow`, `deny` or `ask`, and the first matching rule wins. `ask` puts an Allow once / Deny card in Sera's inbox and fails the call; after she allows it, the identical call goes through once. The filter is a guardrail against mistakes, not a sandbox: it sees tool calls, not what a script does once running.
 - **Not reproducible, on purpose.** Agents may mutate process state. Reproducibility is a non-goal for now.
 - **Restart to change the core.** New C# tools are compiled in. There is no C# hot reloading. A restart resumes agents where they were.
 - **What a turn is.** For steering, a turn is one model call: immediate messages land between model calls, at a tool boundary. Everywhere else, a turn runs from a wake until the agent goes idle. A tool call that was running when Marten stopped is reported to the agent as interrupted on restart, and is never re-run.
@@ -100,7 +100,7 @@ PowerShell is embedded in-process and is the default way agents act on the world
 **Tools**
 
 - **Direct tool calls.** Every tool can be called either directly or from PowerShell, MCP tools included. Agents never have to go through PowerShell to read a file, say, but they can. PowerShell is overkill for many calls, confuses models and costs context. On day 0 the set of exposed tools stays minimal.
-- **Runtime tools.** Agents can write new tools in PowerShell, scoped to a project or available to every agent. Nothing reviews them.
+- **Runtime tools.** Agents can write new tools in PowerShell, scoped to a project or available to every agent. With `reviewTools` on, a tool loads only once Sera approves its exact text: `define_tool` puts the script on a card for her, and an edit made any other way drops the tool until she approves again, from the card or the project's Memory page. Tools that exist when review is turned on are grandfathered.
 - **Built-in tools.** Tools written in C# are built into the runtime.
 - **MCP tools** are callable from PowerShell like any other command.
 - **Images.** When an agent calls an MCP tool directly and it returns an image, the image is fed back to the model. From PowerShell, a `View-Image` cmdlet (name not final) shows an image to the model.
@@ -210,7 +210,7 @@ Nothing below is built on day 0. The first list may come later; the second is ru
 - A loop breaker for messaging (built)
 - Budgets (built)
 - Completion contracts (built)
-- A filter on what agents can do, and any review of agent-written tools
+- A filter on what agents can do, and any review of agent-written tools (built)
 - Reproducible, notebook-style PowerShell execution
 - Mobile and desktop apps
 - Limited tool schemas, with tool search for the rest (built)

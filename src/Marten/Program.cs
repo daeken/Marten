@@ -217,8 +217,17 @@ api.MapGet("/tools", (string? projectId) => {
 		var script = File.ReadAllText(f);
 		string? description = null, error = null;
 		try { description = ScriptTool.Parse(name, script, f, d.Scope).Description; } catch(ToolException e) { error = e.Message; }
-		return new { name, scope = d.Scope == "global" ? "global" : "project", path = f, script, description, error, modified = File.GetLastWriteTimeUtc(f) };
+		return new { name, scope = d.Scope == "global" ? "global" : "project", path = f, script, description, error, modified = File.GetLastWriteTimeUtc(f),
+			pendingReview = !manager.Guard.ToolApproved(f, script) };
 	})).OrderBy(t => t.name);
+});
+api.MapPost("/tools/approve", (ToolApproval req) => {
+	var dirs = new List<string> { scriptTools.GlobalDir };
+	dirs.AddRange(manager.Projects.Select(ScriptToolSource.ProjectDir));
+	var path = Path.GetFullPath(req.Path);
+	if(!dirs.Any(d => Path.GetDirectoryName(path) == Path.GetFullPath(d)) || !path.EndsWith(".ps1") || !File.Exists(path)) return Results.NotFound();
+	manager.Guard.ApproveTool(path, File.ReadAllText(path));
+	return Results.Ok();
 });
 api.MapGet("/agents/{id}/images/{file}", (string id, string file) => {
 	if(manager.Get(id) is not { } a || file.Contains('/') || file.Contains('\\') || file.StartsWith('.')) return Results.NotFound();
@@ -305,3 +314,4 @@ record PauseRequest(bool Paused);
 record AnswerRequest(int? Choice, string? Text);
 record BackendKey(string? Key);
 record CloseRequest(bool Closed);
+record ToolApproval(string Path);

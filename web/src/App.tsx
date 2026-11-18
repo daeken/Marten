@@ -592,8 +592,9 @@ function MemoryView({ api, project, agents, tick }: { api: Api; project?: Projec
         {tools.length === 0 && <div className="muted small">None yet. Agents write them with define_tool.</div>}
         {tools.map(t => (
           <details key={t.path} className="tool-def">
-            <summary><strong>{t.name}</strong> <span className="tag">{t.scope}</span> <span className="muted small">{t.error ? `broken: ${t.error}` : t.description?.split('\n')[0]}</span></summary>
+            <summary><strong>{t.name}</strong> <span className="tag">{t.scope}</span>{t.pendingReview && <span className="tag warn">needs review</span>} <span className="muted small">{t.error ? `broken: ${t.error}` : t.description?.split('\n')[0]}</span></summary>
             <div className="muted small">{t.path}</div>
+            {t.pendingReview && <button className="small" onClick={() => api.approveTool(t.path).then(() => api.scriptTools(project.id).then(setTools))}>Approve this version</button>}
             <pre className="output log-tail">{t.script}</pre>
           </details>
         ))}
