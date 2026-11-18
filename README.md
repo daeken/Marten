@@ -7,7 +7,7 @@ A small agent runtime for Sera's agentic coding. See [SPEC.md](SPEC.md).
 Needs the .NET 10 SDK and Node 20+.
 
 ```sh
-(cd web && npm install && npm run build)
+(cd web && npm ci && npm run build)
 dotnet run --project src/Marten
 ```
 
@@ -46,6 +46,12 @@ Set process-wide limits in `~/.marten/config.json` (read at startup):
 Omit either `max…` setting or set it to `0` for no limit. Turns yield their agent slot while paused or backing off after a model error. The UI and status APIs show **Waiting for slot** and which limit the agent hit; **Stop** interrupts a turn even while it is queued.
 
 Named slots are opt-in and shared by all agents. In a PowerShell command, run `$Marten.WithSlot('build', { dotnet build })`; `$Marten.Slots` lists the configured names. A slot must have positive capacity. The wait counts toward the command timeout. Wrap only foreground work, and don't nest slots or wait for another agent while holding one.
+
+## Stopping and restarting
+
+Use Ctrl-C or send SIGTERM and wait for Marten to exit before starting it again. Marten stops new model calls, gives active tools `stopGraceSeconds` (5 seconds by default), then cancels unfinished tools and cleans up tracked foreground children. Detached `process_start` jobs survive a Marten restart, not a machine reboot.
+
+On startup, Marten tells existing agents that it restarted and records interruptions it can infer from disk. It does not automatically repeat interrupted calls. A forced kill or power loss skips cleanup; results or queued messages can be lost even when a command changed files or external state. Check the transcript, logs, and actual state before retrying.
 
 ## As an app (desktop and phone)
 

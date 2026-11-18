@@ -37,7 +37,7 @@ public sealed record NotebookCell {
 /// One command at a time per agent. On timeout the pipeline is stopped and the child processes it
 /// started are killed; if the stop doesn't return, the runspace is abandoned and flagged.
 /// </summary>
-public sealed class PowerShellTool(Func<int> defaultTimeoutSeconds, Func<int> stopGraceSeconds, ChildProcessWatcher children) : ITool {
+public sealed class PowerShellTool(Func<int> defaultTimeoutSeconds, Func<int> stopGraceSeconds, ChildProcessWatcher children, CancellationToken stopping = default) : ITool {
 	public const string StateVariable = "State";
 	const int RenderWidth = 160;
 
@@ -72,8 +72,10 @@ public sealed class PowerShellTool(Func<int> defaultTimeoutSeconds, Func<int> st
 
 	public async Task<ToolOutput> RunAsync(IPowerShellOwner owner, string command, TimeSpan timeout, CancellationToken ct) {
 		var gate = GateFor(owner.AgentId);
-		await gate.WaitAsync(ct);
+		using var queued = CancellationTokenSource.CreateLinkedTokenSource(ct, stopping);
+		await gate.WaitAsync(queued.Token);
 		try {
+			queued.Token.ThrowIfCancellationRequested();
 			var stateIn = owner.PowerShellState;
 			var started = DateTimeOffset.UtcNow;
 			var clock = System.Diagnostics.Stopwatch.StartNew();
@@ -95,11 +97,12 @@ public sealed class PowerShellTool(Func<int> defaultTimeoutSeconds, Func<int> st
 		var runspace = RunspaceFactory.CreateRunspace(BuildSessionState(owner, linked.Token));
 		runspace.Open();
 		var abandoned = false;
+		PowerShell? ps = null;
 		try {
 			runspace.SessionStateProxy.Path.SetLocation(WildcardPattern.Escape(owner.WorkingDirectory));
 			runspace.SessionStateProxy.SetVariable(StateVariable, StateJson.ToPowerShell(owner.PowerShellState));
 
-			using var ps = PowerShell.Create(runspace);
+			ps = PowerShell.Create(runspace);
 			ps.AddScript(command);
 			ps.Commands.Commands[0].MergeMyResults(PipelineResultTypes.All, PipelineResultTypes.Output);
 			var output = new PSDataCollection<PSObject>();
@@ -152,20 +155,23 @@ public sealed class PowerShellTool(Func<int> defaultTimeoutSeconds, Func<int> st
 			}
 			return new ToolOutput(text.Length == 0 ? "[no output]" : text.ToString());
 		} finally {
-			if(!abandoned) runspace.Dispose();
+			if(!abandoned) {
+				ps?.Dispose();
+				runspace.Dispose();
+			}
 		}
 	}
 
 	(List<int> Killed, List<int> Ambiguous) KillOwnedChildren(ChildProcessWatcher.Lease lease) {
-		children.Refresh();
+		var (owned, ambiguous) = children.Snapshot(lease);
 		var map = ProcessTable.ParentMap();
 		var killed = new List<int>();
 		// Recheck exclusions: a poll can land between a deliberate start and its Exclude call.
-		foreach(var pid in lease.Owned.Where(p => map.ContainsKey(p) && !ChildProcessWatcher.IsExcluded(p))) {
+		foreach(var pid in owned.Where(p => map.GetValueOrDefault(p) == ProcessTable.Self && !ChildProcessWatcher.IsExcluded(p))) {
 			ProcessTable.KillTree(pid);
 			killed.Add(pid);
 		}
-		return (killed, lease.Ambiguous.Where(map.ContainsKey).ToList());
+		return (killed, ambiguous.Where(map.ContainsKey).ToList());
 	}
 
 	InitialSessionState BuildSessionState(IPowerShellOwner owner, CancellationToken ct) {

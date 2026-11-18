@@ -33,12 +33,37 @@ public sealed partial class Agent {
 
 	/// <summary>Run a recorded cell again: same command, directory and $State going in, in a fresh runspace. The agent's own $State is untouched.</summary>
 	public async Task<(NotebookCell Run, bool SameOutput, bool SameState)> RerunCell(int id, CancellationToken ct) {
+		using var operation = manager.Restart.Enter() ?? throw new OperationCanceledException("Marten is stopping.");
+		using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, manager.Restart.CancelTools);
 		var cell = Notebook().FirstOrDefault(c => c.Id == id) ?? throw new KeyNotFoundException($"No cell {id}.");
 		if(manager.Tools.Get("powershell") is not PowerShellTool ps) throw new InvalidOperationException("PowerShell isn't available.");
 		var replay = new ReplayOwner(this, cell);
-		await ps.RunAsync(replay, cell.Command, CommandTimeout, ct);
+		System.IO.Directory.CreateDirectory(NotebookReplaysPath);
+		var marker = Path.Combine(NotebookReplaysPath, $"{id}-{Guid.NewGuid():N}");
+		AtomicFile.Write(marker, id.ToString());
+		try {
+			await ps.RunAsync(replay, cell.Command, CommandTimeout, linked.Token);
+			manager.Restart.CancelTools.ThrowIfCancellationRequested();
+		} finally {
+			// A shutdown-cancelled replay is reported on startup, never attempted again.
+			if(!manager.Restart.IsStopping || !(linked.IsCancellationRequested || manager.Restart.CancelTools.IsCancellationRequested))
+				File.Delete(marker);
+		}
 		var run = replay.Recorded ?? throw new InvalidOperationException("The run wasn't recorded.");
 		return (run, run.Output == cell.Output, JsonNode.DeepEquals(run.StateOut, cell.StateOut));
+	}
+
+	string NotebookReplaysPath => Path.Combine(Directory, "notebook-replays");
+
+	string RecoverNotebookReplays() {
+		if(!System.IO.Directory.Exists(NotebookReplaysPath)) return "";
+		var ids = new SortedSet<int>();
+		foreach(var marker in System.IO.Directory.GetFiles(NotebookReplaysPath)) {
+			if(!int.TryParse(Path.GetFileName(marker).Split('-')[0], out var id)) continue;
+			ids.Add(id);
+			File.Delete(marker);
+		}
+		return ids.Count == 0 ? "" : $" Interrupted notebook re-runs: {string.Join(", ", ids.Select(id => $"#{id}"))}.";
 	}
 
 	sealed class ReplayOwner(Agent agent, NotebookCell cell) : IPowerShellOwner {

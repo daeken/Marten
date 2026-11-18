@@ -16,6 +16,7 @@ public sealed partial class Agent {
 	public ModelCallStatus? ModelCall => modelCall;
 
 	async Task<ModelResult> CompleteModel(ModelRequest request, ModelCallKind kind, Action<string> onDelta, CancellationToken ct) {
+		manager.Restart.ThrowIfStopping();
 		ct.ThrowIfCancellationRequested();
 		var call = new ModelCallStatus(Interlocked.Increment(ref modelCallId), request.Model, kind, DateTimeOffset.UtcNow);
 		modelCall = call;
