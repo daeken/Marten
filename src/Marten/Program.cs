@@ -18,7 +18,8 @@ if(args is ["backup", ..]) {
 	return;
 }
 if(args is ["client", "add" or "rotate", var clientName, ..]) {
-	var m = new AgentManager(home, config, new BackendRouter(new ResponsesBackend(new ChatGptAuth(home, new HttpClient()), ModelHttp.DefaultClient), [], null), new ToolRegistry());
+	using var cliAuthHttp = ChatGptAuth.CreateHttpClient();
+	var m = new AgentManager(home, config, new BackendRouter(new ResponsesBackend(new ChatGptAuth(home, cliAuthHttp), ModelHttp.DefaultClient), [], null), new ToolRegistry());
 	var c = m.Outside.Register(clientName, rotate: args[1] == "rotate");
 	Console.WriteLine($"Client {c.Name}: token in {m.Outside.TokenPath(c.Name)}");
 	return;
@@ -31,9 +32,8 @@ if(args is ["restore", var archive, ..]) {
 	Console.WriteLine($"Restored into {Path.GetFullPath(target)}. Run Marten on it with MARTEN_HOME={Path.GetFullPath(target)}, or move it to {home.Root} while Marten is stopped.");
 	return;
 }
-var http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
-http.DefaultRequestHeaders.UserAgent.ParseAdd("Marten/0.1");
-var auth = new ChatGptAuth(home, http);
+using var authHttp = ChatGptAuth.CreateHttpClient();
+var auth = new ChatGptAuth(home, authHttp);
 using var modelHttp = ModelHttp.CreateClient(() => (managerRef?.Config ?? config).ModelIdleTimeoutSeconds);
 modelHttp.DefaultRequestHeaders.UserAgent.ParseAdd("Marten/0.1");
 var messagesBackends = MessagesProvider.All.Select(p => new MessagesBackend(p, home,

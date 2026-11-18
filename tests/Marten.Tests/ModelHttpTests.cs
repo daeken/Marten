@@ -133,6 +133,72 @@ public sealed class ModelHttpTests {
 		Assert.Contains("waiting for bytes", error.Message);
 	}
 
+	[Fact]
+	public async Task StalledRefreshBodyIsTransientBeforeInference() {
+		using var dir = new TempDir();
+		await using var server = new Loopback(async (res, ct) => {
+			res.ContentType = "application/json";
+			await Write(res, "{", ct);
+			await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+		});
+		using var authHttp = new HttpClient(new RedirectToLoopback(server.Url)) { Timeout = TimeSpan.FromSeconds(1) };
+		using var modelHttp = new HttpClient(new FakeAuthHandler((_, _, _) => throw new Exception("Inference should not start.")));
+		var model = new ResponsesBackend(ExpiredAuth(dir, authHttp), modelHttp);
+		var error = await Assert.ThrowsAsync<TransientModelException>(() => model.CompleteAsync(Request, _ => { }, default).WaitAsync(Guard));
+		Assert.Contains("waiting for ChatGPT authorization", error.Message);
+	}
+
+	[Fact]
+	public async Task CancelingRefreshRemainsCancellationAndReleasesTheGate() {
+		using var dir = new TempDir();
+		var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+		using var http = new HttpClient(new FakeAuthHandler(async (attempt, _, ct) => {
+			if(attempt == 1) {
+				started.SetResult();
+				await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+			}
+			return new HttpResponseMessage(HttpStatusCode.OK) {
+				Content = new StringContent("""{"access_token":"new-test-token","expires_in":3600,"token_type":"bearer"}"""),
+			};
+		})) { Timeout = Timeout.InfiniteTimeSpan };
+		using var stop = new CancellationTokenSource();
+		var auth = ExpiredAuth(dir, http);
+		var canceled = auth.TokenAsync(false, stop.Token);
+		await (await Task.WhenAny(started.Task, canceled).WaitAsync(Guard));
+		var queued = auth.TokenAsync(false, default);
+		await stop.CancelAsync();
+		await Assert.ThrowsAnyAsync<OperationCanceledException>(() => canceled.WaitAsync(Guard));
+		Assert.Equal("new-test-token", await queued.WaitAsync(Guard));
+	}
+
+	[Theory]
+	[InlineData(0, typeof(TransientModelException))]
+	[InlineData(503, typeof(TransientModelException))]
+	[InlineData(401, typeof(NotConnectedException))]
+	public async Task RefreshDistinguishesTransportFailureAndCredentialRejection(int status, Type expected) {
+		using var dir = new TempDir();
+		using var http = new HttpClient(new FakeAuthHandler((_, _, _) => status == 0
+			? throw new HttpRequestException("test network failure") : Task.FromResult(new HttpResponseMessage((HttpStatusCode) status))));
+		var auth = ExpiredAuth(dir, http);
+		var error = await Assert.ThrowsAnyAsync<Exception>(() => auth.TokenAsync(false, default).WaitAsync(Guard));
+		Assert.IsType(expected, error);
+	}
+
+	static ChatGptAuth ExpiredAuth(TempDir dir, HttpClient http) {
+		var home = new Home(dir.File("home"));
+		JsonIO.Save(Path.Combine(home.Secrets, "openai.json"), new ChatGptAuth.Credentials {
+			HostId = "host", ClientId = "test-client", AccessToken = "expired-test-token", RefreshToken = "test-refresh-token",
+			Scope = "resource.invoke chatgpt.tokens.use.direct", ExpiresAt = 0,
+		});
+		return new ChatGptAuth(home, http);
+	}
+
+	sealed class FakeAuthHandler(Func<int, HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send) : HttpMessageHandler {
+		int attempts;
+		protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
+			send(Interlocked.Increment(ref attempts), request, ct);
+	}
+
 	static IModelBackend Backend(string provider, TempDir dir, Loopback server, HttpClient http) {
 		var home = new Home(dir.File("home"));
 		if(provider == "responses") {
