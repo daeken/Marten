@@ -205,7 +205,7 @@ The UI is how Sera watches and steers the system, so it has to show everything t
 
 **Lets Sera**
 
-- Chat with any chat agent.
+- Chat with any chat agent. Opening a conversation scrolls to its latest entry after history loads. New entries follow the tail only while the reader is near the end.
 - Message any agent in either mode.
 - Pause an agent, a project or everything. Pausing also stops nudges and schedules.
 

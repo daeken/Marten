@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { AgentMessage, AgentSummary, Api, Backend, BackgroundProcess, BackupStatus, Entry, NotebookCell, OutsideClient, McpServer, Project, ProjectMemory, Schedule, ScriptToolInfo, SeraMessage, ServerEvent, Status_, TaskItem, takeToken } from './api';
@@ -139,7 +139,7 @@ export function App() {
   const project = agent ? status.projects.find(p => p.id === agent.projectId) : undefined;
   let main;
   if (agent)
-    main = <AgentView api={api} agent={agent} project={project} agents={status.agents} models={models} tick={tick} defaultModel={status.config.model ?? status.config.defaultModel ?? models[0]} defaultEffort={status.config.effort} onChange={refresh} onSelect={setSelected} entries={transcripts[agent.id] ?? []} streaming={streaming[agent.id] ?? ''} runningCall={running[agent.id]} />;
+    main = <AgentView api={api} agent={agent} project={project} agents={status.agents} models={models} tick={tick} defaultModel={status.config.model ?? status.config.defaultModel ?? models[0]} defaultEffort={status.config.effort} onChange={refresh} onSelect={setSelected} entries={transcripts[agent.id]} streaming={streaming[agent.id] ?? ''} runningCall={running[agent.id]} />;
   else if (selected === 'processes')
     main = <ProcessesView api={api} tick={tick} onSelect={setSelected} />;
   else if (selected === 'inbox')
@@ -334,11 +334,14 @@ function AgentRow({ agent: a, selected, onSelect, nested }: { agent: AgentSummar
   );
 }
 
-function AgentView({ api, agent, project, agents, models, tick, defaultModel, defaultEffort, onChange, onSelect, entries, streaming, runningCall }: {
+const emptyTranscript: Entry[] = [];
+
+function AgentView({ api, agent, project, agents, models, tick, defaultModel, defaultEffort, onChange, onSelect, entries: transcript, streaming, runningCall }: {
   api: Api; agent: AgentSummary; project?: Project; agents: AgentSummary[]; models: string[]; tick: number;
   defaultModel?: string; defaultEffort?: string; onChange: () => void; onSelect: (id: string) => void;
-  entries: Entry[]; streaming: string; runningCall?: string;
+  entries?: Entry[]; streaming: string; runningCall?: string;
 }) {
+  const entries = transcript ?? emptyTranscript;
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   useEffect(() => { api.tasks(agent.id).then(setTasks).catch(() => setTasks([])); }, [api, agent.id, tick]);
   const [questions, setQuestions] = useState<SeraMessage[]>([]);
@@ -356,11 +359,25 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
   const scroller = useRef<HTMLDivElement>(null);
   const busy = agent.status === 'running' || agent.status === 'waiting_for_quota' || agent.status === 'waiting_for_slot';
 
-  useEffect(() => {
+  const openedTranscript = useRef<string>();
+  const followLatest = useRef(true);
+  useLayoutEffect(() => {
     const el = scroller.current;
-    if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 200) el.scrollTop = el.scrollHeight;
-  }, [entries, streaming]);
-  useEffect(() => { scroller.current?.scrollTo(0, scroller.current.scrollHeight); }, [agent.id]);
+    if (!transcript) openedTranscript.current = undefined;
+    if (!el || !transcript || showNotebook) return;
+    // On a cold open this is the first commit with history, not the empty view before fetch.
+    if (openedTranscript.current !== agent.id) {
+      openedTranscript.current = agent.id;
+      followLatest.current = true;
+    }
+    if (followLatest.current) el.scrollTop = el.scrollHeight;
+  }, [agent.id, transcript, streaming, runningCall, showNotebook]);
+
+  const trackLogScroll = (event: React.UIEvent<HTMLDivElement>) => {
+    const el = event.currentTarget;
+    if (!showNotebook && openedTranscript.current === agent.id)
+      followLatest.current = el.scrollHeight - el.scrollTop - el.clientHeight < 200;
+  };
 
   const results = useMemo(() => new Map(entries.filter(e => e.kind === 'tool_result').map(e => [e.callId, e])), [entries]);
 
@@ -456,7 +473,7 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
         </div>
       )}
       {showNotebook && <NotebookView api={api} agent={agent} tick={tick} />}
-      <div className="log" ref={scroller} style={showNotebook ? { display: 'none' } : undefined}>
+      <div className="log" ref={scroller} onScroll={trackLogScroll} style={showNotebook ? { display: 'none' } : undefined}>
         {entries.map(e => <EntryView key={e.seq} entry={e} result={e.kind === 'tool_call' ? results.get(e.callId) : undefined} running={e.callId === runningCall} imageUrl={p => api.imageUrl(agent.id, p)} />)}
         {streaming && <div className="assistant streaming"><Md text={streaming} /></div>}
         {agent.modelCall && !agent.modelCall.endedAt && !streaming && !runningCall &&
