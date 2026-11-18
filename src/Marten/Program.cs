@@ -10,10 +10,24 @@ using Microsoft.Extensions.FileProviders;
 
 var home = new Home();
 var config = Config.Load(home);
+AgentManager? managerRef = null;
+var backups = new Backups(home, () => (managerRef?.Config ?? config).Backup);
+if(args is ["backup", ..]) {
+	var taken = await backups.TakeAsync(force: true);
+	Console.WriteLine($"Snapshot: {taken!.Path} ({taken.Bytes / 1024} KB{(taken.Encrypted ? ", encrypted" : "")})");
+	return;
+}
+if(args is ["restore", var archive, ..]) {
+	var target = args.Length > 2 ? args[2] : home.Root.TrimEnd('/') + "-restored-" + DateTime.Now.ToString("yyyyMMdd-HHmmss");
+	var passphrase = Environment.GetEnvironmentVariable("MARTEN_BACKUP_PASSPHRASE")
+		?? (File.Exists(backups.PassphrasePath) ? File.ReadAllText(backups.PassphrasePath) : null);
+	await Backups.RestoreAsync(Path.GetFullPath(archive), target, passphrase);
+	Console.WriteLine($"Restored into {Path.GetFullPath(target)}. Run Marten on it with MARTEN_HOME={Path.GetFullPath(target)}, or move it to {home.Root} while Marten is stopped.");
+	return;
+}
 var http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
 http.DefaultRequestHeaders.UserAgent.ParseAdd("Marten/0.1");
 var auth = new ChatGptAuth(home, http);
-AgentManager? managerRef = null;
 var messagesBackends = MessagesProvider.All.Select(p => new MessagesBackend(p, home,
 	name => managerRef?.Config.Models.GetValueOrDefault(name) ?? [])).ToList();
 var ledger = new UsageLedger(home, () => managerRef?.Config ?? config);
@@ -124,6 +138,19 @@ api.MapPut("/backends/{name}/key", (string name, BackendKey req) => {
 	b.SetKey(req.Key);
 	manager.Publish(new { type = "config" });
 	return Results.Ok(BackendSummary(b));
+});
+object BackupSummary() => new {
+	backups.Directory, backups.Encrypting, manager.Config.Backup.IntervalMinutes,
+	Snapshots = backups.List().Take(20).Select(b => new { Name = Path.GetFileName(b.Path), b.Taken, b.Bytes, b.Encrypted }),
+};
+api.MapGet("/backups", BackupSummary);
+api.MapPost("/backups", async (CancellationToken ct) => {
+	await backups.TakeAsync(force: true, ct);
+	return Results.Ok(BackupSummary());
+});
+api.MapPut("/backups/passphrase", (BackendKey req) => {
+	backups.SetPassphrase(req.Key);
+	return Results.Ok(BackupSummary());
 });
 api.MapGet("/usage", (int? days) => ledger.Recent(Math.Clamp(days ?? 7, 1, 90)));
 api.MapGet("/models", async (CancellationToken ct) => {
@@ -249,9 +276,11 @@ api.Map("/events", async (HttpContext ctx) => {
 
 manager.LoadAll();
 new Scheduler(manager).Start(app.Lifetime.ApplicationStopping);
+backups.Start(app.Lifetime.ApplicationStopping, Console.Error.WriteLine);
 _ = Task.Run(() => mcp.RefreshAsync(false, app.Lifetime.ApplicationStopping));
 app.Lifetime.ApplicationStopping.Register(() => mcp.StopAll().Wait(TimeSpan.FromSeconds(5)));
 Console.WriteLine($"Marten home: {home.Root}");
+Console.WriteLine($"Backups: {backups.Directory}{(backups.Encrypting ? " (encrypted)" : "")}");
 Console.WriteLine(webRoot == null
 	? "No built UI found (web/dist). Run `npm run build` in web/, or set MARTEN_WEB_ROOT."
 	: $"Marten UI: http://127.0.0.1:{config.Port}/#token={security.Token}");

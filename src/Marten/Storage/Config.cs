@@ -33,6 +33,8 @@ public sealed record Config {
 	/// <summary>Loop breaker: two agents exchanging this many messages within LoopWindowMinutes, without Sera, are both paused. 0 turns it off.</summary>
 	public int LoopMessages { get; init; } = 20;
 	public double LoopWindowMinutes { get; init; } = 10;
+	/// <summary>Snapshots of ~/.marten: where, how often, how many to keep.</summary>
+	public BackupSettings Backup { get; init; } = new();
 	/// <summary>MCP servers by name (stdio only). Their tools appear to agents as name__tool.</summary>
 	public Dictionary<string, Marten.Mcp.McpServerConfig> Mcp { get; init; } = new();
 	/// <summary>Extra Origin allowed to call the API, e.g. the Vite dev server.</summary>

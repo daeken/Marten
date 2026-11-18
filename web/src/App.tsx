@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { AgentMessage, AgentSummary, Api, Backend, BackgroundProcess, Entry, McpServer, Project, ProjectMemory, Schedule, ScriptToolInfo, SeraMessage, ServerEvent, Status_, TaskItem, takeToken } from './api';
+import { AgentMessage, AgentSummary, Api, Backend, BackgroundProcess, BackupStatus, Entry, McpServer, Project, ProjectMemory, Schedule, ScriptToolInfo, SeraMessage, ServerEvent, Status_, TaskItem, takeToken } from './api';
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh'];
 
@@ -641,6 +641,47 @@ function McpPanel({ api, tick, onSelect }: { api: Api; tick: number; onSelect: (
   );
 }
 
+/** Snapshots of ~/.marten. The passphrase never comes back from the server. */
+function BackupsPanel({ api, tick }: { api: Api; tick: number }) {
+  const [info, setInfo] = useState<BackupStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [pass, setPass] = useState('');
+  useEffect(() => { api.backups().then(setInfo).catch(() => setInfo(null)); }, [api, tick]);
+  const run = async (f: () => Promise<BackupStatus>) => {
+    setBusy(true); setError(null);
+    try { setInfo(await f()); } catch (e) { setError(String((e as Error).message ?? e)); } finally { setBusy(false); }
+  };
+  if (!info) return null;
+  const last = info.snapshots[0];
+  return (
+    <>
+      <div className="row">
+        <h2>Backups</h2>
+        <button className="small" disabled={busy} onClick={() => run(api.backupNow)}>{busy ? 'Working…' : 'Back up now'}</button>
+      </div>
+      <div className="small">
+        {last ? <>Last snapshot {formatWhen(last.taken)}, {(last.bytes / 1024 / 1024).toFixed(1)} MB{last.encrypted ? ', encrypted' : ''}. </> : 'No snapshots yet. '}
+        <span className="muted">{info.snapshots.length} kept in <code>{info.directory}</code>, {info.intervalMinutes > 0 ? `every ${info.intervalMinutes} min when something changed` : 'automatic snapshots off'}.</span>
+      </div>
+      <div className="row small">
+        <span className={info.encrypting ? '' : 'muted'}>{info.encrypting ? 'Encrypted with your passphrase' : 'Not encrypted (secrets are always left out)'}</span>
+        {!editing && <button className="link small" onClick={() => setEditing(true)}>{info.encrypting ? 'Change passphrase' : 'Encrypt'}</button>}
+        {!editing && info.encrypting && <button className="link small" onClick={() => run(() => api.setBackupPassphrase(null))}>Stop encrypting</button>}
+      </div>
+      {editing && (
+        <form className="row" onSubmit={e => { e.preventDefault(); if (pass.trim()) run(() => api.setBackupPassphrase(pass.trim())).then(() => { setEditing(false); setPass(''); }); }}>
+          <input type="password" autoFocus placeholder="Passphrase (keep a copy outside Marten)" value={pass} onChange={e => setPass(e.target.value)} autoComplete="new-password" />
+          <button type="submit" className="small" disabled={!pass.trim()}>Save</button>
+          <button type="button" className="link small" onClick={() => { setEditing(false); setPass(''); }}>Cancel</button>
+        </form>
+      )}
+      {error && <div className="error small">{error}</div>}
+    </>
+  );
+}
+
 function ProcessesView({ api, tick, onSelect }: { api: Api; tick: number; onSelect: (id: string) => void }) {
   const [procs, setProcs] = useState<BackgroundProcess[]>([]);
   const [open, setOpen] = useState<string | null>(null);
@@ -660,6 +701,7 @@ function ProcessesView({ api, tick, onSelect }: { api: Api; tick: number; onSele
     <div className="page">
       <div className="doc wide">
         <McpPanel api={api} tick={tick} onSelect={onSelect} />
+        <BackupsPanel api={api} tick={tick} />
         <h2>Background processes</h2>
         <label className="small muted"><input type="checkbox" checked={showStopped} onChange={e => setShowStopped(e.target.checked)} /> Show stopped</label>
         {shown.length === 0 && <div className="muted">Nothing running. Agents start long-lived work like dev servers with process_start.</div>}
