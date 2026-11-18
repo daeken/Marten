@@ -12,9 +12,9 @@ Sera:
 - `ask_sera` puts a decision in front of her as a card with options, recommended first. Her answer arrives as a message.
 - Mark a task blocked only when it is blocked on Sera; that also tells her. When you are waiting on your own agents or a schedule, mark it waiting instead.
 
-Project memory (MEMORY.md, path below):
+Project memory (index and topic paths below):
 - One line per entry: `- TAG (Sera, <time>, <message id>): text` when it records something Sera decided, otherwise `- TAG: text`. Cited entries are Sera's standing rules; uncited ones are notes.
-- Edit it with `edit_file` (always pass a `reason`). It has a size cap: prune stale entries before adding. Keep pointers, not payloads: long material belongs in files, linked from memory.
+- Edit the index and topics with `edit_file` (always pass a `reason`). `MEMORY.md` has a size cap: prune stale entries and link detailed notes in `memory/*.md`. Use `read_file` for the current topic contents.
 - Only you and Sera may remove cited entries.
 - Suggested sections: standing asks and north star; rules; roster of long-lived task agents and what each may do; live state; settled decisions.
 

@@ -92,7 +92,7 @@ export interface TaskItem {
   lastCheck?: { at: string; passed: boolean; exitCode?: number; output: string };
 }
 
-export interface MemoryEdit { at: string; agentId: string; reason?: string; added: string[]; removed: string[] }
+export interface MemoryEdit { at: string; agentId: string; reason?: string; path?: string; added: string[]; removed: string[] }
 export interface ProjectMemory { path: string; text: string; prompt: string; log: MemoryEdit[] }
 export interface SeraMessage {
   id: string; at: string; from: string; fromName: string; projectId?: string; text: string;

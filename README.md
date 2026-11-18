@@ -21,11 +21,15 @@ State lives in `~/.marten` (override with `MARTEN_HOME`):
 | `secrets/` | ChatGPT tokens and the UI token (mode 0600) |
 | `prompts/` | The Marten-wide prompt and one per agent kind; edit freely |
 | `agents/<id>/` | `agent.json`, `system.md` (fixed at spawn), `state.json`, `tasks.json`, `NOTES.md` (task agents), `transcript/*.jsonl`, `outputs/` |
-| `projects/<id>/` | `project.json`, `prompt.md`, `MEMORY.md`, `memory-log.jsonl`, `worktrees/` |
+| `projects/<id>/` | `project.json`, `prompt.md`, `MEMORY.md`, `memory/*.md`, `memory-log.jsonl`, `worktrees/` |
 | `inbox.jsonl` | Messages agents sent to Sera |
 | `prompts/*.md.default` | The shipped default each prompt came from; prompts you haven't edited are upgraded with Marten |
 
 Agents outside Marten (e.g. Claude Code sessions) can create projects and message agents with a client token: see [docs/outside-agents.md](docs/outside-agents.md) and `scripts/marten-ext`.
+
+## Linked project memory
+
+Keep standing rules and short pointers in `MEMORY.md` (16 KiB by default). Link longer notes as `[Topic](memory/topic.md)`. Agents see the index and topic filenames, not topic contents; they use `read_file` when they need the details. Both the index and topics use `edit_file` with the same audit history and protections for cited entries. Read an empty index before initializing it with one `replace` using `"anchor": ""`; use `create` for a missing topic file. See [Project memory](SPEC.md#project-memory).
 
 ## As an app (desktop and phone)
 
