@@ -47,6 +47,12 @@ Omit either `max…` setting or set it to `0` for no limit. Turns yield their ag
 
 Named slots are opt-in and shared by all agents. In a PowerShell command, run `$Marten.WithSlot('build', { dotnet build })`; `$Marten.Slots` lists the configured names. A slot must have positive capacity. The wait counts toward the command timeout. Wrap only foreground work, and don't nest slots or wait for another agent while holding one.
 
+## Pausing and closing agents
+
+**Pause** holds the turn at its next model or tool dispatch. A model reply or compaction that finishes while paused is held off the transcript until resume, without keeping either slot; streamed text is suppressed while paused. A tool that already started can finish and its result is kept. The rest of the batch continues when the agent, project, and global pauses have all cleared.
+
+**Close** (including `close_agent`) cancels the current turn and its slot waits. Late model output and remaining tools are dropped, even if the agent is reopened immediately. A new message from its orchestrator or Sera reopens it for a fresh turn; explicitly reopening can also wake queued messages. Neither replays the interrupted turn. Close cannot undo tool side effects that already happened. Scheduled runs already admitted may finish without reopening their owner; explicit notebook replays remain operator actions.
+
 ## Stopping and restarting
 
 Use Ctrl-C or send SIGTERM and wait for Marten to exit before starting it again. Marten stops new model calls, gives active tools `stopGraceSeconds` (5 seconds by default), then cancels unfinished tools and cleans up tracked foreground children. Detached `process_start` jobs survive a Marten restart, not a machine reboot.
@@ -59,7 +65,7 @@ Keep standing rules and short pointers in `MEMORY.md` (16 KiB by default). Link 
 
 ## As an app (desktop and phone)
 
-Marten's UI is an installable web app.
+Marten's UI is an installable web app. Opening a conversation jumps to its latest entry. Scroll back to read older messages without being pulled to the end by new ones. Question-card answers appear in the conversation as soon as they’re saved, even if the agent is paused.
 
 - **Desktop:** open the printed URL in Chrome or Edge and choose **Install Marten**, or in Safari choose **File → Add to Dock**. It opens in its own window and keeps working across Marten restarts.
 - **Phone:** Marten listens only on 127.0.0.1, so reach it through an HTTPS proxy on the Mac. [Tailscale](https://tailscale.com) is the easy one:

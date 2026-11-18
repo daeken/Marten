@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { AgentMessage, AgentSummary, Api, Backend, BackgroundProcess, BackupStatus, Entry, NotebookCell, OutsideClient, McpServer, Project, ProjectMemory, Schedule, ScriptToolInfo, SeraMessage, ServerEvent, Status_, TaskItem, takeToken } from './api';
@@ -116,7 +116,10 @@ export function App() {
         case 'agents':
         case 'config':
         case 'projects':
+          refresh();
+          break;
         case 'sera_message':
+          setTick(t => t + 1);
           refresh();
           break;
       }
@@ -139,7 +142,7 @@ export function App() {
   const project = agent ? status.projects.find(p => p.id === agent.projectId) : undefined;
   let main;
   if (agent)
-    main = <AgentView api={api} agent={agent} project={project} agents={status.agents} models={models} tick={tick} defaultModel={status.config.model ?? status.config.defaultModel ?? models[0]} defaultEffort={status.config.effort} onChange={refresh} onSelect={setSelected} entries={transcripts[agent.id] ?? []} streaming={streaming[agent.id] ?? ''} runningCall={running[agent.id]} />;
+    main = <AgentView api={api} agent={agent} project={project} agents={status.agents} models={models} tick={tick} defaultModel={status.config.model ?? status.config.defaultModel ?? models[0]} defaultEffort={status.config.effort} onChange={refresh} onSelect={setSelected} entries={transcripts[agent.id]} streaming={streaming[agent.id] ?? ''} runningCall={running[agent.id]} />;
   else if (selected === 'processes')
     main = <ProcessesView api={api} tick={tick} onSelect={setSelected} />;
   else if (selected === 'inbox')
@@ -334,17 +337,29 @@ function AgentRow({ agent: a, selected, onSelect, nested }: { agent: AgentSummar
   );
 }
 
-function AgentView({ api, agent, project, agents, models, tick, defaultModel, defaultEffort, onChange, onSelect, entries, streaming, runningCall }: {
+const emptyTranscript: Entry[] = [];
+
+function AgentView({ api, agent, project, agents, models, tick, defaultModel, defaultEffort, onChange, onSelect, entries: transcript, streaming, runningCall }: {
   api: Api; agent: AgentSummary; project?: Project; agents: AgentSummary[]; models: string[]; tick: number;
   defaultModel?: string; defaultEffort?: string; onChange: () => void; onSelect: (id: string) => void;
-  entries: Entry[]; streaming: string; runningCall?: string;
+  entries?: Entry[]; streaming: string; runningCall?: string;
 }) {
+  const entries = transcript ?? emptyTranscript;
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   useEffect(() => { api.tasks(agent.id).then(setTasks).catch(() => setTasks([])); }, [api, agent.id, tick]);
   const [questions, setQuestions] = useState<SeraMessage[]>([]);
   useEffect(() => {
-    api.inbox().then(all => setQuestions(all.filter(m => m.question && !m.answer && m.from === agent.id))).catch(() => setQuestions([]));
+    let active = true;
+    api.inbox().then(all => {
+      if (!active) return;
+      setQuestions(current => {
+        const answered = new Map(current.filter(q => q.answer).map(q => [q.id, q]));
+        return all.filter(m => m.question && m.from === agent.id).map(q => answered.get(q.id) ?? q);
+      });
+    }).catch(() => {});
+    return () => { active = false; };
   }, [api, agent.id, tick]);
+  const updateQuestion = (answer: SeraMessage) => setQuestions(current => current.map(q => q.id === answer.id ? answer : q));
   const [procs, setProcs] = useState<BackgroundProcess[]>([]);
   useEffect(() => { api.agentProcesses(agent.id).then(setProcs).catch(() => setProcs([])); }, [api, agent.id, tick]);
   const [schedules, setSchedules] = useState<Schedule[]>([]);
@@ -356,13 +371,36 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
   const scroller = useRef<HTMLDivElement>(null);
   const busy = agent.status === 'running' || agent.status === 'waiting_for_quota' || agent.status === 'waiting_for_slot';
 
-  useEffect(() => {
+  const openedTranscript = useRef<string>();
+  const followLatest = useRef(true);
+  useLayoutEffect(() => {
     const el = scroller.current;
-    if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 200) el.scrollTop = el.scrollHeight;
-  }, [entries, streaming]);
-  useEffect(() => { scroller.current?.scrollTo(0, scroller.current.scrollHeight); }, [agent.id]);
+    if (!transcript) openedTranscript.current = undefined;
+    if (!el || !transcript || showNotebook) return;
+    // On a cold open this is the first commit with history, not the empty view before fetch.
+    if (openedTranscript.current !== agent.id) {
+      openedTranscript.current = agent.id;
+      followLatest.current = true;
+    }
+    if (followLatest.current) el.scrollTop = el.scrollHeight;
+  }, [agent.id, transcript, streaming, runningCall, showNotebook, questions]);
+
+  const trackLogScroll = (event: React.UIEvent<HTMLDivElement>) => {
+    const el = event.currentTarget;
+    if (!showNotebook && openedTranscript.current === agent.id)
+      followLatest.current = el.scrollHeight - el.scrollTop - el.clientHeight < 200;
+  };
 
   const results = useMemo(() => new Map(entries.filter(e => e.kind === 'tool_result').map(e => [e.callId, e])), [entries]);
+  const agentQuestions = questions.filter(q => q.from === agent.id);
+  const delivered = new Set(entries.filter(e => e.kind === 'message' && e.from === 'Sera').map(e => e.text));
+  // Keep showing the recorded answer until its ordinary inbound message appears. Approval
+  // answers are handled by Guard and may never become ordinary inbound messages.
+  const answeredCards = agentQuestions.filter(q => q.answer && !delivered.has(`Sera answered your question "${q.text}":\n\n${q.answer}`))
+    .sort((a, b) => Date.parse(a.answeredAt ?? a.at) - Date.parse(b.answeredAt ?? b.at));
+  const card = (q: SeraMessage) => <div key={`question-${q.id}`} className="inbox-item card-inline"><QuestionCard api={api} q={q} onAnswered={updateQuestion} /></div>;
+  let nextCard = 0;
+
 
   const send = async () => {
     const t = text.trim();
@@ -456,14 +494,20 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
         </div>
       )}
       {showNotebook && <NotebookView api={api} agent={agent} tick={tick} />}
-      <div className="log" ref={scroller} style={showNotebook ? { display: 'none' } : undefined}>
-        {entries.map(e => <EntryView key={e.seq} entry={e} result={e.kind === 'tool_call' ? results.get(e.callId) : undefined} running={e.callId === runningCall} imageUrl={p => api.imageUrl(agent.id, p)} />)}
+      <div className="log" ref={scroller} onScroll={trackLogScroll} style={showNotebook ? { display: 'none' } : undefined}>
+        {entries.flatMap(e => {
+          const before = [];
+          while (nextCard < answeredCards.length && Date.parse(answeredCards[nextCard].answeredAt ?? answeredCards[nextCard].at) <= Date.parse(e.ts))
+            before.push(card(answeredCards[nextCard++]));
+          return [...before, <EntryView key={e.seq} entry={e} result={e.kind === 'tool_call' ? results.get(e.callId) : undefined} running={e.callId === runningCall} imageUrl={p => api.imageUrl(agent.id, p)} />];
+        })}
+        {answeredCards.slice(nextCard).map(card)}
         {streaming && <div className="assistant streaming"><Md text={streaming} /></div>}
         {agent.modelCall && !agent.modelCall.endedAt && !streaming && !runningCall &&
           <Thinking label={agent.modelCall.kind === 'compaction' ? 'Compacting context' : 'Thinking'} />}
         {agent.status === 'waiting_for_quota' && <Thinking label="Waiting for quota" />}
         {agent.status === 'waiting_for_slot' && <Thinking label="Waiting for slot" />}
-        {questions.map(q => <div key={q.id} className="inbox-item card-inline"><QuestionCard api={api} q={q} /></div>)}
+        {agentQuestions.filter(q => !q.answer).map(card)}
       </div>
       <footer className="composer">
         <div className="composer-row">
@@ -882,11 +926,14 @@ function ProcessesView({ api, tick, onSelect }: { api: Api; tick: number; onSele
   );
 }
 
-function QuestionCard({ api, q }: { api: Api; q: SeraMessage }) {
+function QuestionCard({ api, q, onAnswered }: { api: Api; q: SeraMessage; onAnswered?: (answer: SeraMessage) => void }) {
   const [text, setText] = useState('');
   const [error, setError] = useState<string | null>(null);
   const answer = (choice: number | null) =>
-    api.answer(q.id, choice, text.trim() || null).then(() => setText('')).catch(e => setError(String(e.message ?? e)));
+    api.answer(q.id, choice, text.trim() || null).then(answered => {
+      setText('');
+      onAnswered?.(answered);
+    }).catch(e => setError(String(e.message ?? e)));
   return (
     <div className="question">
       <div className="q-text"><Md text={q.text} /></div>

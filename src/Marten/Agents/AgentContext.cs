@@ -147,14 +147,16 @@ public sealed partial class Agent {
 		if(summary.Length == 0) throw new InvalidOperationException("Compaction produced no summary.");
 		var upTo = cut < view.Count ? view[cut].Seq - 1 : Transcript.Last!.Seq;
 		var instructions = manager.RebuildInstructions(this, out var memory);
-		Append(new Entry { Kind = EntryKind.Compaction, Text = summary, UpTo = upTo, Instructions = instructions, Reason = whole ? "whole" : "rollover" });
-		Instructions = instructions;
-		AtomicFile.Write(Path.Combine(Directory, "system.md"), instructions);
-		if(memory is { } snapshot) SawMemory(snapshot.Index, snapshot.Topics);
-		MarkPromptSeen(string.Join("\n\n", manager.PromptSources(Info)));
-		SnapshotDynamicTools();
-		lock(gate) state = state with { LastInputTokens = 0 };
-		SaveState();
-		SetStatus(AgentStatus.Running);
+		await CommitModelOutput(slots, ct, () => {
+			Append(new Entry { Kind = EntryKind.Compaction, Text = summary, UpTo = upTo, Instructions = instructions, Reason = whole ? "whole" : "rollover" });
+			Instructions = instructions;
+			AtomicFile.Write(Path.Combine(Directory, "system.md"), instructions);
+			if(memory is { } snapshot) SawMemory(snapshot.Index, snapshot.Topics);
+			MarkPromptSeen(string.Join("\n\n", manager.PromptSources(Info)));
+			SnapshotDynamicTools();
+			state = state with { LastInputTokens = 0 };
+			SaveState();
+			SetStatus(AgentStatus.Running);
+		});
 	}
 }

@@ -43,6 +43,8 @@ public interface IToolSource {
 public sealed class ToolRegistry {
 	readonly Dictionary<string, ITool> tools = new();
 	readonly List<IToolSource> sources = new();
+	// Delegation (call_tool) must not bypass the originating turn's admission check.
+	readonly AsyncLocal<Func<Task>?> currentAdmission = new();
 
 	public ToolRegistry Add(ITool tool) {
 		tools[tool.Name] = tool;
@@ -73,7 +75,7 @@ public sealed class ToolRegistry {
 	public IReadOnlyList<ToolSpec> SpecsFor(IToolContext ctx) => For(ctx).Select(Spec).ToList();
 	public IReadOnlyList<ToolSpec> BuiltInSpecsFor(IToolContext ctx) => tools.Values.Where(t => t.AvailableTo(ctx)).Select(Spec).ToList();
 
-	public async Task<ToolOutput> InvokeAsync(IToolContext ctx, string name, string? arguments, CancellationToken ct) {
+	public async Task<ToolOutput> InvokeAsync(IToolContext ctx, string name, string? arguments, CancellationToken ct, Func<Task>? admit = null) {
 		if(Find(ctx, name) is not { } tool) return ToolOutput.Error($"Unknown tool: {name}");
 		JsonObject args;
 		try {
@@ -82,11 +84,21 @@ public sealed class ToolRegistry {
 		} catch(Exception e) when(e is System.Text.Json.JsonException or ArgumentException) {
 			return ToolOutput.Error($"Invalid arguments for {name}: {e.Message}");
 		}
-		if(Gate?.Invoke(ctx, tool, args) is { } blocked) return blocked;
+		var previous = currentAdmission.Value;
+		admit ??= previous;
 		try {
+			if(admit != null) await admit();
+			if(Gate is { } guard) {
+				if(guard(ctx, tool, args) is { } blocked) return blocked;
+				if(admit != null) await admit();
+			}
+			ct.ThrowIfCancellationRequested();
+			currentAdmission.Value = admit;
 			return await tool.InvokeAsync(ctx, args, ct);
 		} catch(ToolException e) {
 			return ToolOutput.Error(e.Message);
+		} finally {
+			currentAdmission.Value = previous;
 		}
 	}
 }

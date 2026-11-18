@@ -91,6 +91,31 @@ public class ScheduleTests {
 	}
 
 	[Fact]
+	public async Task AnAlreadyAdmittedScheduleCanFinishButCannotReopenItsOwner() {
+		using var dir = new TempDir();
+		var backend = new FakeBackend();
+		backend.Script.Enqueue(_ => FakeBackend.Say("saw the output after reopen"));
+		var m = Manager(dir, backend);
+		var agent = m.CreateChat("t", dir.Path);
+		var now = DateTimeOffset.UtcNow;
+		agent.AddSchedule("Set-Content started yes; while (!(Test-Path release)) { Start-Sleep -Milliseconds 20 }; 'finished'", null, now, null, null);
+		var run = Assert.Single(new Scheduler(m).Tick(now));
+		try {
+			await Wait.Until(() => File.Exists(dir.File("started")));
+			agent.SetClosed(true);
+		} finally {
+			File.WriteAllText(dir.File("release"), "yes");
+		}
+		await run;
+		Assert.True(agent.Info.Closed);
+		Assert.Equal(1, agent.PendingCount);
+		Assert.Empty(backend.Requests);
+		agent.SetClosed(false);
+		await Wait.Until(() => Idle(agent));
+		Assert.Contains(agent.Transcript.Entries, e => e.Kind == EntryKind.Message && e.Text!.Contains("finished"));
+	}
+
+	[Fact]
 	public void MissedIntervalRunsAreSkippedAtStartup() {
 		using var dir = new TempDir();
 		var m = Manager(dir, new FakeBackend());

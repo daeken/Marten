@@ -140,8 +140,8 @@ public sealed class SpawnAgentTool(Func<AgentManager> manager) : ITool {
 public sealed class CloseAgentTool(Func<AgentManager> manager) : ITool {
 	public string Name => "close_agent";
 	public string Description =>
-		"Close one of your finished task agents. It keeps its history; it is never nudged and its schedules are suspended. " +
-		"Messaging it wakes it again.";
+		"Close one of your task agents and cancel its current turn. It keeps its history; nudges and schedules are suspended. " +
+		"Sending it a new message reopens it for a fresh turn, never the cancelled one.";
 	public JsonObject Parameters => Schema.Object(("agent", Schema.Str("Agent id or name.")));
 	public bool AvailableTo(IToolContext ctx) => ctx is Agent { Info.Kind: AgentKind.Orchestrator };
 

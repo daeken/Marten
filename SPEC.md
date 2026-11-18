@@ -38,7 +38,8 @@ Marten is project-centric: each project has one orchestrator, which spins up tas
 - **Binding means two things.** Agents know about the bound locations, and AGENTS.md files are picked up from the usual places in them.
 - **System prompt.** The Marten-wide prompt comes first, then a short section for the agent's kind (chat, orchestrator, task), then the project prompt.
 - **Shared tree by default.** Worktrees are supported as a per-spawn option, and the default is a project setting. Orchestrator rule: concurrent writers get worktrees.
-- **Finished task agents stay around.** Once one is marked closed (term not final), only its orchestrator can wake it, and can do so at any time.
+- **Closed task agents keep their history.** Their orchestrator can use `close_agent` even while a turn is active. Close cancels that turn, including model and slot waits; it discards late model output and does not dispatch the rest of the tool batch. Unanswered tool calls get interruption results. Cancellation cannot undo a tool that has already started; check for partial effects before retrying.
+- **Reopening is not resuming.** A new message from the task's orchestrator or Sera reopens a closed agent. Sera can also explicitly reopen it: undelivered messages can wake a fresh turn, but the cancelled turn cannot continue, even if close and reopen happen back-to-back. Automatic notifications can queue while closed but cannot reopen it.
 
 ## Project memory
 
@@ -164,7 +165,7 @@ Besides messages, two things can wake an agent: an unfinished task and a schedul
 - The command runs without the model. Output is delivered to the owner as a queued message; no output means nothing happens.
 - A run is skipped if the previous run of the same schedule is still going or still waiting.
 - A one-shot missed while the runtime was down runs at startup. Missed interval runs are skipped.
-- A closed agent is never nudged, and its schedules are suspended. Only its orchestrator wakes it.
+- A closed agent is never nudged, and no new schedules are admitted while it is closed or paused. A scheduled command already admitted is independent of the turn: it can finish, but its output will not reopen a closed owner.
 
 Both run unattended, so pausing must stop nudges and schedules as well as agents.
 
@@ -187,7 +188,7 @@ Four model backends are supported, and model choice is a setting rather than som
 - **Failed turns.** A terminal error, including a missing model or exhaustion of the five transient retries, ends the turn without nudging or changing tasks. Marten queues one notice each to the parent and to distinct other agent assigners of unfinished tasks, waking them if idle. Quota waits and an explicit interrupt are not terminal errors. A model setting is not rejected based on an advisory provider catalog.
 - **Model calls.** Per agent, the runtime exposes the latest completion attempt, including retries and context compaction: model, kind, start time, end time, and outcome (`succeeded`, `failed`, or `cancelled`). An attempt is in flight when it has no end time. Time spent waiting for quota or backoff is not in flight. This status is process-local, not transcript history.
 
-- **Concurrent work.** The process-wide `maxRunningAgents` limits active turns (model work and tools), and `maxConcurrentModelCalls` limits model completions, including compaction, across providers. Both default to unlimited (`0`). A turn can hold an agent slot while queued for a model slot, but acquires them in that order; compaction and retries never reacquire a held model slot. Pause and retry backoff give up capacity. Slot queues can be cancelled by interrupting the turn, and the UI and APIs report `waiting_for_slot` with the limit or named slot being waited on. Schedules, notebook replays and detached processes are not agent turns.
+- **Concurrent work.** The process-wide `maxRunningAgents` limits active turns (model work and tools), and `maxConcurrentModelCalls` limits model completions, including compaction, across providers. These count Marten's active waits: on cancellation a backend that ignores the token may still be running externally, but its wait releases Marten's slot and its late output is fenced. Both default to unlimited (`0`). A turn can hold an agent slot while queued for a model slot, but acquires them in that order; compaction and retries never reacquire a held model slot. Pause and retry backoff give up capacity. Slot queues can be cancelled by interrupting the turn, and the UI and APIs report `waiting_for_slot` with the limit or named slot being waited on. Schedules, notebook replays and detached processes are not agent turns.
 - **MCP is stdio only.** No OAuth and no external services.
 - **MCP is lazy, per agent.** A server is started once to read and cache its schema. It is launched for real only when an agent first calls one of its tools.
 
@@ -205,13 +206,14 @@ The UI is how Sera watches and steers the system, so it has to show everything t
 
 **Lets Sera**
 
-- Chat with any chat agent.
+- Chat with any chat agent. Opening a conversation scrolls to its latest entry after history loads. New entries follow the tail only while the reader is near the end.
 - Message any agent in either mode.
-- Pause an agent, a project or everything. Pausing also stops nudges and schedules.
+- Pause an agent, a project or everything. At the next model or tool dispatch the turn parks and yields its agent slot. An already-started model call can finish, but its reply or compaction is held off the transcript until resume, with both slots returned. Deltas while paused are suppressed. An already-started tool can finish; tool results are recorded and the remaining batch resumes in order when all applicable pauses clear, without re-running completed calls. Close cancels a parked turn. Pause also stops nudges and new schedules.
+- Explicit notebook replays are operator actions, not agent turns; pause and close do not gate or cancel them.
 
 **Outside agents.** Agents outside Marten, such as Claude Code sessions, get a named client token (`client add NAME`, or the UI). It reaches only the `/api/ext` routes: status, create project, message an agent, read replies, transcripts and tasks. To Marten agents they're peers named `NAME (outside)`, never Sera, and agents answer them with `send_message` to `client:NAME`. Exchanges count toward the loop breaker. If the connection drops, `marten-ext` exits with a short error and exit code 2 instead of silently replaying a command. See docs/outside-agents.md.
 
-**Question cards.** An orchestrator or chat agent can put a structured question to Sera as a card, and she answers on the card. Task agents cannot ask Sera directly; they pass questions up to their orchestrator.
+**Question cards.** An orchestrator or chat agent can put a structured question to Sera as a card, and she answers on the card. The conversation shows the recorded answer immediately, even if the agent is paused; once delivered as a transcript message, it is not shown twice. Task agents cannot ask Sera directly; they pass questions up to their orchestrator.
 
 ## Not day 0
 

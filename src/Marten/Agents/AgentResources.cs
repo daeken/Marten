@@ -37,7 +37,13 @@ public sealed partial class Agent {
 
 	/// <summary>One turn can hold an agent slot and briefly a model slot, always in that order.
 	/// Neither slot is held across a pause or a model retry delay.</summary>
-	sealed class TurnSlots(Agent agent) : IDisposable {
+	sealed class TurnSlots(Agent agent, CancellationToken turnToken = default) : IDisposable {
+		public CancellationToken TurnToken => turnToken;
+
+		public void ThrowIfStopped(CancellationToken ct) {
+			turnToken.ThrowIfCancellationRequested();
+			ct.ThrowIfCancellationRequested();
+		}
 		readonly ResourceSlots pools = agent.manager.Resources;
 		IDisposable? running;
 
@@ -49,7 +55,7 @@ public sealed partial class Agent {
 		public void Dispose() => ReleaseAgent();
 
 		public async Task EnsureAgent(CancellationToken ct) {
-			ct.ThrowIfCancellationRequested();
+			ThrowIfStopped(ct);
 			if(agent.IsPaused) ReleaseAgent();
 			if(running != null) return;
 			while(running == null) {
@@ -67,9 +73,13 @@ public sealed partial class Agent {
 					ReleaseAgent();
 					continue;
 				}
-				ct.ThrowIfCancellationRequested();
-				agent.SetStatus(AgentStatus.Running, detail);
-				return await agent.CompleteModel(request, kind, onDelta, ct);
+				lock(agent.gate) {
+					ThrowIfStopped(ct);
+					agent.manager.Restart.ThrowIfStopping();
+					if(agent.IsPaused) continue;
+					agent.SetStatus(AgentStatus.Running, detail);
+				}
+				return await agent.CompleteModel(request, kind, onDelta, ct, turnToken);
 			}
 		}
 
