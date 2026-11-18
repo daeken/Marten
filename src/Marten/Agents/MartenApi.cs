@@ -1,0 +1,28 @@
+using System.Collections;
+using Marten.Tools;
+
+namespace Marten.Agents;
+
+/// <summary>The $Marten object in every runspace: the runtime, as seen by one agent.</summary>
+public sealed class MartenApi(Agent agent, AgentManager manager) {
+	public string AgentId => agent.Info.Id;
+	public string AgentName => agent.Info.Name;
+	public string AgentKind => agent.Info.Kind.ToString();
+	public string Home => manager.Home.Root;
+	public string AgentDirectory => agent.Directory;
+	public string[] Tools => manager.Tools.All.Select(t => t.Name).ToArray();
+
+	public object[] Agents() => manager.Agents.Select(a => new {
+		a.Info.Id, Kind = a.Info.Kind.ToString(), a.Info.Name, Status = a.Status.ToString(),
+	}).ToArray<object>();
+
+	/// <summary>Call any Marten tool by name. Arguments are plain data; failures throw so PowerShell reports them.</summary>
+	public string CallTool(string name, IDictionary? arguments) {
+		var tool = manager.Tools.Get(name) ?? throw new ArgumentException($"Unknown tool: {name}");
+		if(!tool.CallableFromPowerShell) throw new InvalidOperationException($"{name} can't be called from PowerShell.");
+		var args = StateJson.FromPowerShell(arguments ?? new Hashtable(), "arguments")?.ToJsonString() ?? "{}";
+		var result = manager.Tools.InvokeAsync(agent, name, args, CancellationToken.None).GetAwaiter().GetResult();
+		if(result.IsError) throw new InvalidOperationException(result.Text);
+		return result.Text;
+	}
+}
