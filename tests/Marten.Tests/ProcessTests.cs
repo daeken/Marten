@@ -5,6 +5,7 @@ using Marten.Tools;
 
 namespace Marten.Tests;
 
+[Collection("Process attribution")]
 public class BackgroundProcessTests {
 	static AgentManager Manager(TempDir dir) =>
 		new(new Home(dir.File("home")), new Config { StopGraceSeconds = 2 }, new FakeBackend(),
@@ -38,7 +39,7 @@ public class BackgroundProcessTests {
 	}
 
 	[Fact]
-	public async Task ARestartLeavesThemRunningAndClosingTheAgentStopsThem() {
+	public async Task ShutdownAndRestartLeaveDetachedJobsRunningAndClosingTheAgentStopsThem() {
 		using var dir = new TempDir();
 		var m = Manager(dir);
 		Directory.CreateDirectory(dir.File("repo"));
@@ -48,6 +49,8 @@ public class BackgroundProcessTests {
 		try {
 		Assert.Equal("sleep", p.Name);
 
+		var watcher = new ChildProcessWatcher();
+		await m.Restart.DrainAsync(TimeSpan.Zero, TimeSpan.FromSeconds(1), watcher.CleanForeground);
 		var reloaded = Manager(dir);
 		reloaded.LoadAll();
 		var again = reloaded.Get(task.Info.Id)!;

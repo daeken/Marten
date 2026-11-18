@@ -7,7 +7,7 @@ A small agent runtime for Sera's agentic coding. See [SPEC.md](SPEC.md).
 Needs the .NET 10 SDK and Node 20+.
 
 ```sh
-(cd web && npm install && npm run build)
+(cd web && npm ci && npm run build)
 dotnet run --project src/Marten
 ```
 
@@ -26,6 +26,12 @@ State lives in `~/.marten` (override with `MARTEN_HOME`):
 | `prompts/*.md.default` | The shipped default each prompt came from; prompts you haven't edited are upgraded with Marten |
 
 Agents outside Marten (e.g. Claude Code sessions) can create projects and message agents with a client token: see [docs/outside-agents.md](docs/outside-agents.md) and `scripts/marten-ext`.
+
+## Stopping and restarting
+
+Use Ctrl-C or send SIGTERM and wait for Marten to exit before starting it again. Marten stops new model calls, gives active tools `stopGraceSeconds` (5 seconds by default), then cancels unfinished tools and cleans up tracked foreground children. Detached `process_start` jobs survive a Marten restart, not a machine reboot.
+
+On startup, Marten tells existing agents that it restarted and records interruptions it can infer from disk. It does not automatically repeat interrupted calls. A forced kill or power loss skips cleanup; results or queued messages can be lost even when a command changed files or external state. Check the transcript, logs, and actual state before retrying.
 
 ## As an app (desktop and phone)
 

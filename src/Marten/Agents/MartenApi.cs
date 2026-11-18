@@ -33,7 +33,7 @@ public sealed class MartenApi(Agent agent, AgentManager manager) {
 		if(tool.PowerShellBody != null) throw new InvalidOperationException($"{name} runs inline in PowerShell; call it as a function: {name} -param value.");
 		if(!tool.CallableFromPowerShell) throw new InvalidOperationException($"{name} can't be called from PowerShell.");
 		var args = StateJson.FromPowerShell(arguments ?? new Hashtable(), "arguments")?.ToJsonString() ?? "{}";
-		var result = manager.Tools.InvokeAsync(agent, name, args, CancellationToken.None).GetAwaiter().GetResult();
+		var result = manager.Tools.InvokeAsync(agent, name, args, manager.Restart.CancelTools).GetAwaiter().GetResult();
 		if(result.IsError) throw new InvalidOperationException(result.Text);
 		return result.Text;
 	}

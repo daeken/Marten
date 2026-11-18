@@ -78,8 +78,9 @@ public sealed partial class McpHub(Func<AgentManager> manager) : IToolSource {
 		if(!Servers.TryGetValue(server, out var config)) throw new ToolException($"MCP server {server} isn't configured.");
 		var key = (agent.Info.Id, server);
 		while(true) {
+			ct.ThrowIfCancellationRequested();
 			var task = clients.GetOrAdd(key, _ => McpClient.StartAsync(server, config.Expand(agent.Info.Id, agent.Directory, M.Home.Root), agent.WorkingDirectory,
-				Path.Combine(agent.Directory, "mcp", $"{server}.log"), Timeout, CancellationToken.None));
+				Path.Combine(agent.Directory, "mcp", $"{server}.log"), Timeout, M.Restart.CancelTools));
 			McpClient client;
 			try {
 				client = await task.WaitAsync(ct);
@@ -102,10 +103,13 @@ public sealed partial class McpHub(Func<AgentManager> manager) : IToolSource {
 			if(clients.TryRemove(key, out var task) && task.IsCompletedSuccessfully) await task.Result.DisposeAsync();
 	}
 
-	public async Task StopAll() {
-		foreach(var key in clients.Keys.ToList())
-			if(clients.TryRemove(key, out var task) && task.IsCompletedSuccessfully) await task.Result.DisposeAsync();
-	}
+	public Task StopAll() => Task.WhenAll(clients.Keys.Select(key => Task.Run(async () => {
+		if(!clients.TryRemove(key, out var task)) return;
+		McpClient client;
+		try { client = await task; }
+		catch { return; } // A failed/cancelled startup disposes its own process.
+		await client.DisposeAsync();
+	})));
 }
 
 /// <summary>One tool of one MCP server, as an agent sees it. Named server__tool.</summary>
