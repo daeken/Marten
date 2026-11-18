@@ -236,6 +236,7 @@ public sealed partial class Agent : IPowerShellOwner {
 			SetStatus(AgentStatus.Running);
 			Append(new Entry { Kind = EntryKind.Wake, Reason = reason });
 			NoteMemoryChanges();
+			NoteToolChanges();
 			Deliver(Take(_ => true));
 			var changesAtStart = taskChanges;
 			var failed = false;
@@ -371,7 +372,7 @@ public sealed partial class Agent : IPowerShellOwner {
 				await ManageContext(model, ct);
 				var view = View();
 				var request = new ModelRequest(model, Info.Effort ?? manager.Config.Effort, Instructions,
-					view, manager.Tools.SpecsFor(this), CacheKey: $"marten:{Info.Id}");
+					view, RequestTools(), CacheKey: $"marten:{Info.Id}");
 				SetStatus(AgentStatus.Running);
 				var result = await manager.Backend.CompleteAsync(request,
 					delta => manager.Publish(new { type = "delta", agentId = Info.Id, text = delta }), ct);

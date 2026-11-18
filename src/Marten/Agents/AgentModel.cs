@@ -1,3 +1,4 @@
+using Marten.Models;
 using System.Text.Json.Nodes;
 
 namespace Marten.Agents;
@@ -41,6 +42,10 @@ public sealed record AgentState {
 	/// <summary>Input tokens the backend reported for the last request, and the last log entry it included.</summary>
 	public long LastInputTokens { get; init; }
 	public long LastInputSeq { get; init; }
+	/// <summary>Dynamic tools (agent-written, MCP) sent with requests: fixed at spawn and compaction for caching.</summary>
+	public List<ToolSpec>? DynamicTools { get; init; }
+	/// <summary>Dynamic tools the agent has been told about, by name, with a hash of their spec.</summary>
+	public Dictionary<string, string>? ToolsNoted { get; init; }
 }
 
 public enum TaskState { Open, Waiting, Blocked, Done }

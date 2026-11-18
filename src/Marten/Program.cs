@@ -16,6 +16,7 @@ var backend = new ResponsesBackend(auth, http);
 AgentManager? managerRef = null;
 Func<AgentManager> getManager = () => managerRef!;
 var childWatcher = new ChildProcessWatcher();
+var scriptTools = new ScriptToolSource(getManager);
 var tools = new ToolRegistry()
 	.Add(new ReadFileTool())
 	.Add(new EditFileTool(new MemoryGuard(getManager)))
@@ -33,7 +34,10 @@ var tools = new ToolRegistry()
 	.Add(new ScheduleRemoveTool())
 	.Add(new ProcessStartTool())
 	.Add(new ProcessListTool())
-	.Add(new ProcessStopTool());
+	.Add(new ProcessStopTool())
+	.Add(new DefineToolTool(getManager, scriptTools))
+	.Add(new RemoveToolTool(getManager, scriptTools))
+	.AddSource(scriptTools);
 var manager = managerRef = new AgentManager(home, config, backend, tools) { Launcher = new ProcessLauncher(childWatcher) };
 var hub = new EventHub();
 manager.Events += hub.Broadcast;
@@ -147,6 +151,17 @@ api.MapGet("/agents/{id}/processes/{n:int}/log", (string id, int n, int? lines) 
 	var text = new StreamReader(stream).ReadToEnd();
 	var all = text.Split('\n');
 	return Results.Text(string.Join('\n', all.TakeLast(Math.Clamp(lines ?? 200, 1, 5000))));
+});
+api.MapGet("/tools", (string? projectId) => {
+	var dirs = new List<(string Scope, string Dir)> { ("global", scriptTools.GlobalDir) };
+	if(manager.GetProject(projectId) is { } p) dirs.Add((p.Info.Id, ScriptToolSource.ProjectDir(p)));
+	return dirs.Where(d => Directory.Exists(d.Dir)).SelectMany(d => Directory.EnumerateFiles(d.Dir, "*.ps1").Select(f => {
+		var name = Path.GetFileNameWithoutExtension(f);
+		var script = File.ReadAllText(f);
+		string? description = null, error = null;
+		try { description = ScriptTool.Parse(name, script, f, d.Scope).Description; } catch(ToolException e) { error = e.Message; }
+		return new { name, scope = d.Scope == "global" ? "global" : "project", path = f, script, description, error, modified = File.GetLastWriteTimeUtc(f) };
+	})).OrderBy(t => t.name);
 });
 api.MapPost("/projects", (CreateProject req) => {
 	try {

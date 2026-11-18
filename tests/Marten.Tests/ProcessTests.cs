@@ -18,10 +18,12 @@ public class BackgroundProcessTests {
 			new JsonObject { ["command"] = "echo hello from $PWD; sleep 300 | cat", ["name"] = "server", ["working_directory"] = null }, default);
 		Assert.StartsWith("Started #1 server", r.Text);
 		var p = agent.Processes.Single();
+		try {
 		Assert.True(Posix.Alive(p.Pid));
 		// Detached: not Marten's child, and in its own process group.
 		Assert.NotEqual(ProcessTable.Self, ProcessTable.ParentMap()[p.Pid]);
-		await Wait.Until(() => File.ReadAllText(p.LogPath).Contains($"hello from {dir.Path}"));
+		// macOS reports /private/var/... for /var/..., so match on the directory's own name.
+		await Wait.Until(() => File.ReadAllText(p.LogPath).Contains("hello from /") && File.ReadAllText(p.LogPath).Contains(Path.GetFileName(dir.Path)));
 		await Wait.Until(() => ProcessTable.Tree(p.Pid, ProcessTable.ParentMap()).Count >= 3);
 		var tree = ProcessTable.Tree(p.Pid, ProcessTable.ParentMap());
 		Assert.Contains("#1 server — running", (await new ProcessListTool().InvokeAsync(agent, new JsonObject(), default)).Text);
@@ -30,6 +32,9 @@ public class BackgroundProcessTests {
 		await Wait.Until(() => !tree.Any(Posix.Alive));
 		Assert.NotNull(agent.Processes.Single().Stopped);
 		Assert.Equal("No background processes.", (await new ProcessListTool().InvokeAsync(agent, new JsonObject(), default)).Text);
+		} finally {
+			await agent.StopAllProcesses();
+		}
 	}
 
 	[Fact]
@@ -40,6 +45,7 @@ public class BackgroundProcessTests {
 		var (_, orch) = m.CreateProject("p", [dir.File("repo")], null, false);
 		var task = m.SpawnTask(orch, "t", false, null, null);
 		var p = task.StartProcess("sleep 300", null, null);
+		try {
 		Assert.Equal("sleep", p.Name);
 
 		var reloaded = Manager(dir);
@@ -49,6 +55,9 @@ public class BackgroundProcessTests {
 
 		again.SetClosed(true);
 		await Wait.Until(() => !Posix.Alive(p.Pid) && again.Processes.Single().Stopped != null);
+		} finally {
+			await ProcessLauncher.StopAsync(p.Pid, TimeSpan.FromSeconds(1));
+		}
 	}
 
 	[Fact]

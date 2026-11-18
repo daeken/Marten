@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { AgentSummary, Api, BackgroundProcess, Entry, Project, ProjectMemory, Schedule, SeraMessage, ServerEvent, Status_, TaskItem, takeToken } from './api';
+import { AgentSummary, Api, BackgroundProcess, Entry, Project, ProjectMemory, Schedule, ScriptToolInfo, SeraMessage, ServerEvent, Status_, TaskItem, takeToken } from './api';
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh'];
 
@@ -79,6 +79,7 @@ export function App() {
         case 'tasks':
         case 'schedules':
         case 'processes':
+        case 'tools':
         case 'memory':
           setTick(t => t + 1);
           break;
@@ -509,6 +510,8 @@ function NewProject({ api, onCreated }: { api: Api; onCreated: (orchestratorId: 
 function MemoryView({ api, project, agents, tick }: { api: Api; project?: Project; agents: AgentSummary[]; tick: number }) {
   const [memory, setMemory] = useState<ProjectMemory | null>(null);
   useEffect(() => { if (project) api.memory(project.id).then(setMemory).catch(() => setMemory(null)); }, [api, project, tick]);
+  const [tools, setTools] = useState<ScriptToolInfo[]>([]);
+  useEffect(() => { if (project) api.scriptTools(project.id).then(setTools).catch(() => setTools([])); }, [api, project, tick]);
   if (!project) return <div className="empty">No such project.</div>;
   const name = (id: string) => agents.find(a => a.id === id)?.name ?? id;
   return (
@@ -518,6 +521,15 @@ function MemoryView({ api, project, agents, tick }: { api: Api; project?: Projec
         <div className="muted small">{memory?.path}</div>
         <div className="memory">{memory?.text.trim() ? <Md text={memory.text} /> : <span className="muted">Empty so far.</span>}</div>
         {memory?.prompt && (<><h3>Project prompt</h3><div className="memory"><Md text={memory.prompt} /></div></>)}
+        <h3>Agent-written tools</h3>
+        {tools.length === 0 && <div className="muted small">None yet. Agents write them with define_tool.</div>}
+        {tools.map(t => (
+          <details key={t.path} className="tool-def">
+            <summary><strong>{t.name}</strong> <span className="tag">{t.scope}</span> <span className="muted small">{t.error ? `broken: ${t.error}` : t.description?.split('\n')[0]}</span></summary>
+            <div className="muted small">{t.path}</div>
+            <pre className="output log-tail">{t.script}</pre>
+          </details>
+        ))}
         <h3>History</h3>
         {memory && memory.log.length === 0 && <div className="muted small">No edits yet.</div>}
         <ul className="history">

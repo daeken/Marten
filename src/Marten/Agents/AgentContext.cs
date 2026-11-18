@@ -134,7 +134,7 @@ public sealed partial class Agent {
 			: "The older part of your context, everything above this message, is about to be replaced by a summary; what comes after it stays verbatim. Write that summary: decisions, facts learned, Sera's preferences and instructions, work done, open threads, and anything you'd need to refer back to. Reply with the summary only, and don't call tools.";
 		var request = new ModelRequest(model, Info.Effort ?? manager.Config.Effort, Instructions,
 			[.. prefix, new Entry { Kind = EntryKind.Message, From = NudgeSender, Text = ask }],
-			manager.Tools.SpecsFor(this), CacheKey: $"marten:{Info.Id}");
+			RequestTools(), CacheKey: $"marten:{Info.Id}");
 		var result = await manager.Backend.CompleteAsync(request, _ => { }, ct);
 		var summary = string.Join("\n\n", result.Items.Where(i => i.Kind == EntryKind.Assistant && !string.IsNullOrWhiteSpace(i.Text)).Select(i => i.Text));
 		if(summary.Length == 0) throw new InvalidOperationException("Compaction produced no summary.");
@@ -144,6 +144,7 @@ public sealed partial class Agent {
 		Instructions = instructions;
 		AtomicFile.Write(Path.Combine(Directory, "system.md"), instructions);
 		if(Project is { } project) SawMemory(project.Memory);
+		SnapshotDynamicTools();
 		lock(gate) state = state with { LastInputTokens = 0 };
 		SaveState();
 		SetStatus(AgentStatus.Running);

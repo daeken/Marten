@@ -145,6 +145,7 @@ public sealed class PowerShellTool(Func<int> defaultTimeoutSeconds, Func<int> st
 
 	/// <summary>A PowerShell function whose parameters mirror the tool's top-level schema properties.</summary>
 	static string ToolFunction(ITool tool) {
+		if(tool.PowerShellBody is { } body) return body;
 		var props = (tool.Parameters["properties"] as JsonObject)?.Select(p => p.Key).ToList() ?? [];
 		var param = string.Join(", ", props.Select(p => $"${p}"));
 		return $"param({param})\n$Marten.CallTool('{tool.Name}', $PSBoundParameters)";
