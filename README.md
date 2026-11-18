@@ -59,7 +59,7 @@ Keep standing rules and short pointers in `MEMORY.md` (16 KiB by default). Link 
 
 ## As an app (desktop and phone)
 
-Marten's UI is an installable web app. Opening a conversation jumps to its latest entry. Scroll back to read older messages without being pulled to the end by new ones.
+Marten's UI is an installable web app. Opening a conversation jumps to its latest entry. Scroll back to read older messages without being pulled to the end by new ones. Question-card answers appear in the conversation as soon as they’re saved, even if the agent is paused.
 
 - **Desktop:** open the printed URL in Chrome or Edge and choose **Install Marten**, or in Safari choose **File → Add to Dock**. It opens in its own window and keeps working across Marten restarts.
 - **Phone:** Marten listens only on 127.0.0.1, so reach it through an HTTPS proxy on the Mac. [Tailscale](https://tailscale.com) is the easy one:
