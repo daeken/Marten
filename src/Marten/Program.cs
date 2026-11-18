@@ -16,7 +16,8 @@ var auth = new ChatGptAuth(home, http);
 AgentManager? managerRef = null;
 var messagesBackends = MessagesProvider.All.Select(p => new MessagesBackend(p, home,
 	name => managerRef?.Config.Models.GetValueOrDefault(name) ?? [])).ToList();
-var backend = new BackendRouter(new ResponsesBackend(auth, http), messagesBackends.Select(b => ((IModelBackend) b, b.Settings.Prefixes)).ToList());
+var ledger = new UsageLedger(home, () => managerRef?.Config ?? config);
+var backend = new BackendRouter(new ResponsesBackend(auth, http), messagesBackends.Select(b => ((IModelBackend) b, b.Settings.Prefixes)).ToList(), ledger);
 Func<AgentManager> getManager = () => managerRef!;
 var childWatcher = new ChildProcessWatcher();
 var scriptTools = new ScriptToolSource(getManager);
@@ -75,7 +76,10 @@ object AgentSummary(Agent a) => new {
 	OpenTasks = a.Tasks.Count(t => t.State != TaskState.Done),
 };
 
-object BackendSummary(MessagesBackend b) => new { b.Provider, b.Settings.Label, b.Connected, b.KeySource, b.Settings.EnvVar };
+object BackendSummary(MessagesBackend b) => new {
+	b.Provider, b.Settings.Label, b.Connected, b.KeySource, b.Settings.EnvVar,
+	SpentToday = ledger.SpentToday(b.Provider), Budget = manager.Config.Budgets.TryGetValue(b.Provider, out var cap) ? cap : (decimal?) null,
+};
 
 object ProjectSummary(Project p) => new { p.Info.Id, p.Info.Name, p.Info.Created, p.Info.Bindings, p.Info.WorktreesByDefault, p.Info.OrchestratorId, p.Info.Paused };
 
@@ -89,6 +93,8 @@ api.MapGet("/status", () => new {
 	inbox = manager.SeraInbox().Count,
 	openQuestions = manager.SeraInbox().Count(m => m.Question && m.Answer == null),
 	paused = manager.PausedAll,
+	spentToday = ledger.SpentToday(),
+	totalBudget = manager.Config.Budgets.TryGetValue("total", out var totalCap) ? totalCap : (decimal?) null,
 });
 api.MapPost("/pause", (PauseRequest req) => {
 	manager.SetPausedAll(req.Paused);
@@ -117,6 +123,7 @@ api.MapPut("/backends/{name}/key", (string name, BackendKey req) => {
 	manager.Publish(new { type = "config" });
 	return Results.Ok(BackendSummary(b));
 });
+api.MapGet("/usage", (int? days) => ledger.Recent(Math.Clamp(days ?? 7, 1, 90)));
 api.MapGet("/models", async (CancellationToken ct) => {
 	try {
 		return Results.Ok(await backend.ListModelsAsync(ct));

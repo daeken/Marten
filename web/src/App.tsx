@@ -252,6 +252,11 @@ function BackendRow({ api, backend: b, onChange }: { api: Api; backend: Backend;
     <div className="backend small">
       <div className="row">
         <span className={b.connected ? '' : 'muted'}>{b.label} · {b.connected ? (b.keySource === 'saved' ? 'key saved' : `from ${b.keySource}`) : 'no key'}</span>
+        {(b.spentToday > 0 || b.budget != null) && (
+          <span className={`spend ${b.budget != null && b.spentToday >= b.budget ? 'error' : 'muted'}`} title="Spent today at known prices / daily budget">
+            {'$' + b.spentToday.toFixed(2)}{b.budget != null && ' / $' + b.budget}
+          </span>
+        )}
         {!editing && <button className="link small" onClick={() => setEditing(true)}>{b.connected ? 'Change' : 'Add key'}</button>}
         {!editing && b.keySource === 'saved' && <button className="link small" onClick={() => save(null)}>Remove</button>}
       </div>
