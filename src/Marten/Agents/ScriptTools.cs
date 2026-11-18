@@ -184,9 +184,15 @@ public sealed partial class Agent {
 		return [.. manager.Tools.BuiltInSpecsFor(this), .. snapshot];
 	}
 
+	/// <summary>
+	/// Agent-written tools are always direct. MCP tools are direct only while there are no more than
+	/// DirectToolLimit of them; past that they stay behind tool_search and call_tool.
+	/// </summary>
 	List<ToolSpec> SnapshotDynamicTools() {
 		var tools = manager.Tools.DynamicFor(this).ToList();
-		var specs = tools.Select(ToolRegistry.Spec).ToList();
+		var mcp = tools.OfType<Marten.Mcp.McpTool>().ToList();
+		var direct = mcp.Count > manager.Config.DirectToolLimit ? tools.Where(t => t is not Marten.Mcp.McpTool) : tools;
+		var specs = direct.Select(ToolRegistry.Spec).ToList();
 		lock(gate) state = state with { DynamicTools = specs, ToolsNoted = tools.ToDictionary(t => t.Name, HashOf) };
 		SaveState();
 		return specs;
@@ -220,7 +226,7 @@ public sealed partial class Agent {
 		if(removed.Count > 0) parts.Add("Removed: " + string.Join(", ", removed));
 		Append(new Entry {
 			Kind = EntryKind.Message, From = NudgeSender,
-			Text = $"Tools changed since your last turn. Until your next compaction, call new or changed ones from PowerShell; after it they're direct tools.\n\n{string.Join("\n\n", parts)}",
+			Text = $"Tools changed since your last turn. Call new or changed ones with call_tool (tool_search shows their parameters) or from PowerShell; your next compaction makes them direct tools, except MCP tools past the direct limit.\n\n{string.Join("\n\n", parts)}",
 		});
 	}
 }

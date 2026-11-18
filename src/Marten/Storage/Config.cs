@@ -28,6 +28,8 @@ public sealed record Config {
 	public Dictionary<string, decimal> Budgets { get; init; } = new();
 	/// <summary>Dollars per million tokens by model id, overriding the built-in Claude prices. Unpriced models count tokens only.</summary>
 	public Dictionary<string, Marten.Models.Price> Prices { get; init; } = new();
+	/// <summary>MCP tools go straight into each agent's tool list while there are at most this many; past it they're found with tool_search.</summary>
+	public int DirectToolLimit { get; init; } = 12;
 	/// <summary>MCP servers by name (stdio only). Their tools appear to agents as name__tool.</summary>
 	public Dictionary<string, Marten.Mcp.McpServerConfig> Mcp { get; init; } = new();
 	/// <summary>Extra Origin allowed to call the API, e.g. the Vite dev server.</summary>

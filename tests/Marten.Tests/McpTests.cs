@@ -11,14 +11,16 @@ public class McpTests {
 	static string Node => new[] { "/opt/homebrew/bin/node", "/usr/local/bin/node", "/opt/node22/bin/node", "/usr/bin/node" }
 		.FirstOrDefault(File.Exists) ?? "node";
 
-	static (AgentManager, McpHub) Manager(TempDir dir, IModelBackend backend) {
+	internal static (AgentManager, McpHub) Manager(TempDir dir, IModelBackend backend, int directLimit = 12) {
 		AgentManager? m = null;
 		Func<AgentManager> get = () => m!;
 		var hub = new McpHub(get);
 		var tools = new ToolRegistry().Add(new ReadFileTool())
 			.Add(new PowerShellTool(() => 30, () => 3, new ChildProcessWatcher()))
+			.Add(new ToolSearchTool()).Add(new CallToolTool())
 			.AddSource(hub);
 		var config = new Config {
+			DirectToolLimit = directLimit,
 			Mcp = new() {
 				["fake"] = new McpServerConfig {
 					Command = Node, Args = [Path.Combine(AppContext.BaseDirectory, "fake-mcp.mjs")],
