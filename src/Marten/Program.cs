@@ -88,7 +88,15 @@ var webRoot = FindWebRoot();
 if(webRoot != null) {
 	var files = new PhysicalFileProvider(webRoot);
 	app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = files });
-	app.UseStaticFiles(new StaticFileOptions { FileProvider = files });
+	var types = new Microsoft.AspNetCore.StaticFiles.FileExtensionContentTypeProvider();
+	types.Mappings[".webmanifest"] = "application/manifest+json";
+	app.UseStaticFiles(new StaticFileOptions {
+		FileProvider = files, ContentTypeProvider = types,
+		// The service worker and the page must revalidate, so a rebuilt UI reaches the installed app.
+		OnPrepareResponse = r => {
+			if(r.File.Name is "sw.js" or "index.html") r.Context.Response.Headers.CacheControl = "no-cache";
+		},
+	});
 }
 
 object AgentSummary(Agent a) => new {

@@ -27,6 +27,18 @@ State lives in `~/.marten` (override with `MARTEN_HOME`):
 
 Agents outside Marten (e.g. Claude Code sessions) can create projects and message agents with a client token: see [docs/outside-agents.md](docs/outside-agents.md) and `scripts/marten-ext`.
 
+## As an app (desktop and phone)
+
+Marten's UI is an installable web app.
+
+- **Desktop:** open the printed URL in Chrome or Edge and choose **Install Marten**, or in Safari choose **File → Add to Dock**. It opens in its own window and keeps working across Marten restarts.
+- **Phone:** Marten listens only on 127.0.0.1, so reach it through an HTTPS proxy on the Mac. [Tailscale](https://tailscale.com) is the easy one:
+  1. On the Mac, run `tailscale serve --bg 7450`. It prints a URL like `https://your-mac.your-tailnet.ts.net`.
+  2. Add `"remoteHosts": ["your-mac.your-tailnet.ts.net"]` to `~/.marten/config.json` and restart Marten.
+  3. On the phone, which must be on the same tailnet, open that URL. Paste the printed link or the token from `~/.marten/secrets/ui-token` into the box, then use **Add to Home Screen**.
+
+  `remoteHosts` only tells Marten to accept requests carrying that name. The API still needs the token, and nothing is exposed beyond your tailnet.
+
 For UI work, run `npm run dev` in `web/` and set `"devOrigin": "http://localhost:5173"` in `config.json`.
 
 ## Tests
