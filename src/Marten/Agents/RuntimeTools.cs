@@ -273,7 +273,7 @@ public sealed class SetModelTool(Func<AgentManager> manager) : ITool {
 		"agents. Null resets to the configured default. Takes effect at the next model call.";
 	public JsonObject Parameters => Schema.Object(
 		("agent", Schema.Str("Whose: null for yourself; orchestrators may name one of their task agents.", nullable: true)),
-		("model", Schema.Str("Model id, or null for the default.", nullable: true)),
+		("model", Schema.Str("Model id as Sera names it (claude-*, glm-* and deepseek-* models go to those providers), or null for the default.", nullable: true)),
 		("effort", Schema.Str("Effort (e.g. low, medium, high), or null for the default.", nullable: true)));
 
 	public Task<ToolOutput> InvokeAsync(IToolContext ctx, JsonObject args, CancellationToken ct) {

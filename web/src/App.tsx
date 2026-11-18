@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { AgentMessage, AgentSummary, Api, BackgroundProcess, Entry, McpServer, Project, ProjectMemory, Schedule, ScriptToolInfo, SeraMessage, ServerEvent, Status_, TaskItem, takeToken } from './api';
+import { AgentMessage, AgentSummary, Api, Backend, BackgroundProcess, Entry, McpServer, Project, ProjectMemory, Schedule, ScriptToolInfo, SeraMessage, ServerEvent, Status_, TaskItem, takeToken } from './api';
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh'];
 
@@ -33,9 +33,10 @@ export function App() {
   const [models, setModels] = useState<string[]>([]);
   /** Bumped on task and memory events so open panels refetch. */
   const [tick, setTick] = useState(0);
-  const connected = status?.auth.connected ?? false;
+  /** Changes whenever a backend connects or disconnects, so the model list refetches. */
+  const connected = status ? [status.auth.connected, ...status.backends.map(b => b.connected)].map(Number).join('') : '';
   useEffect(() => {
-    if (api && connected) api.models().then(setModels).catch(() => setModels([]));
+    if (api && connected.includes('1')) api.models().then(setModels).catch(() => setModels([]));
   }, [api, connected]);
 
   const refresh = useCallback(async () => {
@@ -186,6 +187,7 @@ function Sidebar({ api, status, selected, onSelect, onChange }: {
             {status.auth.lastError && <div className="error small">{status.auth.lastError}</div>}
           </>
         )}
+        {status.backends.map(b => <BackendRow key={b.provider} api={api} backend={b} onChange={onChange} />)}
       </section>
       <nav className="agents">
         <button className={`agent inbox ${selected === 'inbox' ? 'active' : ''}`} onClick={() => onSelect('inbox')}>
@@ -227,6 +229,34 @@ function Sidebar({ api, status, selected, onSelect, onChange }: {
         {status.agents.filter(a => a.kind === 'chat').map(a => <AgentRow key={a.id} agent={a} selected={selected} onSelect={onSelect} />)}
       </nav>
     </aside>
+  );
+}
+
+/** An API-key backend: shows whether it's connected and takes or removes a key. The key never comes back from the server. */
+function BackendRow({ api, backend: b, onChange }: { api: Api; backend: Backend; onChange: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const [key, setKey] = useState('');
+  const save = async (value: string | null) => {
+    await api.setBackendKey(b.provider, value);
+    setEditing(false);
+    setKey('');
+    onChange();
+  };
+  return (
+    <div className="backend small">
+      <div className="row">
+        <span className={b.connected ? '' : 'muted'}>{b.label} · {b.connected ? (b.keySource === 'saved' ? 'key saved' : `from ${b.keySource}`) : 'no key'}</span>
+        {!editing && <button className="link small" onClick={() => setEditing(true)}>{b.connected ? 'Change' : 'Add key'}</button>}
+        {!editing && b.keySource === 'saved' && <button className="link small" onClick={() => save(null)}>Remove</button>}
+      </div>
+      {editing && (
+        <form className="row" onSubmit={e => { e.preventDefault(); if (key.trim()) save(key.trim()); }}>
+          <input type="password" autoFocus placeholder={`${b.label} API key`} value={key} onChange={e => setKey(e.target.value)} autoComplete="off" />
+          <button type="submit" className="small" disabled={!key.trim()}>Save</button>
+          <button type="button" className="link small" onClick={() => { setEditing(false); setKey(''); }}>Cancel</button>
+        </form>
+      )}
+    </div>
   );
 }
 

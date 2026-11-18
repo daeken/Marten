@@ -103,8 +103,18 @@ export interface Entry {
   model?: string;
 }
 
+export interface Backend {
+  provider: string;
+  label: string;
+  connected: boolean;
+  /** "saved", or the environment variable the key came from. */
+  keySource?: string;
+  envVar?: string;
+}
+
 export interface Status_ {
   auth: { connected: boolean; email?: string; signingIn: boolean; lastError?: string };
+  backends: Backend[];
   config: { model?: string; effort?: string; defaultModel?: string };
   agents: AgentSummary[];
   projects: Project[];
@@ -166,6 +176,7 @@ export class Api {
   login = () => this.call<{ url: string }>('POST', '/auth/login');
   logout = () => this.call<void>('POST', '/auth/logout');
   models = () => this.call<string[]>('GET', '/models');
+  setBackendKey = (provider: string, key: string | null) => this.call<Backend>('PUT', `/backends/${provider}/key`, { key });
   setConfig = (model: string | null, effort: string | null) => this.call<void>('PUT', '/config', { model, effort });
   createChat = (name: string) => this.call<AgentSummary>('POST', '/agents', { name });
   transcript = (id: string) => this.call<Entry[]>('GET', `/agents/${id}/transcript`);

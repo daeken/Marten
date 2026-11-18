@@ -128,7 +128,8 @@ public sealed class ResponsesBackend(ChatGptAuth auth, HttpClient http) : IModel
 						var call = new JsonObject {
 							["type"] = "function_call", ["call_id"] = e.CallId, ["name"] = e.Name, ["arguments"] = e.Arguments ?? "{}",
 						};
-						if(e.Namespace != null) call["namespace"] = e.Namespace;
+						// Calls from other providers carry no namespace; every Marten tool lives in ours.
+						call["namespace"] = e.Namespace ?? ToolNamespace;
 						input.Add(call);
 					}
 					break;
