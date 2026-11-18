@@ -1,9 +1,12 @@
 using System.Text.Json.Nodes;
 using Marten.Models;
+using Marten.Storage;
 
 namespace Marten.Tools;
 
 public sealed record ToolOutput(string Text, bool IsError = false) {
+	/// <summary>Images to show the model alongside the text, already saved to disk.</summary>
+	public List<ImageRef>? Images { get; init; }
 	public static ToolOutput Error(string text) => new(text, true);
 }
 
@@ -27,6 +30,8 @@ public interface ITool {
 	bool AvailableTo(IToolContext ctx) => true;
 	/// <summary>Script to define the tool's PowerShell function inline, instead of a call back through $Marten.</summary>
 	string? PowerShellBody => null;
+	/// <summary>False for schemas the backend can't enforce strictly, like MCP servers' own.</summary>
+	bool Strict => true;
 	Task<ToolOutput> InvokeAsync(IToolContext ctx, JsonObject args, CancellationToken ct);
 }
 
@@ -54,7 +59,7 @@ public sealed class ToolRegistry {
 	public ITool? Get(string name) => tools.GetValueOrDefault(name);
 	public bool IsBuiltIn(string name) => tools.ContainsKey(name);
 	public IReadOnlyList<ToolSpec> Specs => tools.Values.Select(Spec).ToList();
-	public static ToolSpec Spec(ITool t) => new(t.Name, t.Description, t.Parameters);
+	public static ToolSpec Spec(ITool t) => new(t.Name, t.Description, t.Parameters, t.Strict);
 
 	/// <summary>Built-in tools first; a dynamic tool never shadows one.</summary>
 	public IEnumerable<ITool> For(IToolContext ctx) =>

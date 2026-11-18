@@ -140,8 +140,22 @@ public sealed class PowerShellTool(Func<int> defaultTimeoutSeconds, Func<int> st
 		iss.Variables.Add(new SessionStateVariableEntry("Marten", owner.MartenObject, "The Marten runtime."));
 		foreach(var tool in owner.Tools.For(owner).Where(t => t.CallableFromPowerShell))
 			iss.Commands.Add(new SessionStateFunctionEntry(tool.Name, ToolFunction(tool)));
+		iss.Commands.Add(new SessionStateFunctionEntry("View-Image", ViewImageFunction));
 		return iss;
 	}
+
+	const string ViewImageFunction = """
+		<#
+		.SYNOPSIS
+		Shows an image file (.png, .jpg, .gif, .webp) to the model along with this command's output.
+		#>
+		param([Parameter(Mandatory, ValueFromPipeline)][string]$Path)
+		process {
+			$full = (Resolve-Path -LiteralPath $Path).ProviderPath
+			$null = $Marten.ViewImage($full)
+			"Showing $full to the model."
+		}
+		""";
 
 	/// <summary>A PowerShell function whose parameters mirror the tool's top-level schema properties.</summary>
 	static string ToolFunction(ITool tool) {

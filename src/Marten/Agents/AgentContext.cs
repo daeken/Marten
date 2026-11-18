@@ -29,7 +29,7 @@ public sealed partial class Agent {
 		foreach(var e in entries) {
 			if(compaction != null && e.Seq <= compaction.UpTo) continue;
 			if(e.Kind is EntryKind.Elide or EntryKind.Compaction) continue;
-			view.Add(e.Kind == EntryKind.ToolResult && elided.Contains(e.Seq) ? e with { Text = ElidedNote(e) } : e);
+			view.Add(e.Kind == EntryKind.ToolResult && elided.Contains(e.Seq) ? e with { Text = ElidedNote(e), Images = null } : e);
 		}
 		return view;
 	}
@@ -39,8 +39,10 @@ public sealed partial class Agent {
 		return $"[Elided to save context ({e.Text?.Length ?? 0:N0} characters). The full result is in {path}; read it with read_file if you need it again.]";
 	}
 
+	/// <summary>Roughly what an entry costs, in characters (4 to a token); an image counts as about 1,500 tokens.</summary>
 	static long Chars(Entry e) =>
-		(e.Text?.Length ?? 0) + (e.Arguments?.Length ?? 0) + (e.Kind == EntryKind.Reasoning && e.Raw is { } raw ? raw.GetRawText().Length / 2 : 0);
+		(e.Text?.Length ?? 0) + (e.Arguments?.Length ?? 0) + (e.Kind == EntryKind.Reasoning && e.Raw is { } raw ? raw.GetRawText().Length / 2 : 0)
+		+ (e.Images?.Count ?? 0) * 6_000;
 
 	int Window(string model) => manager.Config.ContextWindows.TryGetValue(model, out var w) ? w : manager.Config.ContextTokens;
 

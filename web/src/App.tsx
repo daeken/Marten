@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { AgentMessage, AgentSummary, Api, BackgroundProcess, Entry, Project, ProjectMemory, Schedule, ScriptToolInfo, SeraMessage, ServerEvent, Status_, TaskItem, takeToken } from './api';
+import { AgentMessage, AgentSummary, Api, BackgroundProcess, Entry, McpServer, Project, ProjectMemory, Schedule, ScriptToolInfo, SeraMessage, ServerEvent, Status_, TaskItem, takeToken } from './api';
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh'];
 
@@ -355,7 +355,7 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
         </div>
       )}
       <div className="log" ref={scroller}>
-        {entries.map(e => <EntryView key={e.seq} entry={e} result={e.kind === 'tool_call' ? results.get(e.callId) : undefined} running={e.callId === runningCall} />)}
+        {entries.map(e => <EntryView key={e.seq} entry={e} result={e.kind === 'tool_call' ? results.get(e.callId) : undefined} running={e.callId === runningCall} imageUrl={p => api.imageUrl(agent.id, p)} />)}
         {streaming && <div className="assistant streaming"><Md text={streaming} /></div>}
         {agent.status === 'running' && !streaming && !runningCall && <Thinking />}
         {agent.status === 'waiting_for_quota' && <Thinking label="Waiting for quota" />}
@@ -399,7 +399,7 @@ function formatWhen(iso: string) {
   return sameDay ? d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
 
-function EntryView({ entry: e, result, running }: { entry: Entry; result?: Entry; running: boolean }) {
+function EntryView({ entry: e, result, running, imageUrl }: { entry: Entry; result?: Entry; running: boolean; imageUrl: (path: string) => string }) {
   switch (e.kind) {
     case 'message':
       return e.from === 'Sera'
@@ -412,7 +412,7 @@ function EntryView({ entry: e, result, running }: { entry: Entry; result?: Entry
     case 'reasoning':
       return e.text ? <details className="reasoning"><summary>Reasoning</summary><div><Md text={e.text} /></div></details> : null;
     case 'tool_call':
-      return <ToolCall call={e} result={result} running={running} />;
+      return <ToolCall call={e} result={result} running={running} imageUrl={imageUrl} />;
     case 'error':
       return <div className="error-entry">{e.text}</div>;
     case 'idle':
@@ -434,7 +434,7 @@ function EntryView({ entry: e, result, running }: { entry: Entry; result?: Entry
   }
 }
 
-function ToolCall({ call, result, running }: { call: Entry; result?: Entry; running: boolean }) {
+function ToolCall({ call, result, running, imageUrl }: { call: Entry; result?: Entry; running: boolean; imageUrl: (path: string) => string }) {
   const args = useMemo(() => { try { return JSON.parse(call.arguments ?? '{}'); } catch { return call.arguments; } }, [call.arguments]);
   const summary = call.name === 'powershell' ? args?.command : args?.path ?? '';
   const state = result ? (result.isError ? 'failed' : 'done') : running ? 'running' : 'pending';
@@ -447,6 +447,7 @@ function ToolCall({ call, result, running }: { call: Entry; result?: Entry; runn
       </summary>
       <pre className="args">{typeof args === 'string' ? args : call.name === 'powershell' ? args.command : JSON.stringify(args, null, 2)}</pre>
       {result && <pre className="output">{result.text}</pre>}
+      {result?.images?.map(img => <a key={img.path} href={imageUrl(img.path)} target="_blank" rel="noreferrer"><img className="tool-image" src={imageUrl(img.path)} alt={img.path} /></a>)}
     </details>
   );
 }
@@ -559,6 +560,35 @@ function MemoryView({ api, project, agents, tick }: { api: Api; project?: Projec
   );
 }
 
+function McpPanel({ api, tick, onSelect }: { api: Api; tick: number; onSelect: (id: string) => void }) {
+  const [servers, setServers] = useState<McpServer[]>([]);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { api.mcp().then(setServers).catch(() => setServers([])); }, [api, tick]);
+  const refresh = async () => {
+    setBusy(true);
+    try { await api.refreshMcp(); setServers(await api.mcp()); } finally { setBusy(false); }
+  };
+  return (
+    <>
+      <div className="row">
+        <h2>MCP servers</h2>
+        <button className="small" onClick={refresh} disabled={busy} title="Re-read config.json's mcp section and every server's tool list">{busy ? 'Reading…' : 'Reload'}</button>
+      </div>
+      {servers.length === 0 && <div className="muted small">None configured. Add them under <code>mcp</code> in ~/.marten/config.json, e.g. <code>{'{"mcp": {"fs": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]}}}'}</code>, then Reload.</div>}
+      {servers.map(s => (
+        <div key={s.name} className="inbox-item">
+          <div><strong>{s.name}</strong> <span className="muted small"><code>{[s.command, ...s.args].join(' ')}</code>{s.disabled ? ' · disabled' : ''}</span></div>
+          {s.error && <div className="error small">{s.error}</div>}
+          <div className="small muted">{s.tools.length} tool{s.tools.length === 1 ? '' : 's'}: {s.tools.join(', ') || 'none read yet'}</div>
+          {s.running.length > 0 && (
+            <div className="small">Running for {s.running.map((r, i) => <span key={r.agentId}>{i > 0 && ', '}<button className="link small" onClick={() => onSelect(r.agentId)}>{r.agentName ?? r.agentId}</button> <span className="muted">(pid {r.pid})</span></span>)}</div>
+          )}
+        </div>
+      ))}
+    </>
+  );
+}
+
 function ProcessesView({ api, tick, onSelect }: { api: Api; tick: number; onSelect: (id: string) => void }) {
   const [procs, setProcs] = useState<BackgroundProcess[]>([]);
   const [open, setOpen] = useState<string | null>(null);
@@ -577,6 +607,7 @@ function ProcessesView({ api, tick, onSelect }: { api: Api; tick: number; onSele
   return (
     <div className="page">
       <div className="doc wide">
+        <McpPanel api={api} tick={tick} onSelect={onSelect} />
         <h2>Background processes</h2>
         <label className="small muted"><input type="checkbox" checked={showStopped} onChange={e => setShowStopped(e.target.checked)} /> Show stopped</label>
         {shown.length === 0 && <div className="muted">Nothing running. Agents start long-lived work like dev servers with process_start.</div>}

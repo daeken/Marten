@@ -60,6 +60,11 @@ export interface BackgroundProcess {
 
 export interface ScriptToolInfo { name: string; scope: 'global' | 'project'; path: string; script: string; description?: string; error?: string; modified: string }
 
+export interface McpServer {
+  name: string; command: string; args: string[]; disabled: boolean; tools: string[]; readAt?: string; error?: string;
+  running: { agentId: string; agentName?: string; pid: number }[];
+}
+
 export interface TaskItem {
   id: number;
   title: string;
@@ -94,6 +99,7 @@ export interface Entry {
   arguments?: string;
   isError?: boolean;
   fullOutput?: string;
+  images?: { path: string; mimeType: string }[];
   model?: string;
 }
 
@@ -181,6 +187,10 @@ export class Api {
     this.call<Project>('POST', '/projects', p);
   memory = (projectId: string) => this.call<ProjectMemory>('GET', `/projects/${projectId}/memory`);
   inbox = () => this.call<SeraMessage[]>('GET', '/inbox');
+  imageUrl = (agentId: string, path: string) =>
+    `/api/agents/${agentId}/images/${encodeURIComponent(path.split(/[\\/]/).pop() ?? '')}?token=${encodeURIComponent(this.token)}`;
+  mcp = () => this.call<McpServer[]>('GET', '/mcp');
+  refreshMcp = () => this.call<void>('POST', '/mcp/refresh');
   answer = (id: string, choice: number | null, text: string | null) => this.call<SeraMessage>('POST', `/questions/${id}/answer`, { choice, text });
   agentMessages = (q: { agentId?: string; projectId?: string } = {}) => {
     const params = new URLSearchParams(Object.entries(q).filter(([, v]) => v) as [string, string][]);

@@ -112,7 +112,10 @@ public sealed partial class Agent : IPowerShellOwner {
 			Info = Info with { Closed = closed };
 			JsonIO.Save(Path.Combine(Directory, "agent.json"), Info);
 		}
-		if(closed) _ = StopAllProcesses();
+		if(closed) {
+			_ = StopAllProcesses();
+			_ = manager.Mcp?.StopFor(Info.Id);
+		}
 		manager.Publish(new { type = "agents" });
 	}
 
@@ -335,6 +338,7 @@ public sealed partial class Agent : IPowerShellOwner {
 	async Task RunTool(Entry call, CancellationToken ct) {
 		manager.Publish(new { type = "tool_start", agentId = Info.Id, callId = call.CallId, name = call.Name });
 		ToolOutput output;
+		TakeViewedImages();
 		try {
 			output = await manager.Tools.InvokeAsync(this, call.Name ?? "", call.Arguments, ct);
 		} catch(OperationCanceledException) when(ct.IsCancellationRequested) {
@@ -344,9 +348,10 @@ public sealed partial class Agent : IPowerShellOwner {
 		}
 		ct.ThrowIfCancellationRequested();
 		var (text, full) = Truncate(call.CallId ?? Guid.NewGuid().ToString("N"), output.Text);
+		List<ImageRef> images = [.. output.Images ?? [], .. TakeViewedImages()];
 		Append(new Entry {
 			Kind = EntryKind.ToolResult, CallId = call.CallId, Name = call.Name, Text = text,
-			IsError = output.IsError ? true : null, FullOutput = full,
+			IsError = output.IsError ? true : null, FullOutput = full, Images = images.Count > 0 ? images : null,
 		});
 	}
 

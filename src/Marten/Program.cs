@@ -17,6 +17,7 @@ AgentManager? managerRef = null;
 Func<AgentManager> getManager = () => managerRef!;
 var childWatcher = new ChildProcessWatcher();
 var scriptTools = new ScriptToolSource(getManager);
+var mcp = new Marten.Mcp.McpHub(getManager);
 var tools = new ToolRegistry()
 	.Add(new ReadFileTool())
 	.Add(new EditFileTool(new MemoryGuard(getManager)))
@@ -38,8 +39,9 @@ var tools = new ToolRegistry()
 	.Add(new ProcessStopTool())
 	.Add(new DefineToolTool(getManager, scriptTools))
 	.Add(new RemoveToolTool(getManager, scriptTools))
-	.AddSource(scriptTools);
-var manager = managerRef = new AgentManager(home, config, backend, tools) { Launcher = new ProcessLauncher(childWatcher) };
+	.AddSource(scriptTools)
+	.AddSource(mcp);
+var manager = managerRef = new AgentManager(home, config, backend, tools) { Launcher = new ProcessLauncher(childWatcher), Mcp = mcp };
 var hub = new EventHub();
 manager.Events += hub.Broadcast;
 var security = new Security(home, config);
@@ -165,6 +167,28 @@ api.MapGet("/tools", (string? projectId) => {
 		return new { name, scope = d.Scope == "global" ? "global" : "project", path = f, script, description, error, modified = File.GetLastWriteTimeUtc(f) };
 	})).OrderBy(t => t.name);
 });
+api.MapGet("/agents/{id}/images/{file}", (string id, string file) => {
+	if(manager.Get(id) is not { } a || file.Contains('/') || file.Contains('\\') || file.StartsWith('.')) return Results.NotFound();
+	var path = Path.Combine(a.Directory, "images", file);
+	return File.Exists(path) && ImageFiles.MimeFor(path) is { } mime ? Results.File(path, mime) : Results.NotFound();
+});
+api.MapGet("/mcp", () => {
+	var running = mcp.Running.ToList();
+	return manager.Config.Mcp.Select(kv => new {
+		name = kv.Key, kv.Value.Command, kv.Value.Args, kv.Value.Disabled,
+		tools = mcp.Schemas.TryGetValue(kv.Key, out var s) ? s.Tools.Select(t => t["name"]?.GetValue<string>()).ToList() : [],
+		readAt = mcp.Schemas.TryGetValue(kv.Key, out var s2) ? s2.ReadAt : (DateTimeOffset?) null,
+		error = mcp.Schemas.TryGetValue(kv.Key, out var s3) ? s3.Error : null,
+		running = running.Where(r => r.Server == kv.Key).Select(r => new { agentId = r.AgentId, agentName = manager.Get(r.AgentId)?.Info.Name, pid = r.Pid }),
+	});
+});
+// config.json is Sera's to edit by hand; this picks up its MCP section and re-reads changed servers.
+api.MapPost("/mcp/refresh", async () => {
+	var fresh = Config.Load(home);
+	manager.UpdateConfig(c => c with { Mcp = fresh.Mcp });
+	await mcp.RefreshAsync(true, CancellationToken.None);
+	return Results.Ok();
+});
 api.MapPost("/projects", (CreateProject req) => {
 	try {
 		var (project, orchestrator) = manager.CreateProject(req.Name ?? "", req.Bindings ?? [], req.Prompt, req.WorktreesByDefault ?? false);
@@ -199,6 +223,8 @@ api.Map("/events", async (HttpContext ctx) => {
 
 manager.LoadAll();
 new Scheduler(manager).Start(app.Lifetime.ApplicationStopping);
+_ = Task.Run(() => mcp.RefreshAsync(false, app.Lifetime.ApplicationStopping));
+app.Lifetime.ApplicationStopping.Register(() => mcp.StopAll().Wait(TimeSpan.FromSeconds(5)));
 Console.WriteLine($"Marten home: {home.Root}");
 Console.WriteLine(webRoot == null
 	? "No built UI found (web/dist). Run `npm run build` in web/, or set MARTEN_WEB_ROOT."

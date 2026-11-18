@@ -19,6 +19,9 @@ public sealed class MartenApi(Agent agent, AgentManager manager) {
 		a.Info.Id, Kind = a.Info.Kind.ToString(), a.Info.Name, Status = a.Status.ToString(), a.Info.ProjectId, a.Info.ParentId, a.Info.Closed,
 	}).ToArray<object>();
 
+	/// <summary>Show an image file to the model with this command's result. View-Image wraps it.</summary>
+	public string ViewImage(string path) => agent.ViewImage(path).Path;
+
 	/// <summary>Call any Marten tool by name. Arguments are plain data; failures throw so PowerShell reports them.</summary>
 	public string CallTool(string name, IDictionary? arguments) {
 		var tool = manager.Tools.Find(agent, name) ?? throw new ArgumentException($"Unknown tool: {name}");

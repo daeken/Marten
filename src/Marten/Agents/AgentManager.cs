@@ -31,6 +31,8 @@ public sealed class AgentManager {
 	public ToolRegistry Tools { get; }
 	/// <summary>Starts agents' background processes; Program shares the PowerShell tool's child watcher with it.</summary>
 	public ProcessLauncher Launcher { get; init; } = new();
+	/// <summary>MCP servers' per-agent instances; set by Program.</summary>
+	public Marten.Mcp.McpHub? Mcp { get; set; }
 	readonly ConcurrentDictionary<string, Agent> agents = new();
 	readonly ConcurrentDictionary<string, Project> projects = new();
 	readonly SemaphoreSlim modelGate = new(1, 1);
