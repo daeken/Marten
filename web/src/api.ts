@@ -32,6 +32,8 @@ export interface Project {
   worktreesByDefault: boolean;
   orchestratorId?: string;
   paused: boolean;
+  spentToday: number;
+  totalBudget?: number;
 }
 
 export interface Schedule {
@@ -112,6 +114,9 @@ export interface Backend {
   /** "saved", or the environment variable the key came from. */
   keySource?: string;
   envVar?: string;
+  /** Dollars spent today at known prices, and the daily cap if one is set. */
+  spentToday: number;
+  budget?: number;
 }
 
 export interface Status_ {

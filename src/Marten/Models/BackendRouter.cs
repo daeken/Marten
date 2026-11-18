@@ -4,7 +4,7 @@ namespace Marten.Models;
 /// Sends each request to the backend that owns its model: an explicit "provider/model" prefix,
 /// or a known name prefix (claude-, glm-, deepseek-). Everything else goes to the primary backend.
 /// </summary>
-public sealed class BackendRouter(IModelBackend primary, IReadOnlyList<(IModelBackend Backend, IReadOnlyList<string> Prefixes)> others) : IModelBackend {
+public sealed class BackendRouter(IModelBackend primary, IReadOnlyList<(IModelBackend Backend, IReadOnlyList<string> Prefixes)> others, UsageLedger? ledger = null) : IModelBackend {
 	public string Provider => "router";
 	public bool Connected => primary.Connected || others.Any(o => o.Backend.Connected);
 	public IEnumerable<IModelBackend> Backends => others.Select(o => o.Backend).Prepend(primary);
@@ -20,9 +20,13 @@ public sealed class BackendRouter(IModelBackend primary, IReadOnlyList<(IModelBa
 		return (primary, model);
 	}
 
-	public Task<ModelResult> CompleteAsync(ModelRequest req, Action<string> onTextDelta, CancellationToken ct) {
+	/// <summary>Checks the backend's daily budget first, and records the call's usage after.</summary>
+	public async Task<ModelResult> CompleteAsync(ModelRequest req, Action<string> onTextDelta, CancellationToken ct) {
 		var (backend, model) = Resolve(req.Model);
-		return backend.CompleteAsync(req with { Model = model }, onTextDelta, ct);
+		ledger?.CheckBudget(backend.Provider, backend.Provider);
+		var result = await backend.CompleteAsync(req with { Model = model }, onTextDelta, ct);
+		ledger?.Record(backend.Provider, model, result.Usage);
+		return result;
 	}
 
 	/// <summary>Models from every connected backend, primary first. Fails only if none of them can list.</summary>
