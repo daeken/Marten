@@ -23,6 +23,12 @@ public sealed class Security {
 		Token = File.ReadAllText(path).Trim();
 		hosts = [$"127.0.0.1:{config.Port}", $"localhost:{config.Port}"];
 		origins = hosts.Select(h => $"http://{h}").ToHashSet();
+		// Names Marten is reached by through an HTTPS proxy, e.g. `tailscale serve` for the phone app.
+		foreach(var h in config.RemoteHosts.Select(h => h.Trim().TrimEnd('/')).Where(h => h.Length > 0)) {
+			var bare = h.Replace("https://", "").Replace("http://", "");
+			hosts.Add(bare);
+			origins.Add($"https://{bare}");
+		}
 		if(config.DevOrigin != null) origins.Add(config.DevOrigin.TrimEnd('/'));
 	}
 

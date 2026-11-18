@@ -43,6 +43,8 @@ public sealed record Config {
 	public bool ReviewTools { get; init; }
 	/// <summary>MCP servers by name (stdio only). Their tools appear to agents as name__tool.</summary>
 	public Dictionary<string, Marten.Mcp.McpServerConfig> Mcp { get; init; } = new();
+	/// <summary>Host names Marten is also reached by through an HTTPS proxy on this machine, e.g. "mac.tailnet.ts.net" for `tailscale serve`. Marten itself still listens only on 127.0.0.1.</summary>
+	public List<string> RemoteHosts { get; init; } = new();
 	/// <summary>Extra Origin allowed to call the API, e.g. the Vite dev server.</summary>
 	public string? DevOrigin { get; init; }
 

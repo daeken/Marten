@@ -215,7 +215,7 @@ Nothing below is built on day 0. The first list may come later; the second is ru
 - Completion contracts (built)
 - A filter on what agents can do, and any review of agent-written tools (built)
 - Reproducible, notebook-style PowerShell execution (built)
-- Mobile and desktop apps
+- Mobile and desktop apps (built as an installable web app: a manifest, a service worker that caches the shell but never the API, and a phone layout with a drawer. A phone reaches Marten through an HTTPS proxy such as `tailscale serve` plus `remoteHosts`.)
 - Limited tool schemas, with tool search for the rest (built)
 - Durable, versioned storage for `~/.marten`, such as encrypted backups or a git history (built)
 

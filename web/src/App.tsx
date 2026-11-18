@@ -27,6 +27,8 @@ export function App() {
   const [status, setStatus] = useState<Status_ | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  /** Phones show the sidebar as a drawer. */
+  const [navOpen, setNavOpen] = useState(false);
   const [transcripts, setTranscripts] = useState<Record<string, Entry[]>>({});
   const [streaming, setStreaming] = useState<Record<string, string>>({});
   const [running, setRunning] = useState<Record<string, string>>({});
@@ -110,7 +112,7 @@ export function App() {
   }, [api, refresh, loadTranscript]);
 
   if (!token || error === 'unauthorized')
-    return <div className="gate"><h1>Marten</h1><p>Open the link Marten printed when it started. It carries the token this page needs.</p></div>;
+    return <TokenGate expired={!!token} />;
   if (!api || !status)
     return <div className="gate"><p>{error ?? 'Connecting…'}</p></div>;
 
@@ -132,12 +134,41 @@ export function App() {
   else
     main = <div className="empty">Start a chat or a project to begin.</div>;
 
+  const select = (id: string) => { setSelected(id); setNavOpen(false); };
+  const title = agent?.name ?? (selected === 'inbox' ? 'Inbox' : selected === 'messages' ? 'Messages' : selected === 'processes' ? 'Processes'
+    : selected?.startsWith('memory:') ? 'Memory' : selected === 'new:project' ? 'New project' : 'Marten');
   return (
-    <div className="shell">
-      <Sidebar api={api} status={status} selected={selected} onSelect={setSelected} onChange={refresh} />
+    <div className={`shell ${navOpen ? 'nav-open' : ''}`}>
+      <div className="mobilebar">
+        <button className="small" onClick={() => setNavOpen(v => !v)} aria-label="Agents and settings">☰</button>
+        <span className="mobile-title">{title}</span>
+        {status.openQuestions > 0 && <button className="badge warn" onClick={() => select('inbox')} title="Questions waiting for you">? {status.openQuestions}</button>}
+      </div>
+      <Sidebar api={api} status={status} selected={selected} onSelect={select} onChange={refresh} />
       <main className="main">
         {main}
       </main>
+    </div>
+  );
+}
+
+/** No token yet (or a stale one): the printed link carries it, or paste it, e.g. on a phone's installed app. */
+function TokenGate({ expired }: { expired: boolean }) {
+  const [value, setValue] = useState('');
+  const save = () => {
+    const t = value.trim().replace(/^.*#token=/, '');
+    if (!t) return;
+    try { localStorage.setItem('marten.token', t); } catch { /* private window */ }
+    location.reload();
+  };
+  return (
+    <div className="gate">
+      <h1>Marten</h1>
+      <p>{expired ? 'That token no longer works. ' : ''}Open the link Marten printed when it started; it carries the token this page needs. Or paste the link or token here:</p>
+      <form className="row" onSubmit={e => { e.preventDefault(); save(); }}>
+        <input type="password" value={value} onChange={e => setValue(e.target.value)} placeholder="http://…/#token=… or the token" autoComplete="off" />
+        <button type="submit" className="primary" disabled={!value.trim()}>Connect</button>
+      </form>
     </div>
   );
 }
