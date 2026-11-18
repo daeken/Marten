@@ -333,25 +333,27 @@ public sealed partial class Agent : IPowerShellOwner {
 	void NoteMemoryChanges() {
 		if(Project is not { } project) return;
 		var current = project.Memory;
+		var topics = project.MemoryTopics();
 		string? seen;
-		lock(gate) seen = state.MemorySeen;
-		if(seen == null) {
-			lock(gate) state = state with { MemorySeen = current };
-			SaveState();
-			return;
+		List<string>? topicsSeen;
+		lock(gate) (seen, topicsSeen) = (state.MemorySeen, state.MemoryTopicsSeen);
+		var topicsChanged = topicsSeen == null || !topicsSeen.SequenceEqual(topics);
+		if(seen == current && !topicsChanged) return;
+		SawMemory(current, topics);
+		if(seen != null && seen != current) {
+			var (added, removed) = LineDiff.Of(seen, current);
+			if(added.Count > 0 || removed.Count > 0) {
+				var lines = removed.Select(l => $"- removed: {l}").Concat(added.Select(l => $"+ added: {l}"));
+				Append(new Entry { Kind = EntryKind.Message, From = NudgeSender, Text = $"Project memory changed since your last turn:\n{string.Join("\n", lines)}" });
+			}
 		}
-		if(seen == current) return;
-		var (added, removed) = LineDiff.Of(seen, current);
-		lock(gate) state = state with { MemorySeen = current };
-		SaveState();
-		if(added.Count == 0 && removed.Count == 0) return;
-		var lines = removed.Select(l => $"- removed: {l}").Concat(added.Select(l => $"+ added: {l}"));
-		Append(new Entry { Kind = EntryKind.Message, From = NudgeSender, Text = $"Project memory changed since your last turn:\n{string.Join("\n", lines)}" });
+		if(topicsChanged)
+			Append(new Entry { Kind = EntryKind.Message, From = NudgeSender, Text = AgentManager.DescribeMemoryTopics(project, topics) });
 	}
 
 	/// <summary>Called after this agent edits memory itself, so its own edit isn't reported back to it.</summary>
-	public void SawMemory(string text) {
-		lock(gate) state = state with { MemorySeen = text };
+	public void SawMemory(string text, List<string>? topics = null) {
+		lock(gate) state = state with { MemorySeen = text, MemoryTopicsSeen = topics ?? state.MemoryTopicsSeen };
 		SaveState();
 	}
 

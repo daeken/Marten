@@ -75,6 +75,26 @@ public class EditFileTests {
 	}
 
 	[Fact]
+	public async Task EmptyAnchorInitializesOnlyAnUnchangedReadEmptyFile() {
+		using var dir = new TempDir();
+		var ctx = new TestContext(dir.Path);
+		var tool = new EditFileTool();
+		var path = dir.File("empty.md");
+		File.WriteAllBytes(path, []);
+		var edit = Args("empty.md", new { op = "replace", anchor = "", text = "first line\n" });
+		Assert.Contains("Read ", (await Assert.ThrowsAsync<ToolException>(() => tool.InvokeAsync(ctx, edit, default))).Message);
+		await new ReadFileTool().InvokeAsync(ctx, new JsonObject { ["path"] = "empty.md" }, default);
+		File.WriteAllText(path, "concurrent edit\n");
+		Assert.Contains("changed since", (await Assert.ThrowsAsync<ToolException>(() => tool.InvokeAsync(ctx, edit, default))).Message);
+		File.WriteAllBytes(path, []);
+		await tool.InvokeAsync(ctx, edit, default);
+		Assert.Equal("first line\n", File.ReadAllText(path));
+		Assert.Contains("no anchor", (await Assert.ThrowsAsync<ToolException>(() => tool.InvokeAsync(ctx, edit, default))).Message);
+		Assert.Throws<ToolException>(() => EditFileTool.Apply("", [new E("replace", "", "x"), new E("replace", "", "y")]));
+		Assert.Throws<ToolException>(() => EditFileTool.Apply("", [new E("insert_before", "", "x")]));
+	}
+
+	[Fact]
 	public async Task ReadsRangesWithLineNumbers() {
 		using var dir = new TempDir();
 		var ctx = new TestContext(dir.Path);

@@ -44,16 +44,16 @@ Marten is project-centric: each project has one orchestrator, which spins up tas
 
 Each project has one shared memory that every agent in it reads, and it survives every compaction. It holds what an agent would otherwise have to ask Sera again.
 
-- **One file.** The memory is `MEMORY.md` in the project's place in `~/.marten`. It is a Markdown list, and each entry is one line.
-- **Always in context.** The memory is injected after the project prompt in every agent's system prompt when the agent is spawned and each time it is compacted. Compaction and elision never touch it.
-- **A size cap.** The cap is set in config, around 16 KB. An edit that would go past it fails loudly, so an agent has to prune before it can add. Without a cap, memory turns into a second transcript.
-- **Edited with the atomic file editor.** Agents use the same anchored edits as on any file, so two agents can't overwrite each other. The edit fails if memory changed since the agent last saw it, and the agent re-reads and tries again. There is no whole-file replace.
-- **Fresh at each turn.** An edit becomes visible to other agents at the start of their next turn, not mid-turn. It arrives as a short note at the end of the context listing the lines added and removed, not as a change to the system prompt, so the cached prefix stays intact. The next compaction folds the current memory back into the system prompt. Agent notes and tool list changes work the same way.
-- **Audited.** Each edit is recorded with the agent's id, its reason and the lines changed, so the UI can show who changed each line.
+- **An index and optional topics.** `MEMORY.md` in the project's directory in `~/.marten` holds standing rules and pointers. Link details as `[Topic](memory/topic.md)` in the index. Topics are direct Markdown files in the sibling `memory/` directory, not nested files or symlinks.
+- **Index in context, topic bodies on demand.** At spawn and compaction, agents get the index and a sorted list of topic paths. The runtime never injects topic bodies; use `read_file` on the relevant file for its latest contents.
+- **A size cap on the index.** The `memoryCapBytes` setting defaults to 16 KiB. An edit cannot grow the index beyond the cap; prune or move details to topics. Topic files do not count toward the index cap.
+- **Edited with the atomic file editor.** Use `edit_file` on either the index or a topic. If the file changed since the agent read it, re-read and retry. Use `create` for a missing file. To initialize a zero-byte file such as a new `MEMORY.md`, read it first, then pass a single `replace` with an empty string anchor.
+- **Fresh without invalidating the cached prefix.** At the start of a turn agents see the index's changed lines and, if the inventory changed, the current topic paths. Existing agents get the topic list at their first turn after upgrade, without rewriting saved prompts. Topic edits do not inject diffs into agent context: re-read the topic when needed.
+- **Audited.** Edits to both the index and topics use one audit log with the agent's id, reason, relative path and changed lines. Old records without a path refer to `MEMORY.md`.
 
 ### Entry shape
 
-An entry leads with a short CAPS tag, then says what it is about, and cites its source when Sera said it:
+A memory entry in the index or a topic occupies one line, leads with a short CAPS tag, then says what it is about, and cites its source when Sera said it:
 
 ```
 - WINE PAUSED (Sera, 2026-11-18 02:54Z, msg_…): stop running DA:O in Wine until she says go.

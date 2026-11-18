@@ -146,11 +146,11 @@ public sealed partial class Agent {
 		var summary = string.Join("\n\n", result.Items.Where(i => i.Kind == EntryKind.Assistant && !string.IsNullOrWhiteSpace(i.Text)).Select(i => i.Text));
 		if(summary.Length == 0) throw new InvalidOperationException("Compaction produced no summary.");
 		var upTo = cut < view.Count ? view[cut].Seq - 1 : Transcript.Last!.Seq;
-		var instructions = manager.RebuildInstructions(this);
+		var instructions = manager.RebuildInstructions(this, out var memory);
 		Append(new Entry { Kind = EntryKind.Compaction, Text = summary, UpTo = upTo, Instructions = instructions, Reason = whole ? "whole" : "rollover" });
 		Instructions = instructions;
 		AtomicFile.Write(Path.Combine(Directory, "system.md"), instructions);
-		if(Project is { } project) SawMemory(project.Memory);
+		if(memory is { } snapshot) SawMemory(snapshot.Index, snapshot.Topics);
 		SnapshotDynamicTools();
 		lock(gate) state = state with { LastInputTokens = 0 };
 		SaveState();
