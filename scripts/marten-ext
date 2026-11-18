@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""marten-ext: drive Marten from outside (Claude Code sessions, scripts).
+
+Auth: an outside-client token. Set MARTEN_CLIENT=<name> (the token is read from
+~/.marten/secrets/clients/<name>.token) or MARTEN_TOKEN=<token>. MARTEN_URL defaults
+to http://127.0.0.1:7450. See docs/outside-agents.md.
+"""
+import argparse, json, os, sys, urllib.error, urllib.parse, urllib.request
+from pathlib import Path
+
+HOME = Path(os.environ.get("MARTEN_HOME", Path.home() / ".marten"))
+URL = os.environ.get("MARTEN_URL", "http://127.0.0.1:7450").rstrip("/")
+
+
+def token():
+    if os.environ.get("MARTEN_TOKEN"):
+        return os.environ["MARTEN_TOKEN"].strip()
+    name = os.environ.get("MARTEN_CLIENT")
+    if not name:
+        clients = sorted((HOME / "secrets" / "clients").glob("*.token"))
+        if len(clients) == 1:
+            name = clients[0].stem
+        else:
+            sys.exit("Set MARTEN_CLIENT to your client name (see ~/.marten/secrets/clients/), or MARTEN_TOKEN.")
+    path = HOME / "secrets" / "clients" / f"{name}.token"
+    if not path.exists():
+        sys.exit(f"No token at {path}. Ask Sera to run: dotnet run --project src/Marten -- client add {name}")
+    return path.read_text().strip()
+
+
+def call(method, path, body=None, query=None, timeout=150):
+    url = f"{URL}/api{path}" + (f"?{urllib.parse.urlencode(query)}" if query else "")
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method, headers={
+        "Authorization": f"Bearer {token()}", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            text = r.read().decode()
+            return json.loads(text) if text else None
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode()
+        try:
+            detail = json.loads(detail).get("detail") or detail
+        except Exception:
+            pass
+        sys.exit(f"{method} {path}: HTTP {e.code} {detail}")
+    except urllib.error.URLError as e:
+        sys.exit(f"Can't reach Marten at {URL}: {e.reason}. Is it running?")
+
+
+def show(x):
+    print(json.dumps(x, indent=2))
+
+
+def text_arg(value):
+    return sys.stdin.read() if value == "-" else value
+
+
+def print_messages(msgs):
+    if not msgs:
+        print("(no new messages)")
+    for m in msgs:
+        h = m["headers"]
+        print(f"--- from {h.get('from')} ({h.get('from_id')}) at {h.get('at')}; reply with: marten-ext send {h.get('reply_to')} ...")
+        print(m["text"])
+        print()
+
+
+def main():
+    p = argparse.ArgumentParser(prog="marten-ext", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("whoami", help="Which client this token belongs to")
+    sub.add_parser("status", help="Projects and agents, with what each is doing")
+    cp = sub.add_parser("create-project", help="Create a project bound to repo paths; its orchestrator gets the brief from you")
+    cp.add_argument("name")
+    cp.add_argument("--bind", action="append", required=True, help="Absolute repo path (repeatable)")
+    cp.add_argument("--prompt", help="Standing project prompt")
+    cp.add_argument("--brief", help="First message to the orchestrator ('-' reads stdin)")
+    cp.add_argument("--worktrees", action="store_true", help="Task agents get their own git worktrees by default")
+    s = sub.add_parser("send", help="Message an agent, or a project's orchestrator by project name/id")
+    s.add_argument("to")
+    s.add_argument("text", help="Message text, or '-' to read stdin")
+    s.add_argument("--immediate", action="store_true", help="Land at the agent's next tool boundary instead of when it's idle")
+    i = sub.add_parser("inbox", help="Read (and by default acknowledge) replies from Marten agents")
+    i.add_argument("--wait", type=int, default=0, help="Seconds to wait for a message if none are there (max 120)")
+    i.add_argument("--keep", action="store_true", help="Leave messages unread")
+    i.add_argument("--json", action="store_true")
+    t = sub.add_parser("transcript", help="Recent transcript entries of an agent")
+    t.add_argument("agent")
+    t.add_argument("--since", type=int, default=0, help="Only entries after this seq")
+    t.add_argument("--limit", type=int, default=30)
+    k = sub.add_parser("tasks", help="An agent's task list")
+    k.add_argument("agent")
+    a = p.parse_args()
+
+    if a.cmd == "whoami":
+        show(call("GET", "/ext/whoami"))
+    elif a.cmd == "status":
+        st = call("GET", "/ext/status")
+        for proj in st["projects"]:
+            print(f"project {proj['name']} ({proj['id']}) orchestrator={proj.get('orchestratorId')} bindings={', '.join(proj['bindings'])}{' PAUSED' if proj.get('paused') else ''}")
+        for ag in st["agents"]:
+            detail = f" · {ag['statusDetail']}" if ag.get("statusDetail") else ""
+            print(f"  {ag['kind']:<12} {ag['name']:<20} {ag['id']:<40} {ag['status']}{detail} pending={ag['pending']} open_tasks={ag['openTasks']}{' PAUSED' if ag.get('paused') else ''}")
+        if st.get("paused"):
+            print("Everything is paused.")
+    elif a.cmd == "create-project":
+        show(call("POST", "/ext/projects", {"name": a.name, "bindings": a.bind, "prompt": a.prompt,
+                                            "brief": text_arg(a.brief) if a.brief else None, "worktreesByDefault": a.worktrees}))
+    elif a.cmd == "send":
+        show(call("POST", "/ext/messages", {"to": a.to, "text": text_arg(a.text), "mode": "immediate" if a.immediate else "queued"}))
+    elif a.cmd == "inbox":
+        msgs = call("GET", "/ext/inbox", query={"wait": a.wait, "ack": "false" if a.keep else "true"}, timeout=a.wait + 30)
+        show(msgs) if a.json else print_messages(msgs)
+    elif a.cmd == "transcript":
+        for e in call("GET", f"/ext/agents/{urllib.parse.quote(a.agent)}/transcript", query={"since": a.since, "limit": a.limit}):
+            what = e.get("text") or (f"{e.get('name')}({e.get('arguments') or ''})" if e.get("name") else "")
+            print(f"[{e['seq']}] {e['kind']}{' from ' + e['from'] if e.get('from') else ''}{' ERROR' if e.get('isError') else ''}: {what}")
+    elif a.cmd == "tasks":
+        for task in call("GET", f"/ext/agents/{urllib.parse.quote(a.agent)}/tasks"):
+            check = f" [check: {task['check']}]" if task.get("check") else ""
+            print(f"#{task['id']} {task['state']:<8} {task['title']}{check}{' · ' + task['reason'] if task.get('reason') else ''}")
+
+
+if __name__ == "__main__":
+    main()

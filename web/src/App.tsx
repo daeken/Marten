@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { AgentMessage, AgentSummary, Api, Backend, BackgroundProcess, BackupStatus, Entry, McpServer, Project, ProjectMemory, Schedule, ScriptToolInfo, SeraMessage, ServerEvent, Status_, TaskItem, takeToken } from './api';
+import { AgentMessage, AgentSummary, Api, Backend, BackgroundProcess, BackupStatus, Entry, OutsideClient, McpServer, Project, ProjectMemory, Schedule, ScriptToolInfo, SeraMessage, ServerEvent, Status_, TaskItem, takeToken } from './api';
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh'];
 
@@ -643,6 +643,38 @@ function McpPanel({ api, tick, onSelect }: { api: Api; tick: number; onSelect: (
   );
 }
 
+/** Agents outside Marten (Claude Code sessions and the like) with their own token and mailbox. */
+function ClientsPanel({ api, tick }: { api: Api; tick: number }) {
+  const [clients, setClients] = useState<OutsideClient[]>([]);
+  const [name, setName] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(() => api.clients().then(setClients).catch(() => setClients([])), [api]);
+  useEffect(() => { load(); }, [load, tick]);
+  const add = async () => {
+    setError(null);
+    try { await api.addClient(name.trim()); setName(''); load(); } catch (e) { setError(String((e as Error).message ?? e)); }
+  };
+  return (
+    <>
+      <h2>Outside agents</h2>
+      <div className="muted small">Agents outside Marten talk to yours through <code>scripts/marten-ext</code> or their mailbox folder. See <code>docs/outside-agents.md</code>.</div>
+      {clients.map(c => (
+        <div key={c.name} className="inbox-item small">
+          <div className="row"><strong>{c.name}</strong>{c.unread > 0 && <span className="muted">{c.unread} unread by it</span>}
+            <button className="link small" onClick={() => api.removeClient(c.name).then(load)}>Remove</button></div>
+          <div className="muted">token <code>{c.tokenPath}</code></div>
+          <div className="muted">mailbox <code>{c.mailbox}</code></div>
+        </div>
+      ))}
+      <form className="row" onSubmit={e => { e.preventDefault(); if (name.trim()) add(); }}>
+        <input placeholder="New client name, e.g. openthedas" value={name} onChange={e => setName(e.target.value)} />
+        <button type="submit" className="small" disabled={!name.trim()}>Add</button>
+      </form>
+      {error && <div className="error small">{error}</div>}
+    </>
+  );
+}
+
 /** Snapshots of ~/.marten. The passphrase never comes back from the server. */
 function BackupsPanel({ api, tick }: { api: Api; tick: number }) {
   const [info, setInfo] = useState<BackupStatus | null>(null);
@@ -704,6 +736,7 @@ function ProcessesView({ api, tick, onSelect }: { api: Api; tick: number; onSele
       <div className="doc wide">
         <McpPanel api={api} tick={tick} onSelect={onSelect} />
         <BackupsPanel api={api} tick={tick} />
+        <ClientsPanel api={api} tick={tick} />
         <h2>Background processes</h2>
         <label className="small muted"><input type="checkbox" checked={showStopped} onChange={e => setShowStopped(e.target.checked)} /> Show stopped</label>
         {shown.length === 0 && <div className="muted">Nothing running. Agents start long-lived work like dev servers with process_start.</div>}

@@ -62,6 +62,8 @@ export interface BackgroundProcess {
 
 export interface ScriptToolInfo { name: string; scope: 'global' | 'project'; path: string; script: string; description?: string; error?: string; modified: string; pendingReview?: boolean }
 
+export interface OutsideClient { name: string; created: string; tokenPath: string; mailbox: string; unread: number }
+
 export interface BackupStatus {
   directory: string;
   encrypting: boolean;
@@ -218,6 +220,9 @@ export class Api {
     `/api/agents/${agentId}/images/${encodeURIComponent(path.split(/[\\/]/).pop() ?? '')}?token=${encodeURIComponent(this.token)}`;
   mcp = () => this.call<McpServer[]>('GET', '/mcp');
   approveTool = (path: string) => this.call<void>('POST', '/tools/approve', { path });
+  clients = () => this.call<OutsideClient[]>('GET', '/clients');
+  addClient = (name: string) => this.call<OutsideClient>('POST', '/clients', { name });
+  removeClient = (name: string) => this.call<void>('DELETE', `/clients/${encodeURIComponent(name)}`);
   backups = () => this.call<BackupStatus>('GET', '/backups');
   backupNow = () => this.call<BackupStatus>('POST', '/backups');
   setBackupPassphrase = (key: string | null) => this.call<BackupStatus>('PUT', '/backups/passphrase', { key });

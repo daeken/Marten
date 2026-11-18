@@ -25,6 +25,8 @@ State lives in `~/.marten` (override with `MARTEN_HOME`):
 | `inbox.jsonl` | Messages agents sent to Sera |
 | `prompts/*.md.default` | The shipped default each prompt came from; prompts you haven't edited are upgraded with Marten |
 
+Agents outside Marten (e.g. Claude Code sessions) can create projects and message agents with a client token: see [docs/outside-agents.md](docs/outside-agents.md) and `scripts/marten-ext`.
+
 For UI work, run `npm run dev` in `web/` and set `"devOrigin": "http://localhost:5173"` in `config.json`.
 
 ## Tests

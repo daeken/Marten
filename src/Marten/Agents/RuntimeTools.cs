@@ -59,7 +59,7 @@ static class AgentTools {
 public sealed class SendMessageTool(Func<AgentManager> manager) : ITool {
 	public string Name => "send_message";
 	public string Description =>
-		"Send a message to another agent, or to Sera with to \"sera\" (orchestrators only). Immediate lands at the recipient's " +
+		"Send a message to another agent, to Sera with to \"sera\" (orchestrators only), or to an agent outside Marten with to \"client:NAME\" (answer outside agents this way). Immediate lands at the recipient's " +
 		"next tool boundary, as steering; queued waits until it is idle, and wakes it if it already is. " +
 		"Chat agents may message orchestrators; orchestrators their own task agents (either mode), other orchestrators and " +
 		"chat agents (queued); task agents anyone in their own project (queued).";
@@ -81,6 +81,11 @@ public sealed class SendMessageTool(Func<AgentManager> manager) : ITool {
 					: "Task agents can't message Sera; pass questions to your orchestrator.");
 			m.MessageSera(from, text);
 			return Task.FromResult(new ToolOutput("Sent to Sera's inbox."));
+		}
+		if(to.StartsWith(Outside.Prefix, StringComparison.OrdinalIgnoreCase) || to.EndsWith(" (outside)", StringComparison.OrdinalIgnoreCase)) {
+			var client = (to.StartsWith(Outside.Prefix, StringComparison.OrdinalIgnoreCase) ? to[Outside.Prefix.Length..] : to[..^" (outside)".Length]).Trim().ToLowerInvariant();
+			var mail = m.Outside.Write(from, client, text);
+			return Task.FromResult(new ToolOutput($"Left in {client}'s mailbox ({Path.GetFileName(mail.File)}). It reads it when it next checks."));
 		}
 		var target = AgentTools.Resolve(m, from, to);
 		if(MessagingRules.Check(from, target, mode) is { } why) throw new ToolException(why);
