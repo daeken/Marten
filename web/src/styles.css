@@ -53,6 +53,9 @@ code, pre { font: 12.5px/1.45 ui-monospace, "SF Mono", Menlo, monospace; }
 .brand { font-weight: 650; letter-spacing: .02em; padding: 16px 16px 8px; }
 .auth { display: flex; flex-direction: column; gap: 6px; padding: 8px 16px 14px; border-bottom: 1px solid var(--border); }
 .auth .link { align-self: flex-start; font-size: 12px; }
+.backend .row { display: flex; align-items: center; gap: 8px; }
+.backend .row > span { flex: 1; }
+.backend form input { flex: 1; min-width: 0; font-size: 12px; padding: 4px 6px; }
 .agents { overflow-y: auto; padding: 10px 8px; display: flex; flex-direction: column; gap: 2px; }
 .agents .row { display: flex; justify-content: space-between; padding: 0 8px 6px; }
 .agent { display: flex; align-items: center; gap: 8px; text-align: left; border: none; background: none; padding: 6px 8px; border-radius: 6px; }

@@ -1,5 +1,6 @@
 using Marten.Agents;
 using Marten.Models;
+using Marten.Models.Anthropic;
 using Marten.Models.OpenAI;
 using Marten.Projects;
 using Marten.Storage;
@@ -12,7 +13,8 @@ var config = Config.Load(home);
 var http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
 http.DefaultRequestHeaders.UserAgent.ParseAdd("Marten/0.1");
 var auth = new ChatGptAuth(home, http);
-var backend = new ResponsesBackend(auth, http);
+var messagesBackends = MessagesProvider.All.Select(p => new MessagesBackend(p, home)).ToList();
+var backend = new BackendRouter(new ResponsesBackend(auth, http), messagesBackends.Select(b => ((IModelBackend) b, b.Settings.Prefixes)).ToList());
 AgentManager? managerRef = null;
 Func<AgentManager> getManager = () => managerRef!;
 var childWatcher = new ChildProcessWatcher();
@@ -72,11 +74,14 @@ object AgentSummary(Agent a) => new {
 	OpenTasks = a.Tasks.Count(t => t.State != TaskState.Done),
 };
 
+object BackendSummary(MessagesBackend b) => new { b.Provider, b.Settings.Label, b.Connected, b.KeySource, b.Settings.EnvVar };
+
 object ProjectSummary(Project p) => new { p.Info.Id, p.Info.Name, p.Info.Created, p.Info.Bindings, p.Info.WorktreesByDefault, p.Info.OrchestratorId, p.Info.Paused };
 
 var api = app.MapGroup("/api");
 api.MapGet("/status", () => new {
 	auth = new { connected = auth.Connected, email = auth.Email, signingIn = auth.SigningIn, lastError = auth.LastError },
+	backends = messagesBackends.Select(BackendSummary),
 	config = new { manager.Config.Model, manager.Config.Effort, DefaultModel = manager.KnownDefaultModel },
 	agents = manager.Agents.Select(AgentSummary),
 	projects = manager.Projects.Select(ProjectSummary),
@@ -100,6 +105,12 @@ api.MapPost("/projects/{id}/pause", (string id, PauseRequest req) => {
 });
 api.MapPost("/auth/login", () => new { url = auth.BeginLogin() });
 api.MapPost("/auth/logout", () => { auth.Logout(); return Results.Ok(); });
+api.MapPut("/backends/{name}/key", (string name, BackendKey req) => {
+	if(messagesBackends.FirstOrDefault(b => b.Provider == name) is not { } b) return Results.NotFound();
+	b.SetKey(req.Key);
+	manager.Publish(new { type = "config" });
+	return Results.Ok(BackendSummary(b));
+});
 api.MapGet("/models", async (CancellationToken ct) => {
 	try {
 		return Results.Ok(await backend.ListModelsAsync(ct));
@@ -248,3 +259,4 @@ record CreateAgent(string? Name, string? WorkingDirectory);
 record SendMessage(string Text, SendMode? Mode);
 record PauseRequest(bool Paused);
 record AnswerRequest(int? Choice, string? Text);
+record BackendKey(string? Key);
