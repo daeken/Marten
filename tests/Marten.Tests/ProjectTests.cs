@@ -215,7 +215,8 @@ public class ProjectTests {
 		await Wait.Until(() => Idle(loaded));
 		loaded.Send(new Inbound("Sera", "once more", SendMode.Queued));
 		await Wait.Until(() => Idle(loaded));
-		var note = Assert.Single(loaded.Transcript.Entries, e => e.From == Agent.NudgeSender);
+		var note = Assert.Single(loaded.Transcript.Entries,
+			e => e.From == Agent.NudgeSender && e.Text?.StartsWith("Memory topics (", StringComparison.Ordinal) == true);
 		Assert.Contains("memory/existing.md", note.Text);
 		Assert.DoesNotContain("Existing topic payload", note.Text);
 		Assert.All(backend.Requests, r => Assert.Equal(legacyPrompt, r.Instructions));
