@@ -33,6 +33,7 @@ public sealed class AgentManager {
 	public ProcessLauncher Launcher { get; init; } = new();
 	/// <summary>MCP servers' per-agent instances; set by Program.</summary>
 	public Marten.Mcp.McpHub? Mcp { get; set; }
+	public LoopBreaker Loops { get; }
 	readonly ConcurrentDictionary<string, Agent> agents = new();
 	readonly ConcurrentDictionary<string, Project> projects = new();
 	readonly SemaphoreSlim modelGate = new(1, 1);
@@ -46,6 +47,7 @@ public sealed class AgentManager {
 		Home = home;
 		Config = config;
 		Backend = backend;
+		Loops = new LoopBreaker(() => Config);
 		Tools = tools;
 		PausedAll = File.Exists(home.PausedPath);
 		WriteDefaultPrompts();
