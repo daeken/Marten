@@ -84,6 +84,15 @@ public sealed class SendMessageTool(Func<AgentManager> manager) : ITool {
 		}
 		var target = AgentTools.Resolve(m, from, to);
 		if(MessagingRules.Check(from, target, mode) is { } why) throw new ToolException(why);
+		if(m.Loops.Record(from.Info.Id, target.Info.Id, DateTimeOffset.UtcNow) is { } count) {
+			from.SetPaused(true);
+			target.SetPaused(true);
+			var minutes = m.Config.LoopWindowMinutes;
+			m.MessageSera(from, $"Loop breaker: {from.Info.Name} and {target.Info.Name} exchanged {count} messages within {minutes:0.#} minutes without you, " +
+				"so both are paused. Their messages are under Messages; resume either agent when you've looked.");
+			throw new ToolException($"Not sent. You and {target.Info.Name} have exchanged {count} messages within {minutes:0.#} minutes, which looks like a loop, " +
+				"so you're both paused and Sera has been told. Wait for her.");
+		}
 		var wasClosed = target.Info.Closed;
 		target.Send(Inbound.FromAgent(from, text, mode));
 		return Task.FromResult(new ToolOutput($"{(mode == SendMode.Immediate ? "Delivered" : "Queued")} to {AgentManager.Label(target)}{(wasClosed ? ", which was closed and is now awake" : "")}."));

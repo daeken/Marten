@@ -135,7 +135,7 @@ Agents message within a project and across orchestrators, but task agents never 
 
 - **Immediate** injects the message right away, as if steering. It lands at the recipient's next tool boundary.
 - **Queued** holds the message until the recipient goes idle, and wakes a recipient that already is.
-- **No loop breaker on day 0.** Every message is visible in the UI and Sera watches for loops by hand.
+- **Loop breaker.** When two agents exchange `loopMessages` (20) messages within `loopWindowMinutes` (10) without Sera, with at least a quarter going each way, the send that tips it is refused, both agents are paused, and Sera gets an inbox message. A message from Sera to either agent clears the count; `loopMessages: 0` turns it off.
 
 ## Tasks and wake-ups
 
@@ -206,13 +206,13 @@ Nothing below is built on day 0. The first list may come later; the second is ru
 
 **Deferred**
 
-- A loop breaker for messaging
-- Budgets
+- A loop breaker for messaging (built)
+- Budgets (built)
 - Completion contracts
 - A filter on what agents can do, and any review of agent-written tools
 - Reproducible, notebook-style PowerShell execution
 - Mobile and desktop apps
-- Limited tool schemas, with tool search for the rest
+- Limited tool schemas, with tool search for the rest (built)
 - Durable, versioned storage for `~/.marten`, such as encrypted backups or a git history
 
 **Non-goals**

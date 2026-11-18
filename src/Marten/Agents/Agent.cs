@@ -175,6 +175,7 @@ public sealed partial class Agent : IPowerShellOwner {
 
 	public void Send(Inbound message) {
 		if(Info.Closed) SetClosed(false);
+		if(message.From == "Sera") manager.Loops.Reset(Info.Id);
 		if(message.FromId is { } fromId && manager.Get(fromId) is { } sender)
 			manager.LogAgentMessage(new AgentMessage(DateTimeOffset.UtcNow, fromId, sender.Info.Name, Info.Id, Info.Name,
 				Info.ProjectId ?? sender.Info.ProjectId, message.Mode, message.Text, message.Reason));
