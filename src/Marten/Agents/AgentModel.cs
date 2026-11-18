@@ -4,7 +4,7 @@ namespace Marten.Agents;
 
 public enum AgentKind { Chat, Orchestrator, Task }
 
-public enum AgentStatus { Idle, Running, WaitingForQuota, Error }
+public enum AgentStatus { Idle, Running, WaitingForQuota, Paused, Error }
 
 /// <summary>Who an agent is. Written once at spawn; agent.json.</summary>
 public sealed record AgentInfo {
@@ -24,6 +24,8 @@ public sealed record AgentInfo {
 	public bool Closed { get; init; }
 	/// <summary>The git worktree this agent works in, if it was spawned with one.</summary>
 	public string? Worktree { get; init; }
+	/// <summary>Sera paused this agent: it holds before its next model call and isn't nudged.</summary>
+	public bool Paused { get; init; }
 }
 
 /// <summary>What an agent carries between turns besides its log; state.json.</summary>

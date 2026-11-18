@@ -28,6 +28,8 @@ public sealed class Home {
 	public string Projects => Path.Combine(Root, "projects");
 	public string SeraInboxPath => Path.Combine(Root, "inbox.jsonl");
 	public string Prompts => Path.Combine(Root, "prompts");
+	/// <summary>Present while everything is paused.</summary>
+	public string PausedPath => Path.Combine(Root, "paused");
 	public string AgentDir(string id) => Path.Combine(Agents, id);
 }
 

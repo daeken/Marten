@@ -32,7 +32,43 @@ public sealed class AgentManager {
 		Config = config;
 		Backend = backend;
 		Tools = tools;
+		PausedAll = File.Exists(home.PausedPath);
 		WriteDefaultPrompts();
+	}
+
+	// ---- Pause ----
+
+	readonly object pauseGate = new();
+	TaskCompletionSource pauseTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+	public bool PausedAll { get; private set; }
+
+	/// <summary>Completes at the next pause or resume anywhere; agents holding on a pause wait on it.</summary>
+	public Task PauseSignal { get { lock(pauseGate) return pauseTcs.Task; } }
+
+	public void SetPausedAll(bool paused) {
+		if(PausedAll == paused) return;
+		PausedAll = paused;
+		if(paused) File.WriteAllText(Home.PausedPath, DateTimeOffset.UtcNow.ToString("O"));
+		else File.Delete(Home.PausedPath);
+		PauseChanged();
+	}
+
+	public void SetProjectPaused(Project project, bool paused) {
+		if(project.Info.Paused == paused) return;
+		project.Update(i => i with { Paused = paused });
+		PauseChanged();
+	}
+
+	public void PauseChanged() {
+		TaskCompletionSource old;
+		lock(pauseGate) {
+			old = pauseTcs;
+			pauseTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+		}
+		old.SetResult();
+		foreach(var a in agents.Values) a.PauseChangedHere();
+		Publish(new { type = "agents" });
 	}
 
 	public IEnumerable<Agent> Agents => agents.Values.OrderBy(a => a.Info.Created);

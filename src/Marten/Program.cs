@@ -54,11 +54,11 @@ if(webRoot != null) {
 object AgentSummary(Agent a) => new {
 	a.Info.Id, a.Info.Kind, a.Info.Name, a.Info.Created, a.Info.WorkingDirectory, a.Info.Model, a.Info.Effort,
 	a.Status, a.StatusDetail, Pending = a.PendingCount, a.AbandonedRunspaces,
-	a.Info.ProjectId, a.Info.ParentId, a.Info.Closed, a.Info.Worktree, a.NudgesStopped,
+	a.Info.ProjectId, a.Info.ParentId, a.Info.Closed, a.Info.Worktree, a.NudgesStopped, a.Info.Paused, PausedEffective = a.IsPaused,
 	OpenTasks = a.Tasks.Count(t => t.State != TaskState.Done),
 };
 
-object ProjectSummary(Project p) => new { p.Info.Id, p.Info.Name, p.Info.Created, p.Info.Bindings, p.Info.WorktreesByDefault, p.Info.OrchestratorId };
+object ProjectSummary(Project p) => new { p.Info.Id, p.Info.Name, p.Info.Created, p.Info.Bindings, p.Info.WorktreesByDefault, p.Info.OrchestratorId, p.Info.Paused };
 
 var api = app.MapGroup("/api");
 api.MapGet("/status", () => new {
@@ -67,6 +67,21 @@ api.MapGet("/status", () => new {
 	agents = manager.Agents.Select(AgentSummary),
 	projects = manager.Projects.Select(ProjectSummary),
 	inbox = manager.SeraInbox().Count,
+	paused = manager.PausedAll,
+});
+api.MapPost("/pause", (PauseRequest req) => {
+	manager.SetPausedAll(req.Paused);
+	return Results.Ok();
+});
+api.MapPost("/agents/{id}/pause", (string id, PauseRequest req) => {
+	if(manager.Get(id) is not { } a) return Results.NotFound();
+	a.SetPaused(req.Paused);
+	return Results.Ok(AgentSummary(a));
+});
+api.MapPost("/projects/{id}/pause", (string id, PauseRequest req) => {
+	if(manager.GetProject(id) is not { } p) return Results.NotFound();
+	manager.SetProjectPaused(p, req.Paused);
+	return Results.Ok(ProjectSummary(p));
 });
 api.MapPost("/auth/login", () => new { url = auth.BeginLogin() });
 api.MapPost("/auth/logout", () => { auth.Logout(); return Results.Ok(); });
@@ -146,3 +161,4 @@ record CreateProject(string? Name, List<string>? Bindings, string? Prompt, bool?
 record ConfigUpdate(string? Model, string? Effort);
 record CreateAgent(string? Name, string? WorkingDirectory);
 record SendMessage(string Text, SendMode? Mode);
+record PauseRequest(bool Paused);

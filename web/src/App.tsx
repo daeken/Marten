@@ -18,7 +18,7 @@ function mergeEntries(a: Entry[], b: Entry[]): Entry[] {
 }
 
 const statusLabel: Record<AgentSummary['status'], string> = {
-  idle: 'Idle', running: 'Working', waiting_for_quota: 'Waiting for quota', error: 'Error',
+  idle: 'Idle', running: 'Working', waiting_for_quota: 'Waiting for quota', paused: 'Paused', error: 'Error',
 };
 
 export function App() {
@@ -158,7 +158,12 @@ function Sidebar({ api, status, selected, onSelect, onChange }: {
 
   return (
     <aside className="sidebar">
-      <header className="brand">Marten</header>
+      <header className="brand">
+        <span>Marten</span>
+        <button className={`link small ${status.paused ? 'on' : ''}`} title="Pause or resume every agent, nudge and schedule"
+          onClick={() => api.pauseAll(!status.paused).then(onChange)}>{status.paused ? '▶ Resume all' : '⏸ Pause all'}</button>
+      </header>
+      {status.paused && <div className="banner small">Everything is paused. Agents finish their current step and hold; nudges and schedules stop.</div>}
       <section className="auth">
         {status.auth.connected ? (
           <>
@@ -190,7 +195,9 @@ function Sidebar({ api, status, selected, onSelect, onChange }: {
           return (
             <div key={p.id} className="project">
               <div className="project-head">
-                <span className="project-name" title={p.bindings.join('\n')}>{p.name}</span>
+                <span className="project-name" title={p.bindings.join('\n')}>{p.name}{p.paused && <span className="tag">paused</span>}</span>
+                <button className="link small" title={p.paused ? 'Resume this project' : 'Pause every agent in this project'}
+                  onClick={() => api.pauseProject(p.id, !p.paused).then(onChange)}>{p.paused ? 'Resume' : 'Pause'}</button>
                 <button className={`link small ${selected === `memory:${p.id}` ? 'on' : ''}`} onClick={() => onSelect(`memory:${p.id}`)}>Memory</button>
               </div>
               {[...orch, ...tasks].map(a => <AgentRow key={a.id} agent={a} selected={selected} onSelect={onSelect} nested={a.kind === 'task'} />)}
@@ -210,7 +217,8 @@ function Sidebar({ api, status, selected, onSelect, onChange }: {
 function AgentRow({ agent: a, selected, onSelect, nested }: { agent: AgentSummary; selected: string | null; onSelect: (id: string) => void; nested?: boolean }) {
   return (
     <button className={`agent ${a.id === selected ? 'active' : ''} ${nested ? 'nested' : ''} ${a.closed ? 'closed' : ''}`} onClick={() => onSelect(a.id)}>
-      <span className={`dot ${a.status}`} title={a.closed ? 'Closed' : statusLabel[a.status]} />
+      <span className={`dot ${a.pausedEffective && a.status !== 'running' ? 'paused' : a.status}`}
+        title={a.closed ? 'Closed' : a.pausedEffective ? `Paused · ${statusLabel[a.status]}` : statusLabel[a.status]} />
       <span className="name">{a.name}</span>
       {a.openTasks > 0 && <span className="badge" title="Open tasks">{a.openTasks}</span>}
       {a.pending > 0 && <span className="badge" title="Queued messages">✉ {a.pending}</span>}
@@ -255,6 +263,7 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
             {project && <span className="crumb">{project.name} / </span>}
             {agent.name}
             {agent.closed && <span className="tag">closed</span>}
+            {agent.pausedEffective && <span className="tag">paused</span>}
           </div>
           <div className="muted small">
             {agent.worktree ?? agent.workingDirectory}
@@ -272,6 +281,10 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
               {EFFORTS.map(x => <option key={x} value={x}>{x}</option>)}
             </select>
           </div>
+          <div className="head-actions">
+            <button className="small" onClick={() => api.pauseAgent(agent.id, !agent.paused).then(onChange)}
+              title={agent.paused ? 'Resume this agent' : 'Hold this agent before its next model call'}>{agent.paused ? '▶ Resume' : '⏸ Pause'}</button>
+          </div>
           <div className={`state ${agent.status}`}>{statusLabel[agent.status]}{agent.statusDetail ? ` · ${agent.statusDetail}` : ''}</div>
         </div>
       </header>
@@ -283,6 +296,9 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
             </span>
           ))}
         </div>
+      )}
+      {agent.pausedEffective && !agent.paused && (
+        <div className="banner">Paused {project?.paused ? 'with its project' : 'with everything'}. Messages queue until it resumes.</div>
       )}
       {agent.nudgesStopped && (
         <div className="banner">Nudges stopped: this agent went idle three times with open tasks and nothing changed. Message it to get it going again.</div>
