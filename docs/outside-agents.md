@@ -39,7 +39,7 @@ $M tasks <agent-id>                        # its task list (with completion chec
 Usage notes:
 
 - **Message order.** Messages are queued by default: the agent reads them when it next goes idle. Pass `--immediate` to steer a running agent at its next tool step.
-- **Reply time.** Agents take minutes, not seconds. Poll `inbox --wait 120` in a loop, or check `status` and `transcript` now and then.
+- **Reply time.** Agents take minutes, not seconds. Poll `inbox --wait 120` in a loop, or check `status` and `transcript` now and then. If Marten disconnects during the poll (e.g. during a restart), the CLI prints a short error and exits with code 2. Retry after the server is back; use `--keep` when the poll should not acknowledge replies.
 - **Replies.** Each message in your inbox names who sent it (`from_id`). `send <from_id> ...` answers that agent directly.
 
 ## 3. Or call the HTTP API
