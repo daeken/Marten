@@ -100,6 +100,7 @@ PowerShell is embedded in-process and is the default way agents act on the world
 **Tools**
 
 - **Direct tool calls.** Every tool can be called either directly or from PowerShell, MCP tools included. Agents never have to go through PowerShell to read a file, say, but they can. PowerShell is overkill for many calls, confuses models and costs context. On day 0 the set of exposed tools stays minimal.
+- **Notebook.** Every PowerShell run is recorded in the agent's `notebook.jsonl` as a cell: command, working directory, `$State` in and out, output, and duration. Because each run gets a fresh runspace, those are everything it depended on inside Marten. The UI's Notebook view lists the cells. A cell can be re-run with its recorded inputs, which leaves the agent's own `$State` untouched and reports whether the output and state came out the same. The whole notebook exports as a Jupyter (.NET Interactive PowerShell) notebook in which every cell restores its own directory and state. Agents read theirs with `$Marten.Notebook()`.
 - **Runtime tools.** Agents can write new tools in PowerShell, scoped to a project or available to every agent. With `reviewTools` on, a tool loads only once Sera approves its exact text: `define_tool` puts the script on a card for her, and an edit made any other way drops the tool until she approves again, from the card or the project's Memory page. Tools that exist when review is turned on are grandfathered.
 - **Built-in tools.** Tools written in C# are built into the runtime.
 - **MCP tools** are callable from PowerShell like any other command.
@@ -213,7 +214,7 @@ Nothing below is built on day 0. The first list may come later; the second is ru
 - Budgets (built)
 - Completion contracts (built)
 - A filter on what agents can do, and any review of agent-written tools (built)
-- Reproducible, notebook-style PowerShell execution
+- Reproducible, notebook-style PowerShell execution (built)
 - Mobile and desktop apps
 - Limited tool schemas, with tool search for the rest (built)
 - Durable, versioned storage for `~/.marten`, such as encrypted backups or a git history (built)
