@@ -47,6 +47,7 @@ public sealed class ToolSearchTool : ITool {
 		return Task.FromResult(new ToolOutput(sb.ToString().TrimEnd()));
 	}
 
+	/// <summary>Any word can match: a name hit counts most, a description hit less, so tools matching more words rank first.</summary>
 	static int Score(ITool t, string[] words) {
 		var name = t.Name.ToLowerInvariant();
 		var description = t.Description.ToLowerInvariant();
@@ -54,7 +55,6 @@ public sealed class ToolSearchTool : ITool {
 		foreach(var w in words) {
 			if(name.Contains(w)) score += 3;
 			else if(description.Contains(w)) score += 1;
-			else return 0;
 		}
 		return score;
 	}

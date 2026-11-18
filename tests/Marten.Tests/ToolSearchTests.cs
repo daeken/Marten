@@ -18,6 +18,9 @@ public class ToolSearchTests {
 			var found = await m.Tools.InvokeAsync(a, "tool_search", """{"query":"echoes text","limit":null}""", default);
 			Assert.StartsWith("## fake__echo", found.Text);
 			Assert.Contains("\"required\":[\"text\"]", found.Text);
+			// Words that don't match don't sink a tool that matches others.
+			var loose = await m.Tools.InvokeAsync(a, "tool_search", "{\"query\":\"pixel image screenshot\",\"limit\":null}", default);
+			Assert.StartsWith("## fake__pixel", loose.Text);
 			var all = await m.Tools.InvokeAsync(a, "tool_search", """{"query":"server:fake","limit":1}""", default);
 			Assert.Equal(3, all.Text.Split("## ").Length - 1);
 

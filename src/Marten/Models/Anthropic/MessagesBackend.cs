@@ -24,6 +24,8 @@ public sealed record MessagesProvider {
 	public bool SendEffort { get; init; }
 	/// <summary>Models to list when the provider's models endpoint fails or isn't there.</summary>
 	public IReadOnlyList<string> Models { get; init; } = [];
+	/// <summary>Whether images reach the model. When false, a tool result's images become a note with their paths.</summary>
+	public bool Images { get; init; } = true;
 	/// <summary>Bare model names this provider owns, by prefix.</summary>
 	public IReadOnlyList<string> Prefixes { get; init; } = [];
 
@@ -35,6 +37,8 @@ public sealed record MessagesProvider {
 	public static readonly MessagesProvider Zai = new() {
 		Name = "zai", Label = "z.ai", BaseUrl = "https://api.z.ai/api/anthropic", Bearer = true, EnvVar = "ZAI_API_KEY",
 		Models = ["glm-5.3", "glm-5.3-flash", "glm-4.7"], Prefixes = ["glm-"],
+		// Tested 2026-11-18: glm-5.3 gets image blocks through this endpoint but describes them from guesswork.
+		Images = false,
 	};
 	// https://api-docs.deepseek.com/guides/anthropic_api
 	public static readonly MessagesProvider DeepSeek = new() {
@@ -144,7 +148,7 @@ public sealed class MessagesBackend(MessagesProvider provider, Home home, Func<s
 			Model = req.Model,
 			MaxTokens = provider.MaxTokens,
 			System = req.Instructions,
-			Messages = ToMessages(provider.Name, req.Model, req.History),
+			Messages = ToMessages(provider.Name, req.Model, req.History, provider.Images),
 			Tools = tools,
 		};
 		if(provider.ClaudeFeatures) {
@@ -179,7 +183,7 @@ public sealed class MessagesBackend(MessagesProvider provider, Home home, Func<s
 	/// Convert the neutral log into Messages turns. Consecutive same-role content merges into one turn,
 	/// tool results lead their user turn, and our own thinking replays only to the model that wrote it.
 	/// </summary>
-	public static List<MessageParam> ToMessages(string providerName, string model, IEnumerable<Entry> history) {
+	public static List<MessageParam> ToMessages(string providerName, string model, IEnumerable<Entry> history, bool images = true) {
 		var turns = new List<(bool User, List<ContentBlockParam> Blocks)>();
 		List<ContentBlockParam> Turn(bool user) {
 			if(turns.Count == 0 || turns[^1].User != user) turns.Add((user, new()));
@@ -204,7 +208,7 @@ public sealed class MessagesBackend(MessagesProvider provider, Home home, Func<s
 					var blocks = Turn(true);
 					// tool_result blocks must come before any text in their user turn.
 					var at = blocks.TakeWhile(b => b.TryPickToolResult(out _)).Count();
-					blocks.Insert(at, ResultParam(e));
+					blocks.Insert(at, ResultParam(images ? e : WithoutImages(e)));
 					break;
 			}
 		}
@@ -244,6 +248,12 @@ public sealed class MessagesBackend(MessagesProvider provider, Home home, Func<s
 		// A truncated call still replays, as what it was.
 		return new Dictionary<string, JsonElement> { ["_unparsed"] = JsonSerializer.SerializeToElement(arguments ?? "") };
 	}
+
+	/// <summary>For models that can't see images: say so, with the paths, instead of sending them.</summary>
+	static Entry WithoutImages(Entry e) => e.Images is not { Count: > 0 } imgs ? e : e with {
+		Images = null,
+		Text = $"{e.Text}\n\n[{imgs.Count} image{(imgs.Count == 1 ? "" : "s")} not shown: this model can't see images. Saved at: {string.Join(", ", imgs.Select(i => i.Path))}]",
+	};
 
 	static ContentBlockParam ResultParam(Entry e) {
 		var id = SafeId(e.CallId);
