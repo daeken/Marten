@@ -17,6 +17,12 @@ if(args is ["backup", ..]) {
 	Console.WriteLine($"Snapshot: {taken!.Path} ({taken.Bytes / 1024} KB{(taken.Encrypted ? ", encrypted" : "")})");
 	return;
 }
+if(args is ["client", "add" or "rotate", var clientName, ..]) {
+	var m = new AgentManager(home, config, new BackendRouter(new ResponsesBackend(new ChatGptAuth(home, new HttpClient()), new HttpClient()), [], null), new ToolRegistry());
+	var c = m.Outside.Register(clientName, rotate: args[1] == "rotate");
+	Console.WriteLine($"Client {c.Name}: token in {m.Outside.TokenPath(c.Name)}, mailbox in {Path.Combine(m.Outside.MailboxRoot, c.Name)}");
+	return;
+}
 if(args is ["restore", var archive, ..]) {
 	var target = args.Length > 2 ? args[2] : home.Root.TrimEnd('/') + "-restored-" + DateTime.Now.ToString("yyyyMMdd-HHmmss");
 	var passphrase = Environment.GetEnvironmentVariable("MARTEN_BACKUP_PASSPHRASE")
@@ -64,7 +70,7 @@ var tools = new ToolRegistry()
 var manager = managerRef = new AgentManager(home, config, backend, tools) { Launcher = new ProcessLauncher(), Mcp = mcp };
 var hub = new EventHub();
 manager.Events += hub.Broadcast;
-var security = new Security(home, config);
+var security = new Security(home, config) { ClientAuth = manager.Outside.Authenticate };
 
 var builder = WebApplication.CreateSlimBuilder(args);
 builder.WebHost.UseUrls($"http://127.0.0.1:{config.Port}");
@@ -152,6 +158,72 @@ api.MapPut("/backups/passphrase", (BackendKey req) => {
 	backups.SetPassphrase(req.Key);
 	return Results.Ok(BackupSummary());
 });
+// ---- Outside agents ----
+object ClientSummary(OutsideClient c) => new {
+	c.Name, c.Created, tokenPath = manager.Outside.TokenPath(c.Name), mailbox = Path.Combine(manager.Outside.MailboxRoot, c.Name),
+	unread = manager.Outside.Inbox(c.Name, false).Count,
+};
+api.MapGet("/clients", () => manager.Outside.Clients.Select(ClientSummary));
+api.MapPost("/clients", (ClientRequest req) => {
+	try { return Results.Ok(ClientSummary(manager.Outside.Register(req.Name ?? "", req.Rotate ?? false))); }
+	catch(ArgumentException e) { return Results.Problem(e.Message, statusCode: 400); }
+});
+api.MapDelete("/clients/{name}", (string name) => manager.Outside.Remove(name) ? Results.Ok() : Results.NotFound());
+
+var ext = api.MapGroup("/ext");
+string? ClientOf(HttpContext ctx) => ctx.Items["client"] as string;
+IResult NeedsClient() => Results.Problem("Use an outside client's token (secrets/clients/NAME.token) for /api/ext.", statusCode: 403);
+object ExtAgent(Agent a) => new {
+	a.Info.Id, a.Info.Name, a.Info.Kind, a.Info.ProjectId, a.Status, a.StatusDetail, Pending = a.PendingCount,
+	a.Info.Closed, Paused = a.IsPaused, OpenTasks = a.Tasks.Count(t => t.State != TaskState.Done),
+};
+ext.MapGet("/whoami", (HttpContext ctx) => ClientOf(ctx) is { } c ? Results.Ok(new { client = c, replyAs = Outside.Prefix + c }) : NeedsClient());
+ext.MapGet("/status", (HttpContext ctx) => ClientOf(ctx) is null ? NeedsClient() : Results.Ok(new {
+	projects = manager.Projects.Select(p => new { p.Info.Id, p.Info.Name, p.Info.Bindings, p.Info.OrchestratorId, p.Info.Paused }),
+	agents = manager.Agents.Where(a => !a.Info.Closed).Select(ExtAgent),
+	paused = manager.PausedAll,
+}));
+ext.MapPost("/projects", (HttpContext ctx, CreateProject req) => {
+	if(ClientOf(ctx) is not { } c) return NeedsClient();
+	try {
+		var (project, orchestrator) = manager.CreateProject(req.Name ?? "", req.Bindings ?? [], req.Prompt, req.WorktreesByDefault ?? false);
+		if(Blank(req.Brief) is { } brief) manager.Outside.Deliver(c, orchestrator.Info.Id, brief, SendMode.Queued);
+		return Results.Ok(new { project.Info.Id, project.Info.Name, project.Info.Bindings, orchestratorId = orchestrator.Info.Id });
+	} catch(ArgumentException e) {
+		return Results.Problem(e.Message, statusCode: 400);
+	}
+});
+ext.MapPost("/messages", (HttpContext ctx, ExtMessage req) => {
+	if(ClientOf(ctx) is not { } c) return NeedsClient();
+	try {
+		var a = manager.Outside.Deliver(c, req.To ?? "", req.Text ?? "", req.Mode ?? SendMode.Queued);
+		return Results.Ok(new { deliveredTo = a.Info.Id, name = a.Info.Name, status = a.Status });
+	} catch(ToolException e) {
+		return Results.Problem(e.Message, statusCode: 400);
+	}
+});
+ext.MapGet("/inbox", async (HttpContext ctx, bool? ack, int? wait) => {
+	if(ClientOf(ctx) is not { } c) return NeedsClient();
+	var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(Math.Clamp(wait ?? 0, 0, 120));
+	var list = manager.Outside.Inbox(c, false);
+	while(list.Count == 0 && DateTime.UtcNow < deadline && !ctx.RequestAborted.IsCancellationRequested) {
+		try { await Task.Delay(500, ctx.RequestAborted); } catch(OperationCanceledException) { break; }
+		list = manager.Outside.Inbox(c, false);
+	}
+	if(ack ?? true) manager.Outside.Inbox(c, true);
+	return Results.Ok(list.Select(m => new { file = Path.GetFileName(m.File), headers = m.Headers, m.Text }));
+});
+ext.MapGet("/agents/{id}/transcript", (HttpContext ctx, string id, long? since, int? limit) => {
+	if(ClientOf(ctx) is null) return NeedsClient();
+	if(manager.Get(id) is not { } a) return Results.NotFound();
+	static string? Cut(string? s, int n) => s == null || s.Length <= n ? s : s[..n] + $"… ({s.Length - n} more chars)";
+	return Results.Ok(a.Transcript.Entries.Where(e => e.Seq > (since ?? 0) && e.Kind is not (EntryKind.Reasoning or EntryKind.Elide))
+		.TakeLast(Math.Clamp(limit ?? 50, 1, 500))
+		.Select(e => new { e.Seq, e.Ts, e.Kind, e.From, Text = Cut(e.Text, 4000), e.Name, Arguments = Cut(e.Arguments, 1000), e.IsError }));
+});
+ext.MapGet("/agents/{id}/tasks", (HttpContext ctx, string id) =>
+	ClientOf(ctx) is null ? NeedsClient() : manager.Get(id) is { } a ? Results.Ok(a.Tasks) : Results.NotFound());
+
 api.MapGet("/usage", (int? days) => ledger.Recent(Math.Clamp(days ?? 7, 1, 90)));
 api.MapGet("/models", async (CancellationToken ct) => {
 	try {
@@ -286,6 +358,7 @@ api.Map("/events", async (HttpContext ctx) => {
 manager.LoadAll();
 new Scheduler(manager).Start(app.Lifetime.ApplicationStopping);
 backups.Start(app.Lifetime.ApplicationStopping, Console.Error.WriteLine);
+manager.Outside.Start(app.Lifetime.ApplicationStopping);
 _ = Task.Run(() => mcp.RefreshAsync(false, app.Lifetime.ApplicationStopping));
 app.Lifetime.ApplicationStopping.Register(() => mcp.StopAll().Wait(TimeSpan.FromSeconds(5)));
 Console.WriteLine($"Marten home: {home.Root}");
@@ -315,3 +388,5 @@ record AnswerRequest(int? Choice, string? Text);
 record BackendKey(string? Key);
 record CloseRequest(bool Closed);
 record ToolApproval(string Path);
+record ClientRequest(string? Name, bool? Rotate);
+record ExtMessage(string? To, string? Text, SendMode? Mode);

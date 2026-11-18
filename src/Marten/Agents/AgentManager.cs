@@ -38,6 +38,7 @@ public sealed class AgentManager {
 	public Marten.Mcp.McpHub? Mcp { get; set; }
 	public LoopBreaker Loops { get; }
 	public Guard Guard { get; }
+	public Outside Outside { get; }
 	readonly ConcurrentDictionary<string, Agent> agents = new();
 	readonly ConcurrentDictionary<string, Project> projects = new();
 	readonly SemaphoreSlim modelGate = new(1, 1);
@@ -53,6 +54,7 @@ public sealed class AgentManager {
 		Backend = backend;
 		Loops = new LoopBreaker(() => Config);
 		Guard = new Guard(this);
+		Outside = new Outside(this);
 		Tools = tools;
 		tools.Gate = Guard.Check;
 		PausedAll = File.Exists(home.PausedPath);

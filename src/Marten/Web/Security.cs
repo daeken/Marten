@@ -33,11 +33,22 @@ public sealed class Security {
 		return origin.Length == 0 || origins.Contains(origin);
 	}
 
-	public bool TokenValid(HttpContext ctx) {
-		var supplied = ctx.Request.Headers.Authorization.ToString() is { } auth && auth.StartsWith("Bearer ")
-			? auth["Bearer ".Length..]
-			: ctx.Request.Query["token"].ToString();
-		return CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(supplied), Encoding.UTF8.GetBytes(Token));
+	/// <summary>Maps an outside client's token to its name, or null.</summary>
+	public Func<string, string?>? ClientAuth { get; set; }
+
+	static string Supplied(HttpContext ctx) => ctx.Request.Headers.Authorization.ToString() is { } auth && auth.StartsWith("Bearer ")
+		? auth["Bearer ".Length..].Trim()
+		: ctx.Request.Query["token"].ToString();
+
+	public bool TokenValid(HttpContext ctx) =>
+		CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(Supplied(ctx)), Encoding.UTF8.GetBytes(Token));
+
+	/// <summary>What an outside client's token reaches: the /api/ext routes, plus reading transcripts, tasks, messages and memory.</summary>
+	public static bool ClientMayCall(HttpContext ctx) {
+		var path = ctx.Request.Path.Value ?? "";
+		if(path.StartsWith("/api/ext/") || path == "/api/ext") return true;
+		if(!HttpMethods.IsGet(ctx.Request.Method)) return false;
+		return System.Text.RegularExpressions.Regex.IsMatch(path, @"^/api/(agents/[^/]+/(transcript|tasks)|messages|projects/[^/]+/memory)$");
 	}
 
 	public RequestDelegate Middleware(RequestDelegate next) => async ctx => {
@@ -46,8 +57,15 @@ public sealed class Security {
 			return;
 		}
 		if(ctx.Request.Path.StartsWithSegments("/api") && !TokenValid(ctx)) {
-			ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
-			return;
+			if(ClientAuth?.Invoke(Supplied(ctx)) is not { } client) {
+				ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+				return;
+			}
+			if(!ClientMayCall(ctx)) {
+				ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
+				return;
+			}
+			ctx.Items["client"] = client;
 		}
 		await next(ctx);
 	};
