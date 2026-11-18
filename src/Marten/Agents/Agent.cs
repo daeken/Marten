@@ -16,8 +16,8 @@ public sealed partial class Agent : IPowerShellOwner {
 	public string Directory { get; }
 	public Transcript Transcript { get; }
 	public FileTracker Files { get; }
-	public AgentStatus Status { get; private set; } = AgentStatus.Idle;
-	public string? StatusDetail { get; private set; }
+	public AgentStatus Status => CurrentStatus.Status;
+	public string? StatusDetail => CurrentStatus.Detail;
 	public string Instructions { get; private set; }
 
 	readonly AgentManager manager;
@@ -60,6 +60,7 @@ public sealed partial class Agent : IPowerShellOwner {
 	public string WorkingDirectory => Info.WorkingDirectory;
 	public ToolRegistry Tools => manager.Tools;
 	public object MartenObject => api ??= new MartenApi(this, manager);
+	public object MartenObjectForRun(CancellationToken ct) => new MartenApi(this, manager, ct);
 	public IReadOnlyList<AbandonedRunspace> AbandonedRunspaces => state.AbandonedRunspaces;
 	public bool NudgesStopped => state.NudgesStopped;
 	public Project? Project => manager.ProjectOf(this);
@@ -151,12 +152,6 @@ public sealed partial class Agent : IPowerShellOwner {
 		var e = Transcript.Append(entry);
 		manager.Publish(new { type = "entry", agentId = Info.Id, entry = e });
 		return e;
-	}
-
-	void SetStatus(AgentStatus status, string? detail = null) {
-		Status = status;
-		StatusDetail = detail;
-		manager.Publish(new { type = "status", agentId = Info.Id, status, detail });
 	}
 
 	/// <summary>Repair the log after a restart and decide whether a turn was cut short.</summary>
@@ -253,6 +248,7 @@ public sealed partial class Agent : IPowerShellOwner {
 	async Task RunTurn(string reason) {
 		using var cts = new CancellationTokenSource();
 		turnCts = cts;
+		using var slots = new TurnSlots(this);
 		try {
 			SetStatus(AgentStatus.Running);
 			Append(new Entry { Kind = EntryKind.Wake, Reason = reason });
@@ -262,8 +258,7 @@ public sealed partial class Agent : IPowerShellOwner {
 			var changesAtStart = taskChanges;
 			var failed = false;
 			while(true) {
-				await WaitWhilePaused(cts.Token);
-				var result = await CallModel(cts.Token);
+				var result = await CallModel(slots, cts.Token);
 				if(result == null) {
 					failed = true;
 					break;
@@ -384,21 +379,21 @@ public sealed partial class Agent : IPowerShellOwner {
 		return (head + note + tail, Path.GetRelativePath(Directory, path));
 	}
 
-	async Task<ModelResult?> CallModel(CancellationToken ct) {
+	async Task<ModelResult?> CallModel(TurnSlots slots, CancellationToken ct) {
 		var transientFailures = 0;
 		var quotaWait = TimeSpan.FromSeconds(30);
 		var compactedForOverflow = false;
 		while(true) {
 			ct.ThrowIfCancellationRequested();
 			try {
+				await slots.EnsureAgent(ct);
 				var model = Info.Model ?? await manager.DefaultModel(ct);
-				await ManageContext(model, ct);
+				await ManageContext(model, slots, ct);
 				var view = View();
 				var request = new ModelRequest(model, Info.Effort ?? manager.Config.Effort, Instructions,
 					view, RequestTools(), CacheKey: $"marten:{Info.Id}");
-				SetStatus(AgentStatus.Running);
-				var result = await manager.Backend.CompleteAsync(request,
-					delta => manager.Publish(new { type = "delta", agentId = Info.Id, text = delta }), ct);
+				var result = await slots.Complete(request,
+					delta => manager.Publish(new { type = "delta", agentId = Info.Id, text = delta }), null, ct);
 				RecordUsage(result, view);
 				// Keep each call's usage in the log, on its last item.
 				if(result.Usage != null && result.Items.Count > 0)
@@ -407,14 +402,16 @@ public sealed partial class Agent : IPowerShellOwner {
 			} catch(ContextFullException) when(!compactedForOverflow) {
 				// The estimate was off; compact now and try once more.
 				compactedForOverflow = true;
-				await Compact(Info.Model ?? await manager.DefaultModel(ct), ct);
+				await Compact(Info.Model ?? await manager.DefaultModel(ct), slots, ct);
 			} catch(RateLimitedException e) {
+				slots.ReleaseAgent();
 				// Wait it out; never fail and never switch models.
 				var wait = e.RetryAfter ?? quotaWait;
 				SetStatus(AgentStatus.WaitingForQuota, $"{e.Message} Retrying at {DateTimeOffset.Now + wait:HH:mm}.");
 				await Task.Delay(wait, ct);
 				quotaWait = TimeSpan.FromSeconds(Math.Min(quotaWait.TotalSeconds * 2, 15 * 60));
 			} catch(TransientModelException e) when(++transientFailures <= 5) {
+				slots.ReleaseAgent();
 				SetStatus(AgentStatus.Running, $"{e.Message} Retrying.");
 				await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, transientFailures)), ct);
 			} catch(Exception e) when(e is TransientModelException or NotConnectedException or ContextFullException or InvalidOperationException) {
