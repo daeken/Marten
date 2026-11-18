@@ -52,7 +52,8 @@ public sealed partial class McpHub(Func<AgentManager> manager) : IToolSource {
 			if(!force && schemas.TryGetValue(name, out var have) && have.ConfigHash == hash && have.Error == null) return;
 			McpSchema schema;
 			try {
-				await using var client = await McpClient.StartAsync(name, config, home, Path.Combine(CacheDir, $"{name}.schema.log"), Timeout, ct);
+				var expanded = config.Expand("schema", Path.Combine(CacheDir, "schema-run"), M.Home.Root);
+				await using var client = await McpClient.StartAsync(name, expanded, home, Path.Combine(CacheDir, $"{name}.schema.log"), Timeout, ct);
 				schema = new McpSchema(hash, DateTimeOffset.UtcNow, await client.ListToolsAsync(Timeout, ct), null);
 			} catch(Exception e) when(e is McpException or IOException or TimeoutException) {
 				schema = new McpSchema(hash, DateTimeOffset.UtcNow, schemas.TryGetValue(name, out var old) ? old.Tools : [], e.Message);
@@ -77,7 +78,7 @@ public sealed partial class McpHub(Func<AgentManager> manager) : IToolSource {
 		if(!Servers.TryGetValue(server, out var config)) throw new ToolException($"MCP server {server} isn't configured.");
 		var key = (agent.Info.Id, server);
 		while(true) {
-			var task = clients.GetOrAdd(key, _ => McpClient.StartAsync(server, config, agent.WorkingDirectory,
+			var task = clients.GetOrAdd(key, _ => McpClient.StartAsync(server, config.Expand(agent.Info.Id, agent.Directory, M.Home.Root), agent.WorkingDirectory,
 				Path.Combine(agent.Directory, "mcp", $"{server}.log"), Timeout, CancellationToken.None));
 			McpClient client;
 			try {
