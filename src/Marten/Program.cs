@@ -103,7 +103,7 @@ if(webRoot != null) {
 
 object AgentSummary(Agent a) => new {
 	a.Info.Id, a.Info.Kind, a.Info.Name, a.Info.Created, a.Info.WorkingDirectory, a.Info.Model, a.Info.Effort,
-	a.Status, a.StatusDetail, Pending = a.PendingCount, a.AbandonedRunspaces,
+	a.Status, a.StatusDetail, a.ModelCall, Pending = a.PendingCount, a.AbandonedRunspaces,
 	a.Info.ProjectId, a.Info.ParentId, a.Info.Closed, a.Info.Worktree, a.NudgesStopped, a.Info.Paused, PausedEffective = a.IsPaused,
 	OpenTasks = a.Tasks.Count(t => t.State != TaskState.Done),
 };
@@ -184,7 +184,7 @@ var ext = api.MapGroup("/ext");
 string? ClientOf(HttpContext ctx) => ctx.Items["client"] as string;
 IResult NeedsClient() => Results.Problem("Use an outside client's token (secrets/clients/NAME.token) for /api/ext.", statusCode: 403);
 object ExtAgent(Agent a) => new {
-	a.Info.Id, a.Info.Name, a.Info.Kind, a.Info.ProjectId, a.Status, a.StatusDetail, Pending = a.PendingCount,
+	a.Info.Id, a.Info.Name, a.Info.Kind, a.Info.ProjectId, a.Status, a.StatusDetail, a.ModelCall, Pending = a.PendingCount,
 	a.Info.Closed, Paused = a.IsPaused, OpenTasks = a.Tasks.Count(t => t.State != TaskState.Done),
 };
 ext.MapGet("/whoami", (HttpContext ctx) => ClientOf(ctx) is { } c ? Results.Ok(new { client = c, replyAs = Outside.Prefix + c }) : NeedsClient());

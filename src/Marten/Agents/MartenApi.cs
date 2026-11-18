@@ -17,6 +17,7 @@ public sealed class MartenApi(Agent agent, AgentManager manager) {
 
 	public object[] Agents() => manager.Agents.Select(a => new {
 		a.Info.Id, Kind = a.Info.Kind.ToString(), a.Info.Name, Status = a.Status.ToString(), a.Info.ProjectId, a.Info.ParentId, a.Info.Closed,
+		a.StatusDetail, a.ModelCall,
 	}).ToArray<object>();
 
 	/// <summary>Your last few PowerShell runs: command, directory, $State in and out, output. Re-run one by pasting its command with its state.</summary>

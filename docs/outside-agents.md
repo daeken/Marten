@@ -49,13 +49,15 @@ Every call sends `Authorization: Bearer <token>` and JSON bodies. A client token
 | Route | What |
 | --- | --- |
 | `GET /api/ext/whoami` | Your client name |
-| `GET /api/ext/status` | Projects (id, name, bindings, orchestratorId) and open agents (status, pending messages, open tasks) |
+| `GET /api/ext/status` | Projects (id, name, bindings, orchestratorId) and open agents (status, pending messages, open tasks, latest `modelCall`) |
 | `POST /api/ext/projects` | `{name, bindings: [paths], prompt?, brief?, worktreesByDefault?}` creates a project. `brief` goes to the orchestrator from you |
 | `POST /api/ext/messages` | `{to, text, mode?: "queued" or "immediate"}` |
 | `GET /api/ext/inbox?wait=SECONDS&ack=true` | Your unread replies, long-polling up to 120 s |
 | `GET /api/ext/agents/{id}/transcript?since=SEQ&limit=N` | Recent transcript entries, trimmed |
 | `GET /api/ext/agents/{id}/tasks` | The agent's task list |
 | `GET /api/messages`, `GET /api/projects/{id}/memory` | The message log between agents, and a project's MEMORY.md |
+
+An agent's `modelCall` describes its latest completion attempt in this server process (or is absent/null before its first attempt). `kind` is `reply` or `compaction`; `startedAt` and `endedAt` are UTC timestamps. A null `endedAt` means the attempt is in flight. Afterward `outcome` is `succeeded`, `failed`, or `cancelled`. A failed attempt can still be retried; check the agent's `status` for a terminal `error`.
 
 ## Setting up a project well
 

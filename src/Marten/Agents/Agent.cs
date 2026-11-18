@@ -243,9 +243,7 @@ public sealed partial class Agent : IPowerShellOwner {
 			try {
 				await RunTurn(reason);
 			} catch(Exception e) {
-				Append(new Entry { Kind = EntryKind.Error, Text = $"Turn failed: {e.Message}" });
-				Append(new Entry { Kind = EntryKind.Idle });
-				SetStatus(AgentStatus.Error, e.Message);
+				FailTurn(e);
 			}
 		}
 	}
@@ -260,14 +258,9 @@ public sealed partial class Agent : IPowerShellOwner {
 			NoteToolChanges();
 			Deliver(Take(_ => true));
 			var changesAtStart = taskChanges;
-			var failed = false;
 			while(true) {
 				await WaitWhilePaused(cts.Token);
 				var result = await CallModel(cts.Token);
-				if(result == null) {
-					failed = true;
-					break;
-				}
 				var calls = new List<Entry>();
 				foreach(var item in result.Items) {
 					var e = Append(item);
@@ -279,10 +272,8 @@ public sealed partial class Agent : IPowerShellOwner {
 				Deliver(Take(m => m.Mode == SendMode.Immediate));
 			}
 			Append(new Entry { Kind = EntryKind.Idle });
-			if(!failed) {
-				SetStatus(AgentStatus.Idle);
-				MaybeNudge(changesAtStart);
-			}
+			SetStatus(AgentStatus.Idle);
+			MaybeNudge(changesAtStart);
 		} catch(OperationCanceledException) when(cts.IsCancellationRequested) {
 			AnswerDanglingCalls("Interrupted by Sera before this finished.");
 			Append(new Entry { Kind = EntryKind.Idle, Reason = "interrupted" });
@@ -384,43 +375,46 @@ public sealed partial class Agent : IPowerShellOwner {
 		return (head + note + tail, Path.GetRelativePath(Directory, path));
 	}
 
-	async Task<ModelResult?> CallModel(CancellationToken ct) {
+	async Task<ModelResult> CallModel(CancellationToken ct) {
 		var transientFailures = 0;
 		var quotaWait = TimeSpan.FromSeconds(30);
-		var compactedForOverflow = false;
+		var recoveringOverflow = false;
+		var forceCompaction = false;
 		while(true) {
+			await WaitWhilePaused(ct);
 			ct.ThrowIfCancellationRequested();
 			try {
 				var model = Info.Model ?? await manager.DefaultModel(ct);
-				await ManageContext(model, ct);
+				if(forceCompaction) {
+					await Compact(model, ct);
+					forceCompaction = false;
+				} else if(!recoveringOverflow) await ManageContext(model, ct);
 				var view = View();
 				var request = new ModelRequest(model, Info.Effort ?? manager.Config.Effort, Instructions,
 					view, RequestTools(), CacheKey: $"marten:{Info.Id}");
 				SetStatus(AgentStatus.Running);
-				var result = await manager.Backend.CompleteAsync(request,
+				var result = await CompleteModel(request, ModelCallKind.Reply,
 					delta => manager.Publish(new { type = "delta", agentId = Info.Id, text = delta }), ct);
 				RecordUsage(result, view);
 				// Keep each call's usage in the log, on its last item.
 				if(result.Usage != null && result.Items.Count > 0)
 					result = result with { Items = [.. result.Items.SkipLast(1), result.Items[^1] with { Usage = result.Usage }] };
 				return result;
-			} catch(ContextFullException) when(!compactedForOverflow) {
-				// The estimate was off; compact now and try once more.
-				compactedForOverflow = true;
-				await Compact(Info.Model ?? await manager.DefaultModel(ct), ct);
+			} catch(Exception) when(ct.IsCancellationRequested) {
+				ct.ThrowIfCancellationRequested();
+				throw;
+			} catch(ContextFullException) when(!recoveringOverflow) {
+				// Keep the forced compaction inside the retry loop, including its own quota/transient failures.
+				recoveringOverflow = forceCompaction = true;
 			} catch(RateLimitedException e) {
 				// Wait it out; never fail and never switch models.
 				var wait = e.RetryAfter ?? quotaWait;
 				SetStatus(AgentStatus.WaitingForQuota, $"{e.Message} Retrying at {DateTimeOffset.Now + wait:HH:mm}.");
-				await Task.Delay(wait, ct);
+				await manager.ModelRetryDelay(wait, ct);
 				quotaWait = TimeSpan.FromSeconds(Math.Min(quotaWait.TotalSeconds * 2, 15 * 60));
 			} catch(TransientModelException e) when(++transientFailures <= 5) {
 				SetStatus(AgentStatus.Running, $"{e.Message} Retrying.");
-				await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, transientFailures)), ct);
-			} catch(Exception e) when(e is TransientModelException or NotConnectedException or ContextFullException or InvalidOperationException) {
-				Append(new Entry { Kind = EntryKind.Error, Text = e.Message });
-				SetStatus(AgentStatus.Error, e.Message);
-				return null;
+				await manager.ModelRetryDelay(TimeSpan.FromSeconds(Math.Pow(2, transientFailures)), ct);
 			}
 		}
 	}
