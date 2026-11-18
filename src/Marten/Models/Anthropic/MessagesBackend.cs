@@ -22,8 +22,10 @@ public sealed record MessagesProvider {
 	public bool ClaudeFeatures { get; init; }
 	/// <summary>Map the agent's effort onto output_config.effort.</summary>
 	public bool SendEffort { get; init; }
-	/// <summary>Models to list when the provider has no models endpoint we use.</summary>
+	/// <summary>Models to list when the provider has no models endpoint we use (or, with <see cref="ListLive"/>, when it fails).</summary>
 	public IReadOnlyList<string> Models { get; init; } = [];
+	/// <summary>Ask the provider's models endpoint even though <see cref="Models"/> is set, which is then only the fallback.</summary>
+	public bool ListLive { get; init; }
 	/// <summary>Bare model names this provider owns, by prefix.</summary>
 	public IReadOnlyList<string> Prefixes { get; init; } = [];
 
@@ -34,7 +36,7 @@ public sealed record MessagesProvider {
 	// https://docs.z.ai/scenario-example (Anthropic-compatible endpoint, token auth)
 	public static readonly MessagesProvider Zai = new() {
 		Name = "zai", Label = "z.ai", BaseUrl = "https://api.z.ai/api/anthropic", Bearer = true, EnvVar = "ZAI_API_KEY",
-		Models = ["glm-4.7", "glm-4.5-air"], Prefixes = ["glm-"],
+		Models = ["glm-4.7", "glm-4.5-air"], ListLive = true, Prefixes = ["glm-"],
 	};
 	// https://api-docs.deepseek.com/guides/anthropic_api
 	public static readonly MessagesProvider DeepSeek = new() {
@@ -79,11 +81,13 @@ public sealed class MessagesBackend(MessagesProvider provider, Home home) : IMod
 	}
 
 	public async Task<IReadOnlyList<string>> ListModelsAsync(CancellationToken ct) {
-		if(provider.Models.Count > 0 || !Connected) return provider.Models;
+		if(!Connected || provider.Models.Count > 0 && !provider.ListLive) return provider.Models;
 		try {
 			var page = await Client().Models.List(cancellationToken: ct);
-			return page.Items.Select(m => m.ID).ToList();
+			// Newest first, as the picker shows them (z.ai lists oldest first).
+			return page.Items.OrderByDescending(m => m.CreatedAt).Select(m => m.ID).ToList();
 		} catch(Exception e) when(e is not OperationCanceledException) {
+			if(provider.Models.Count > 0) return provider.Models;
 			throw Map(e);
 		}
 	}
