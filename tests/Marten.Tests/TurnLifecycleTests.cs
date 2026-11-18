@@ -114,6 +114,72 @@ public class TurnLifecycleTests {
 	}
 
 	[Fact]
+	public async Task LoopBreakerCanSelfPauseDuringAnAdmittedSendWithoutDeadlock() {
+		using var dir = new TempDir();
+		var tool = new HeldTool();
+		var backend = new FakeBackend { Gate = Signal() };
+		var (m, _, parent, agent) = Create(dir, backend, tool, new Config { Model = "fake-1", LoopMessages = 4 });
+		m.Tools.Add(new SendMessageTool(() => m));
+		var send = System.Text.Json.JsonSerializer.Serialize(new { to = parent.Info.Id, text = "trip the loop breaker" });
+		backend.Script.Enqueue(_ => new([.. FakeBackend.Call("message", "send_message", send).Items, .. Batch.Items], null));
+		backend.Script.Enqueue(_ => FakeBackend.Say("finished"));
+		Tell(agent, "go");
+		await Wait.Until(() => backend.Requests.Count == 1);
+		for(var i = 0; i < 3; i++) {
+			var (from, to) = i % 2 == 0 ? (parent, agent) : (agent, parent);
+			Assert.Null(m.Loops.Record(from.Info.Id, to.Info.Id, DateTimeOffset.UtcNow));
+		}
+		backend.Gate.SetResult();
+		await Wait.Until(() => agent.Status == AgentStatus.Paused);
+		var result = Assert.Single(agent.Transcript.Entries, e => e.Kind == EntryKind.ToolResult);
+		Assert.Contains("loop", result.Text);
+		Assert.True(parent.IsPaused);
+		Assert.Equal(0, tool.Calls);
+		tool.Release.SetResult();
+		agent.SetPaused(false);
+		await Wait.Until(() => Idle(agent));
+		Assert.Equal(2, tool.Calls);
+	}
+
+	[Fact]
+	public async Task ApprovedDelegatedRetryRechecksAdmissionAfterGuardEvenAcrossReopen() {
+		using var dir = new TempDir();
+		var tool = new HeldTool();
+		var backend = new FakeBackend();
+		var (m, _, parent, agent) = Create(dir, backend, tool, new Config {
+			Model = "fake-1", Rules = [new GuardRule { Tool = "held", Action = GuardAction.Ask }],
+		});
+		m.Tools.Add(new CallToolTool());
+		const string args = """{"name":"held","arguments":{}}""";
+		backend.Script.Enqueue(_ => FakeBackend.Call("ask", "call_tool", args));
+		backend.Script.Enqueue(_ => FakeBackend.Say("waiting for approval"));
+		backend.Script.Enqueue(_ => FakeBackend.Call("retry", "call_tool", args));
+		backend.Script.Enqueue(_ => FakeBackend.Say("fresh turn after close"));
+		Tell(agent, "ask to run");
+		await Wait.Until(() => Idle(agent) && backend.Requests.Count == 2);
+		var card = Assert.Single(m.SeraInbox(), e => e.Kind == "approval");
+		agent.SetClosed(true);
+		m.AnswerQuestion(card.Id, 0, null);
+		Assert.True(agent.Info.Closed);
+		Assert.Equal(0, tool.Calls);
+
+		// Force the race after the approved inner guard check, before the real tool delegate.
+		m.Tools.Gate = (ctx, candidate, arguments) => {
+			var answer = m.Guard.Check(ctx, candidate, arguments);
+			if(candidate == tool && answer == null) {
+				agent.SetClosed(true);
+				agent.Send(Inbound.FromAgent(parent, "fresh wake", SendMode.Immediate));
+			}
+			return answer;
+		};
+		agent.Send(Inbound.FromAgent(parent, "retry approved call", SendMode.Queued));
+		await Wait.Until(() => Idle(agent) && agent.Transcript.Entries.Any(e => e.Text == "fresh turn after close"));
+		Assert.Equal(0, tool.Calls);
+		var retry = Assert.Single(agent.Transcript.Entries, e => e.Kind == EntryKind.ToolResult && e.CallId == "retry");
+		Assert.Contains("closed", retry.Text);
+	}
+
+	[Fact]
 	public async Task CloseAndImmediateReopenDuringAToolFencesTheRestOfTheBatch() {
 		using var dir = new TempDir();
 		var tool = new HeldTool();

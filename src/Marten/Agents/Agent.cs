@@ -414,6 +414,8 @@ public sealed partial class Agent : IPowerShellOwner {
 	}
 
 	async Task RunTool(Entry call, TurnSlots slots, CancellationToken ct) {
+		// The final successful check under gate is dispatch admission. Never hold gate
+		// across the delegate: an admitted tool can itself close or pause an agent.
 		async Task Admit() {
 			while(true) {
 				await slots.EnsureAgent(ct);
