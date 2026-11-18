@@ -62,6 +62,13 @@ export interface BackgroundProcess {
 
 export interface ScriptToolInfo { name: string; scope: 'global' | 'project'; path: string; script: string; description?: string; error?: string; modified: string }
 
+export interface BackupStatus {
+  directory: string;
+  encrypting: boolean;
+  intervalMinutes: number;
+  snapshots: { name: string; taken: string; bytes: number; encrypted: boolean }[];
+}
+
 export interface McpServer {
   name: string; command: string; args: string[]; disabled: boolean; tools: string[]; readAt?: string; error?: string;
   running: { agentId: string; agentName?: string; pid: number }[];
@@ -208,6 +215,9 @@ export class Api {
   imageUrl = (agentId: string, path: string) =>
     `/api/agents/${agentId}/images/${encodeURIComponent(path.split(/[\\/]/).pop() ?? '')}?token=${encodeURIComponent(this.token)}`;
   mcp = () => this.call<McpServer[]>('GET', '/mcp');
+  backups = () => this.call<BackupStatus>('GET', '/backups');
+  backupNow = () => this.call<BackupStatus>('POST', '/backups');
+  setBackupPassphrase = (key: string | null) => this.call<BackupStatus>('PUT', '/backups/passphrase', { key });
   refreshMcp = () => this.call<void>('POST', '/mcp/refresh');
   answer = (id: string, choice: number | null, text: string | null) => this.call<SeraMessage>('POST', `/questions/${id}/answer`, { choice, text });
   agentMessages = (q: { agentId?: string; projectId?: string } = {}) => {
