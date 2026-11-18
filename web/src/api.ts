@@ -1,5 +1,5 @@
 export type Kind = 'chat' | 'orchestrator' | 'task';
-export type Status = 'idle' | 'running' | 'waiting_for_quota' | 'paused' | 'error';
+export type Status = 'idle' | 'running' | 'waiting_for_quota' | 'waiting_for_slot' | 'paused' | 'error';
 
 export interface AgentSummary {
   id: string;

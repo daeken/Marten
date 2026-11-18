@@ -66,7 +66,7 @@ public sealed partial class Agent {
 	}
 
 	/// <summary>Before each model call: elide old tool results in one batch past their budget, then compact past the threshold.</summary>
-	async Task ManageContext(string model, CancellationToken ct) {
+	async Task ManageContext(string model, TurnSlots slots, CancellationToken ct) {
 		var window = Window(model);
 		var view = View();
 		var results = view.Where(e => e.Kind == EntryKind.ToolResult && !(e.Text ?? "").StartsWith("[Elided")).ToList();
@@ -84,7 +84,7 @@ public sealed partial class Agent {
 			if(victims.Count > 0) Elide(victims);
 			view = View();
 		}
-		if(EstimateTokens(view) > window * manager.Config.CompactAt) await Compact(model, ct);
+		if(EstimateTokens(view) > window * manager.Config.CompactAt) await Compact(model, slots, ct);
 	}
 
 	void Elide(IReadOnlyList<Entry> results) {
@@ -108,6 +108,12 @@ public sealed partial class Agent {
 	/// Task agents compact everything. Either way the system prompt is rebuilt with current memory and notes.
 	/// </summary>
 	public async Task Compact(string model, CancellationToken ct) {
+		using var slots = new TurnSlots(this);
+		await slots.EnsureAgent(ct);
+		await Compact(model, slots, ct);
+	}
+
+	async Task Compact(string model, TurnSlots slots, CancellationToken ct) {
 		var view = View();
 		if(view.Count < 2) return;
 		var whole = Info.Kind == AgentKind.Task;
@@ -130,14 +136,13 @@ public sealed partial class Agent {
 			}
 		}
 		var prefix = view.Take(cut).ToList();
-		SetStatus(AgentStatus.Running, "Compacting context");
 		var ask = whole
 			? "Your context is about to be compacted. Write a summary that lets you carry on with no other history: the goal, what you've done, the current state, what's in progress, open problems, decisions and Sera's preferences, important paths and commands, and your next steps. Your task list, NOTES.md and project memory are kept separately; don't repeat them. Reply with the summary only, and don't call tools."
 			: "The older part of your context, everything above this message, is about to be replaced by a summary; what comes after it stays verbatim. Write that summary: decisions, facts learned, Sera's preferences and instructions, work done, open threads, and anything you'd need to refer back to. Reply with the summary only, and don't call tools.";
 		var request = new ModelRequest(model, Info.Effort ?? manager.Config.Effort, Instructions,
 			[.. prefix, new Entry { Kind = EntryKind.Message, From = NudgeSender, Text = ask }],
 			RequestTools(), CacheKey: $"marten:{Info.Id}");
-		var result = await manager.Backend.CompleteAsync(request, _ => { }, ct);
+		var result = await slots.Complete(request, _ => { }, "Compacting context", ct);
 		var summary = string.Join("\n\n", result.Items.Where(i => i.Kind == EntryKind.Assistant && !string.IsNullOrWhiteSpace(i.Text)).Select(i => i.Text));
 		if(summary.Length == 0) throw new InvalidOperationException("Compaction produced no summary.");
 		var upTo = cut < view.Count ? view[cut].Seq - 1 : Transcript.Last!.Seq;

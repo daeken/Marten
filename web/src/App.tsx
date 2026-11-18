@@ -18,7 +18,7 @@ function mergeEntries(a: Entry[], b: Entry[]): Entry[] {
 }
 
 const statusLabel: Record<AgentSummary['status'], string> = {
-  idle: 'Idle', running: 'Working', waiting_for_quota: 'Waiting for quota', paused: 'Paused', error: 'Error',
+  idle: 'Idle', running: 'Working', waiting_for_quota: 'Waiting for quota', waiting_for_slot: 'Waiting for slot', paused: 'Paused', error: 'Error',
 };
 
 export function App() {
@@ -335,7 +335,7 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
   const [mode, setMode] = useState<'queued' | 'immediate'>('queued');
   const [showNotebook, setShowNotebook] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
-  const busy = agent.status === 'running' || agent.status === 'waiting_for_quota';
+  const busy = agent.status === 'running' || agent.status === 'waiting_for_quota' || agent.status === 'waiting_for_slot';
 
   useEffect(() => {
     const el = scroller.current;
@@ -438,6 +438,7 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
         {streaming && <div className="assistant streaming"><Md text={streaming} /></div>}
         {agent.status === 'running' && !streaming && !runningCall && <Thinking />}
         {agent.status === 'waiting_for_quota' && <Thinking label="Waiting for quota" />}
+        {agent.status === 'waiting_for_slot' && <Thinking label="Waiting for slot" />}
         {questions.map(q => <div key={q.id} className="inbox-item card-inline"><QuestionCard api={api} q={q} /></div>)}
       </div>
       <footer className="composer">
