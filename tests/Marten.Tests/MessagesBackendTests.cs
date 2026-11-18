@@ -55,6 +55,24 @@ public class MessagesBackendTests {
 	}
 
 	[Fact]
+	public void ImagesBecomeANoteForProvidersThatCantSeeThem() {
+		using var dir = new TempDir();
+		var png = dir.File("shot.png");
+		File.WriteAllBytes(png, [1, 2, 3]);
+		var history = new List<Entry> {
+			E(EntryKind.Message, "look"),
+			E(EntryKind.ToolCall, callId: "c1", name: "shot", args: "{}"),
+			E(EntryKind.ToolResult, "took it", callId: "c1") with { Images = [new ImageRef(png, "image/png")] },
+		};
+		var seeing = Wire(MessagesBackend.ToMessages("p", "m", history));
+		Assert.Equal("image", seeing[2]!["content"]![0]!["content"]![1]!["type"]!.GetValue<string>());
+		var blind = Wire(MessagesBackend.ToMessages("p", "m", history, images: false));
+		var text = blind[2]!["content"]![0]!["content"]!.GetValue<string>();
+		Assert.Contains("can't see images", text);
+		Assert.Contains(png, text);
+	}
+
+	[Fact]
 	public void ModelsRouteByPrefixOrExplicitProvider() {
 		using var dir = new TempDir();
 		var home = new Home(dir.File("home"));
