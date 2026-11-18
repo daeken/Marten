@@ -24,7 +24,9 @@ var tools = new ToolRegistry()
 	.Add(new TaskUpdateTool(getManager))
 	.Add(new SpawnAgentTool(getManager))
 	.Add(new CloseAgentTool(getManager))
-	.Add(new CreateProjectTool(getManager));
+	.Add(new CreateProjectTool(getManager))
+	.Add(new ElideResultsTool())
+	.Add(new SetModelTool(getManager));
 var manager = managerRef = new AgentManager(home, config, backend, tools);
 var hub = new EventHub();
 manager.Events += hub.Broadcast;

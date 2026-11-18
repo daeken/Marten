@@ -46,7 +46,9 @@ export interface SeraMessage { id: string; at: string; from: string; fromName: s
 export interface Entry {
   seq: number;
   ts: string;
-  kind: 'wake' | 'message' | 'assistant' | 'reasoning' | 'tool_call' | 'tool_result' | 'error' | 'idle';
+  kind: 'wake' | 'message' | 'assistant' | 'reasoning' | 'tool_call' | 'tool_result' | 'error' | 'idle' | 'elide' | 'compaction';
+  seqs?: number[];
+  upTo?: number;
   from?: string;
   text?: string;
   reason?: string;

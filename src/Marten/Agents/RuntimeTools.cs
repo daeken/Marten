@@ -250,3 +250,41 @@ public sealed class MemoryGuard(Func<AgentManager> manager) : IEditGuard {
 			m.MessageSera(agent, $"Removed cited memory entr{(cited.Count == 1 ? "y" : "ies")}{(reason != null ? $" ({reason})" : "")}:\n{string.Join("\n", cited)}");
 	}
 }
+
+public sealed class ElideResultsTool : ITool {
+	public string Name => "elide_results";
+	public string Description =>
+		"Drop your last N tool results from your context at once, e.g. when one flooded it. Each is replaced by a note " +
+		"with the path of its full text, which read_file can still open.";
+	public JsonObject Parameters => Schema.Object(("count", Schema.Int("How many of your most recent results to elide.")));
+
+	public Task<ToolOutput> InvokeAsync(IToolContext ctx, JsonObject args, CancellationToken ct) {
+		var count = args.OptInt("count") ?? throw new ToolException("Missing required argument: count");
+		if(count < 1) throw new ToolException("count must be at least 1.");
+		var n = AgentTools.Self(ctx).ElideLast(count);
+		return Task.FromResult(new ToolOutput(n == 0 ? "Nothing to elide." : $"Elided {n} result{(n == 1 ? "" : "s")}."));
+	}
+}
+
+public sealed class SetModelTool(Func<AgentManager> manager) : ITool {
+	public string Name => "set_model";
+	public string Description =>
+		"Change the model or reasoning effort for yourself (only when Sera asks) or, as an orchestrator, for one of your task " +
+		"agents. Null resets to the configured default. Takes effect at the next model call.";
+	public JsonObject Parameters => Schema.Object(
+		("agent", Schema.Str("Whose: null for yourself; orchestrators may name one of their task agents.", nullable: true)),
+		("model", Schema.Str("Model id, or null for the default.", nullable: true)),
+		("effort", Schema.Str("Effort (e.g. low, medium, high), or null for the default.", nullable: true)));
+
+	public Task<ToolOutput> InvokeAsync(IToolContext ctx, JsonObject args, CancellationToken ct) {
+		var self = AgentTools.Self(ctx);
+		var target = args.OptString("agent") is { Length: > 0 } who ? AgentTools.Resolve(manager(), self, who) : self;
+		if(target != self && target.Info.ParentId != self.Info.Id)
+			throw new ToolException("You can only change your own model or your task agents'.");
+		var model = args.OptString("model") is { Length: > 0 } m ? m : null;
+		var effort = args.OptString("effort") is { Length: > 0 } e ? e : null;
+		target.UpdateSettings(model, effort);
+		var cfg = manager().Config;
+		return Task.FromResult(new ToolOutput($"{(target == self ? "You now use" : target.Info.Name + " now uses")} {model ?? cfg.Model + " (default)"} at {effort ?? cfg.Effort + " (default)"} effort."));
+	}
+}

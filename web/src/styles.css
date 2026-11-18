@@ -90,6 +90,9 @@ code, pre { font: 12.5px/1.45 ui-monospace, "SF Mono", Menlo, monospace; }
 .reasoning > div { padding: 4px 0 0 14px; }
 .error-entry { color: var(--bad); font-size: 13px; }
 .divider { text-align: center; color: var(--muted); font-size: 12px; }
+.compaction > summary { cursor: pointer; list-style: none; }
+.compaction > summary::-webkit-details-marker { display: none; }
+.compaction > div { border-left: 2px solid var(--border); padding: 4px 12px; margin: 6px 0; color: var(--muted); font-size: 13px; }
 
 .tool { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); font-size: 13px; }
 .tool summary { display: flex; gap: 10px; align-items: baseline; padding: 6px 10px; cursor: pointer; list-style: none; }

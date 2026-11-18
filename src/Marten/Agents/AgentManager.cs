@@ -163,6 +163,9 @@ public sealed class AgentManager {
 		return agent;
 	}
 
+	/// <summary>A fresh system prompt for compaction: current project prompt, AGENTS.md, memory and notes.</summary>
+	public string RebuildInstructions(Agent agent) => BuildInstructions(agent.Info, agent.Directory);
+
 	string BuildInstructions(AgentInfo info, string dir) {
 		var kind = info.Kind.ToString().ToLowerInvariant();
 		var parts = new List<string> { ReadPrompt("marten.md"), ReadPrompt($"{kind}.md") };
@@ -177,9 +180,12 @@ public sealed class AgentManager {
 			parts.Add(sb.ToString().TrimEnd());
 			foreach(var (path, text) in project.AgentsFiles())
 				if(text.Length > 0) parts.Add($"# {path}\n\n{text}");
-			parts.Add($"# Project memory\n\nThe shared memory lives at {project.MemoryPath}. This is how it stood when you were spawned; changes since then reach you as notes at the start of a turn.\n\n{(project.Memory.Trim() is { Length: > 0 } m ? m : "(empty)")}");
-			if(info.Kind == AgentKind.Task)
-				parts.Add($"# Your notes\n\nYour own NOTES.md is {Path.Combine(dir, "NOTES.md")}. Keep traces, open leads and how your tools behave there; it survives compaction. Promote facts that matter beyond you to project memory.");
+			parts.Add($"# Project memory\n\nThe shared memory lives at {project.MemoryPath}. This is how it stood when this prompt was built; changes since then reach you as notes at the start of a turn.\n\n{(project.Memory.Trim() is { Length: > 0 } m ? m : "(empty)")}");
+			if(info.Kind == AgentKind.Task) {
+				var notesPath = Path.Combine(dir, "NOTES.md");
+				var notes = File.Exists(notesPath) ? File.ReadAllText(notesPath).Trim() : "";
+				parts.Add($"# Your notes\n\nYour own NOTES.md is {notesPath}. Keep traces, open leads and how your tools behave there; it survives compaction. Promote facts that matter beyond you to project memory.\n\n{(notes.Length > 0 ? notes : "(empty so far)")}");
+			}
 		}
 		parts.Add($"""
 			# Environment
@@ -220,6 +226,19 @@ public sealed class AgentManager {
 	static readonly HashSet<string> LegacyDefaults = [
 		"You are a project's orchestrator. You run the project and spawn task agents to own tasks or portions of the work.",
 		"You are a task agent. You own one task or one portion of a project's work, and report to your orchestrator.",
+		"""
+		You are an agent running inside Marten, Sera's agent runtime. Sera trusts you: there are no approvals and no sandbox, so act directly and own the consequences.
+
+		How to act on the world:
+		- Your tools are callable directly. Prefer the direct tools for reading and editing files.
+		- `powershell` runs PowerShell 7 in-process, in a fresh runspace each time. Only `$State` survives between runs, and it must stay plain JSON data. `$Marten` exposes the runtime. Every Marten tool is also a PowerShell function with the same name.
+		- PowerShell runs inside Marten itself. Environment variables you set and assemblies you load are shared with every other agent and with Marten, so avoid changing process-wide state unless you mean to.
+		- Commands time out. Pass `timeout_seconds` for work that legitimately takes long, such as a full test run.
+		- `edit_file` applies anchored edits atomically and refuses if the file changed since you read it. Read first, then edit.
+		- Oversized tool output is truncated with a pointer to the full text. Read ranges of it rather than re-running the command.
+
+		Be direct and concise with Sera. Say what you did and what you found, not what you are about to do.
+		""",
 		"You are a chat agent: someone Sera talks to outside any project. You are not bound to a repository; your working directory is Sera's home directory unless she says otherwise.",
 	];
 

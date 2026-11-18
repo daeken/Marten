@@ -40,7 +40,8 @@ public class ProjectTests {
 		var tools = new ToolRegistry()
 			.Add(new ReadFileTool()).Add(new EditFileTool(new MemoryGuard(get)))
 			.Add(new SendMessageTool(get)).Add(new TaskAddTool(get)).Add(new TaskUpdateTool(get))
-			.Add(new SpawnAgentTool(get)).Add(new CloseAgentTool(get)).Add(new CreateProjectTool(get));
+			.Add(new SpawnAgentTool(get)).Add(new CloseAgentTool(get)).Add(new CreateProjectTool(get))
+			.Add(new ElideResultsTool()).Add(new SetModelTool(get));
 		return m = new AgentManager(new Home(dir.File("home")), config ?? new Config(), backend, tools);
 	}
 
