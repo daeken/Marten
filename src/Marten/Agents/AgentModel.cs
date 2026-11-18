@@ -60,7 +60,13 @@ public sealed record TaskItem {
 	/// <summary>The agent that added it; woken when the task turns done, waiting or blocked.</summary>
 	public required string AssignedBy { get; init; }
 	public DateTimeOffset Updated { get; init; }
+	/// <summary>Completion contract: a shell command that must exit 0 before the task can be marked done. Only its assigner sets it.</summary>
+	public string? Check { get; init; }
+	/// <summary>The last time the check ran: when, whether it passed, and the tail of its output.</summary>
+	public CheckRun? LastCheck { get; init; }
 }
+
+public sealed record CheckRun(DateTimeOffset At, bool Passed, int? ExitCode, string Output);
 
 public sealed record AbandonedRunspace(DateTimeOffset At, string Command);
 

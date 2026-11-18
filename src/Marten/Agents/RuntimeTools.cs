@@ -109,6 +109,7 @@ public sealed class SpawnAgentTool(Func<AgentManager> manager) : ITool {
 		("name", Schema.Str("Short name, e.g. \"parser\" or \"ci-fixer\".")),
 		("brief", Schema.Str("Self-contained instructions: goal, constraints, where to look, how to report back.")),
 		("task", Schema.Str("Task title for its list, or null.", nullable: true)),
+		("check", Schema.Str("Completion contract for that task: a bash command, run in the agent's working directory, that must exit 0 before it can mark the task done (e.g. \"dotnet test\"). Null for none.", nullable: true)),
 		("worktree", new JsonObject { ["type"] = new JsonArray("boolean", "null"), ["description"] = "Own git worktree, or null for the project default." }),
 		("model", Schema.Str("Model override, or null for the default.", nullable: true)),
 		("effort", Schema.Str("Effort override, or null for the default.", nullable: true)));
@@ -124,7 +125,8 @@ public sealed class SpawnAgentTool(Func<AgentManager> manager) : ITool {
 		} catch(InvalidOperationException e) {
 			throw new ToolException(e.Message);
 		}
-		if(args.OptString("task") is { Length: > 0 } task) agent.AddTask(task, self.Info.Id);
+		if(args.OptString("task") is { Length: > 0 } task) agent.AddTask(task, self.Info.Id, args.OptString("check"));
+		else if(args.OptString("check") is { Length: > 0 }) throw new ToolException("A check needs a task to attach to.");
 		agent.Send(Inbound.FromAgent(self, args.ReqString("brief"), SendMode.Queued));
 		return Task.FromResult(new ToolOutput($"Spawned {AgentManager.Label(agent)} in {agent.Info.WorkingDirectory}."));
 	}
@@ -181,9 +183,10 @@ public sealed class TaskAddTool(Func<AgentManager> manager) : ITool {
 	public string Name => "task_add";
 	public string Description =>
 		"Add a task to your own list, or (orchestrators) to one of your task agents' lists. Tasks live outside your context. " +
-		"Going idle with an open task gets you nudged.";
+		"Going idle with an open task gets you nudged. A check is a completion contract: the task can't be marked done until it passes.";
 	public JsonObject Parameters => Schema.Object(
 		("title", Schema.Str("What needs doing.")),
+		("check", Schema.Str("Bash command, run in the list owner's working directory, that must exit 0 before the task can be marked done (e.g. \"npm test\"). Null for none.", nullable: true)),
 		("agent", Schema.Str("Whose list: null for yours; orchestrators may name one of their task agents.", nullable: true)));
 
 	public Task<ToolOutput> InvokeAsync(IToolContext ctx, JsonObject args, CancellationToken ct) {
@@ -191,8 +194,9 @@ public sealed class TaskAddTool(Func<AgentManager> manager) : ITool {
 		var target = args.OptString("agent") is { Length: > 0 } who ? AgentTools.Resolve(manager(), self, who) : self;
 		if(target != self && target.Info.ParentId != self.Info.Id)
 			throw new ToolException("You can only add tasks to your own list or your task agents' lists.");
-		var task = target.AddTask(args.ReqString("title"), self.Info.Id);
-		if(target != self) target.Send(Inbound.FromAgent(self, $"New task #{task.Id} on your list: {task.Title}", SendMode.Queued));
+		var task = target.AddTask(args.ReqString("title"), self.Info.Id, args.OptString("check"));
+		var contract = task.Check != null ? $" It's done when `{task.Check}` passes." : "";
+		if(target != self) target.Send(Inbound.FromAgent(self, $"New task #{task.Id} on your list: {task.Title}.{contract}", SendMode.Queued));
 		return Task.FromResult(new ToolOutput($"Added task #{task.Id} to {(target == self ? "your list" : target.Info.Name + "'s list")}."));
 	}
 }
@@ -201,13 +205,14 @@ public sealed class TaskUpdateTool(Func<AgentManager> manager) : ITool {
 	public string Name => "task_update";
 	public string Description =>
 		"Change a task's state on your list. waiting = on another agent or a schedule (no nudges, Sera isn't told); " +
-		"blocked = on Sera; done = finished. Waiting and blocked need a reason. Whoever assigned the task is woken.";
+		"blocked = on Sera; done = finished. Waiting and blocked need a reason. Whoever assigned the task is woken. " +
+		"A task with a check is only marked done once its check passes; if it fails you get its output and the task stays open.";
 	public JsonObject Parameters => Schema.Object(
 		("id", Schema.Int("Task number.")),
 		("state", Schema.Enum("New state.", "open", "waiting", "blocked", "done")),
 		("reason", Schema.Str("Why it's waiting or blocked, or a short result when done. Null when reopening.", nullable: true)));
 
-	public Task<ToolOutput> InvokeAsync(IToolContext ctx, JsonObject args, CancellationToken ct) {
+	public async Task<ToolOutput> InvokeAsync(IToolContext ctx, JsonObject args, CancellationToken ct) {
 		var m = manager();
 		var self = AgentTools.Self(ctx);
 		var id = args.OptInt("id") ?? throw new ToolException("Missing required argument: id");
@@ -215,13 +220,58 @@ public sealed class TaskUpdateTool(Func<AgentManager> manager) : ITool {
 		var reason = args.OptString("reason");
 		if(newState is TaskState.Waiting or TaskState.Blocked && string.IsNullOrWhiteSpace(reason))
 			throw new ToolException($"Say why the task is {newState.ToString().ToLowerInvariant()}.");
+		var checkNote = "";
+		if(newState == TaskState.Done && self.GetTask(id) is { State: not TaskState.Done, Check: { } check } current) {
+			var run = await CompletionCheck.RunAsync(check, self.WorkingDirectory, TimeSpan.FromSeconds(m.Config.CheckTimeoutSeconds), ct);
+			self.RecordCheck(id, run);
+			if(!run.Passed)
+				throw new ToolException($"Not done: task #{id}'s check `{check}` {(run.ExitCode is { } code ? $"exited {code}" : "timed out")}. " +
+					$"The task stays {current.State.ToString().ToLowerInvariant()}. Output (tail):\n{run.Output}");
+			checkNote = $" (check `{check}` passed)";
+		}
+		if(checkNote.Length > 0) reason = string.IsNullOrWhiteSpace(reason) ? checkNote.Trim() : reason + checkNote;
 		var (before, after) = self.UpdateTask(id, newState, reason);
 		var stateWord = newState.ToString().ToLowerInvariant();
 		if(before.State != newState && newState != TaskState.Open && after.AssignedBy != self.Info.Id && m.Get(after.AssignedBy) is { } assigner)
 			assigner.Send(Inbound.FromAgent(self, $"Task #{after.Id} \"{after.Title}\" is now {stateWord}{(reason != null ? $": {reason}" : "")}", SendMode.Queued));
 		if(newState == TaskState.Blocked && before.State != TaskState.Blocked && self.Info.Kind == AgentKind.Orchestrator)
 			m.MessageSera(self, $"Blocked on you: {after.Title}\n\n{reason}");
-		return Task.FromResult(new ToolOutput($"Task #{id} is {stateWord}."));
+		return new ToolOutput($"Task #{id} is {stateWord}{checkNote}.");
+	}
+}
+
+/// <summary>Runs a task's completion check: bash -c in the agent's directory, output captured, killed at the timeout.</summary>
+public static class CompletionCheck {
+	const int TailChars = 4000;
+
+	public static async Task<CheckRun> RunAsync(string command, string workingDirectory, TimeSpan timeout, CancellationToken ct) {
+		var psi = new System.Diagnostics.ProcessStartInfo(File.Exists("/bin/bash") ? "/bin/bash" : "/bin/sh") {
+			WorkingDirectory = workingDirectory, UseShellExecute = false,
+			RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true,
+		};
+		psi.ArgumentList.Add("-c");
+		psi.ArgumentList.Add(command);
+		using var p = ChildProcessWatcher.StartExcluded(psi) ?? throw new ToolException("Couldn't start the check.");
+		p.StandardInput.Close();
+		var output = new System.Text.StringBuilder();
+		void Append(string? line) { if(line == null) return; lock(output) { output.Append(line).Append('\n'); if(output.Length > TailChars * 4) output.Remove(0, output.Length - TailChars * 2); } }
+		p.OutputDataReceived += (_, e) => Append(e.Data);
+		p.ErrorDataReceived += (_, e) => Append(e.Data);
+		p.BeginOutputReadLine();
+		p.BeginErrorReadLine();
+		using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+		cts.CancelAfter(timeout);
+		bool finished;
+		try { await p.WaitForExitAsync(cts.Token); finished = true; } catch(OperationCanceledException) { finished = false; }
+		if(!finished) {
+			try { p.Kill(entireProcessTree: true); } catch { }
+			ct.ThrowIfCancellationRequested();
+		} else p.WaitForExit();
+		string text;
+		lock(output) text = output.ToString();
+		if(text.Length > TailChars) text = "…" + text[^TailChars..];
+		var code = finished ? p.ExitCode : (int?) null;
+		return new CheckRun(DateTimeOffset.UtcNow, code == 0, code, text.TrimEnd());
 	}
 }
 

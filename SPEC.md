@@ -151,6 +151,7 @@ Besides messages, two things can wake an agent: an unfinished task and a schedul
 - An agent that goes idle with an open task is nudged awake. To stop on purpose, it marks the task waiting, blocked or done.
 - After three nudges in a row with no task changing state, nudging stops and the agent is flagged in the UI.
 - When a task turns done, waiting or blocked, the agent that assigned it is woken.
+- **Completion contracts.** Whoever assigns a task may attach a check: a bash command run in the owner's working directory (timeout `checkTimeoutSeconds`, 900). Marking the task done runs it; unless it exits 0 the task stays as it was and the agent gets the output. The UI shows each check and its last result. Only the assigner sets the check.
 - An orchestrator with a blocked task tells Sera by sending her a message.
 
 **Schedules**
@@ -208,7 +209,7 @@ Nothing below is built on day 0. The first list may come later; the second is ru
 
 - A loop breaker for messaging (built)
 - Budgets (built)
-- Completion contracts
+- Completion contracts (built)
 - A filter on what agents can do, and any review of agent-written tools
 - Reproducible, notebook-style PowerShell execution
 - Mobile and desktop apps
