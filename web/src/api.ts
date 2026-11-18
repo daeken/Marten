@@ -34,6 +34,16 @@ export interface Project {
   paused: boolean;
 }
 
+export interface Schedule {
+  id: number;
+  command: string;
+  description?: string;
+  everySeconds?: number;
+  nextRun: string;
+  lastRun?: string;
+  lastResult?: string;
+}
+
 export interface TaskItem {
   id: number;
   title: string;
@@ -83,6 +93,7 @@ export type ServerEvent =
   | { type: 'agents' }
   | { type: 'projects' }
   | { type: 'tasks'; agentId: string }
+  | { type: 'schedules'; agentId: string }
   | { type: 'memory'; projectId: string }
   | { type: 'sera_message'; message: SeraMessage }
   | { type: 'config' };
@@ -129,6 +140,8 @@ export class Api {
   setAgentSettings = (id: string, model: string | null, effort: string | null) =>
     this.call<AgentSummary>('PUT', `/agents/${id}/settings`, { model, effort });
   tasks = (id: string) => this.call<TaskItem[]>('GET', `/agents/${id}/tasks`);
+  schedules = (id: string) => this.call<Schedule[]>('GET', `/agents/${id}/schedules`);
+  removeSchedule = (id: string, scheduleId: number) => this.call<void>('DELETE', `/agents/${id}/schedules/${scheduleId}`);
   createProject = (p: { name: string; bindings: string[]; prompt: string | null; worktreesByDefault: boolean; brief: string | null }) =>
     this.call<Project>('POST', '/projects', p);
   memory = (projectId: string) => this.call<ProjectMemory>('GET', `/projects/${projectId}/memory`);

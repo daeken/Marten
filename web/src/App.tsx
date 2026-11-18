@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { AgentSummary, Api, Entry, Project, ProjectMemory, SeraMessage, ServerEvent, Status_, TaskItem, takeToken } from './api';
+import { AgentSummary, Api, Entry, Project, ProjectMemory, Schedule, SeraMessage, ServerEvent, Status_, TaskItem, takeToken } from './api';
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh'];
 
@@ -77,6 +77,7 @@ export function App() {
           setStreaming(s => ({ ...s, [e.agentId]: (s[e.agentId] ?? '') + e.text }));
           break;
         case 'tasks':
+        case 'schedules':
         case 'memory':
           setTick(t => t + 1);
           break;
@@ -234,6 +235,8 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
 }) {
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   useEffect(() => { api.tasks(agent.id).then(setTasks).catch(() => setTasks([])); }, [api, agent.id, tick]);
+  const [schedules, setSchedules] = useState<Schedule[]>([]);
+  useEffect(() => { api.schedules(agent.id).then(setSchedules).catch(() => setSchedules([])); }, [api, agent.id, tick]);
   const parent = agents.find(a => a.id === agent.parentId);
   const [text, setText] = useState('');
   const [mode, setMode] = useState<'queued' | 'immediate'>('queued');
@@ -297,6 +300,17 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
           ))}
         </div>
       )}
+      {schedules.length > 0 && (
+        <div className="tasks schedules">
+          {schedules.map(s => (
+            <span key={s.id} className="task schedule" title={`${s.command}${s.lastResult ? `\n\nLast run: ${s.lastResult}` : ''}`}>
+              <span className="task-state">{s.everySeconds ? `every ${formatEvery(s.everySeconds)}` : 'once'}</span> #{s.id} {s.description ?? s.command.split('\n')[0].slice(0, 60)}
+              <span className="muted"> · next {formatWhen(s.nextRun)}</span>
+              <button className="link small" title="Remove this schedule" onClick={() => api.removeSchedule(agent.id, s.id)}>×</button>
+            </span>
+          ))}
+        </div>
+      )}
       {agent.pausedEffective && !agent.paused && (
         <div className="banner">Paused {project?.paused ? 'with its project' : 'with everything'}. Messages queue until it resumes.</div>
       )}
@@ -337,6 +351,19 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
       </footer>
     </div>
   );
+}
+
+function formatEvery(secs: number) {
+  if (secs % 86400 === 0) return `${secs / 86400}d`;
+  if (secs % 3600 === 0) return `${secs / 3600}h`;
+  if (secs % 60 === 0) return `${secs / 60}m`;
+  return `${secs}s`;
+}
+
+function formatWhen(iso: string) {
+  const d = new Date(iso);
+  const sameDay = d.toDateString() === new Date().toDateString();
+  return sameDay ? d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
 
 function EntryView({ entry: e, result, running }: { entry: Entry; result?: Entry; running: boolean }) {

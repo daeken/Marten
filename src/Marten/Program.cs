@@ -26,7 +26,10 @@ var tools = new ToolRegistry()
 	.Add(new CloseAgentTool(getManager))
 	.Add(new CreateProjectTool(getManager))
 	.Add(new ElideResultsTool())
-	.Add(new SetModelTool(getManager));
+	.Add(new SetModelTool(getManager))
+	.Add(new ScheduleAddTool())
+	.Add(new ScheduleListTool())
+	.Add(new ScheduleRemoveTool());
 var manager = managerRef = new AgentManager(home, config, backend, tools);
 var hub = new EventHub();
 manager.Events += hub.Broadcast;
@@ -118,6 +121,10 @@ api.MapPost("/agents/{id}/interrupt", (string id) => {
 });
 api.MapGet("/agents/{id}/tasks", (string id) =>
 	manager.Get(id) is { } a ? Results.Ok(a.Tasks) : Results.NotFound());
+api.MapGet("/agents/{id}/schedules", (string id) =>
+	manager.Get(id) is { } a ? Results.Ok(a.Schedules.Where(s => !s.Done)) : Results.NotFound());
+api.MapDelete("/agents/{id}/schedules/{scheduleId:int}", (string id, int scheduleId) =>
+	manager.Get(id) is { } a && a.RemoveSchedule(scheduleId) ? Results.Ok() : Results.NotFound());
 api.MapPost("/projects", (CreateProject req) => {
 	try {
 		var (project, orchestrator) = manager.CreateProject(req.Name ?? "", req.Bindings ?? [], req.Prompt, req.WorktreesByDefault ?? false);
@@ -140,6 +147,7 @@ api.Map("/events", async (HttpContext ctx) => {
 });
 
 manager.LoadAll();
+new Scheduler(manager).Start(app.Lifetime.ApplicationStopping);
 Console.WriteLine($"Marten home: {home.Root}");
 Console.WriteLine(webRoot == null
 	? "No built UI found (web/dist). Run `npm run build` in web/, or set MARTEN_WEB_ROOT."
