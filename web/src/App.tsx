@@ -22,7 +22,7 @@ const latestCall = (current: ModelCall, incoming: ModelCall): ModelCall =>
   current && (!incoming || current.id > incoming.id || (current.id === incoming.id && current.endedAt)) ? current : incoming;
 
 const statusLabel: Record<AgentSummary['status'], string> = {
-  idle: 'Idle', running: 'Working', waiting_for_quota: 'Waiting for quota', waiting_for_slot: 'Waiting for slot', paused: 'Paused', error: 'Error',
+  idle: 'Idle', running: 'Working', waiting_for_quota: 'Waiting for quota', waiting_for_network: 'Waiting for network', waiting_for_slot: 'Waiting for slot', paused: 'Paused', error: 'Error',
 };
 
 export function App() {
@@ -107,7 +107,7 @@ export function App() {
           setRunning(r => ({ ...r, [e.agentId]: e.callId }));
           break;
         case 'status':
-          setStatus(s => s && { ...s, agents: s.agents.map(a => a.id === e.agentId ? { ...a, status: e.status, statusDetail: e.detail } : a) });
+          setStatus(s => s && { ...s, agents: s.agents.map(a => a.id === e.agentId ? { ...a, status: e.status, statusDetail: e.detail, retryAt: e.retryAt } : a) });
           break;
         case 'inbox':
           setStatus(s => s && { ...s, agents: s.agents.map(a => a.id === e.agentId ? { ...a, pending: e.pending } : a) });
@@ -369,7 +369,7 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
   const [mode, setMode] = useState<'queued' | 'immediate'>('queued');
   const [showNotebook, setShowNotebook] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
-  const busy = agent.status === 'running' || agent.status === 'waiting_for_quota' || agent.status === 'waiting_for_slot';
+  const busy = agent.status === 'running' || agent.status === 'waiting_for_quota' || agent.status === 'waiting_for_network' || agent.status === 'waiting_for_slot';
 
   const openedTranscript = useRef<string>();
   const followLatest = useRef(true);
@@ -443,7 +443,7 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
             <button className="small" onClick={() => api.pauseAgent(agent.id, !agent.paused).then(onChange)}
               title={agent.paused ? 'Resume this agent' : 'Hold this agent before its next model call'}>{agent.paused ? '▶ Resume' : '⏸ Pause'}</button>
           </div>
-          <div className={`state ${agent.status}`}>{statusLabel[agent.status]}{agent.statusDetail ? ` · ${agent.statusDetail}` : ''}</div>
+          <div className={`state ${agent.status}`}>{statusLabel[agent.status]}{agent.statusDetail ? ` · ${agent.statusDetail}` : ''}{agent.retryAt && ` · Next retry at ${new Date(agent.retryAt).toLocaleTimeString()}`}</div>
           {agent.modelCall && <div className="small muted">
             {agent.modelCall.kind === 'compaction' ? 'Context compaction' : 'Model reply'} · {agent.modelCall.model} · started {new Date(agent.modelCall.startedAt).toLocaleTimeString()}
             {agent.modelCall.endedAt ? ` · ${agent.modelCall.outcome} at ${new Date(agent.modelCall.endedAt).toLocaleTimeString()}` : ' · in flight'}
@@ -506,6 +506,7 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
         {agent.modelCall && !agent.modelCall.endedAt && !streaming && !runningCall &&
           <Thinking label={agent.modelCall.kind === 'compaction' ? 'Compacting context' : 'Thinking'} />}
         {agent.status === 'waiting_for_quota' && <Thinking label="Waiting for quota" />}
+        {agent.status === 'waiting_for_network' && <Thinking label="Waiting for network" />}
         {agent.status === 'waiting_for_slot' && <Thinking label="Waiting for slot" />}
         {agentQuestions.filter(q => !q.answer).map(card)}
       </div>

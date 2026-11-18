@@ -1,5 +1,5 @@
 export type Kind = 'chat' | 'orchestrator' | 'task';
-export type Status = 'idle' | 'running' | 'waiting_for_quota' | 'waiting_for_slot' | 'paused' | 'error';
+export type Status = 'idle' | 'running' | 'waiting_for_quota' | 'waiting_for_network' | 'waiting_for_slot' | 'paused' | 'error';
 
 export interface ModelCallStatus {
   id: number;
@@ -20,6 +20,7 @@ export interface AgentSummary {
   effort?: string;
   status: Status;
   statusDetail?: string;
+  retryAt?: string | null;
   modelCall?: ModelCallStatus | null;
   pending: number;
   abandonedRunspaces: { at: string; command: string }[];
@@ -159,7 +160,7 @@ export interface Status_ {
 export type ServerEvent =
   | { type: 'entry'; agentId: string; entry: Entry }
   | { type: 'delta'; agentId: string; text: string }
-  | { type: 'status'; agentId: string; status: Status; detail?: string }
+  | { type: 'status'; agentId: string; status: Status; detail?: string; retryAt?: string | null }
   | { type: 'model_call_start' | 'model_call_end'; agentId: string; modelCall: ModelCallStatus }
   | { type: 'inbox'; agentId: string; pending: number }
   | { type: 'tool_start'; agentId: string; callId: string; name: string }

@@ -30,7 +30,10 @@ public sealed class RateLimitedException(string message, TimeSpan? retryAfter = 
 	public TimeSpan? RetryAfter { get; } = retryAfter;
 }
 
-/// <summary>A failure worth retrying after a short backoff: network errors, 5xx, a stream cut off mid-response.</summary>
+/// <summary>DNS or connection establishment failed before the HTTP response. Uses the long recovery policy.</summary>
+public sealed class ProviderUnreachableException(string message, Exception? inner = null) : Exception(message, inner);
+
+/// <summary>A failure worth retrying after a short backoff: response timeouts, 5xx, a stream cut off mid-response.</summary>
 public sealed class TransientModelException(string message, Exception? inner = null) : Exception(message, inner);
 
 public sealed class ContextFullException() : Exception("The model context window is full.");

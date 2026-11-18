@@ -493,7 +493,11 @@ public sealed partial class Agent : IPowerShellOwner {
 			ct.ThrowIfCancellationRequested();
 			try {
 				await slots.EnsureAgent(ct);
-				var model = Info.Model ?? await manager.DefaultModel(ct);
+				var model = Info.Model ?? await RecoverNetwork(slots, async (recovery, token) => {
+					await slots.EnsureAgent(token);
+					recovery?.CheckDeadline(token);
+					return await manager.DefaultModel(token);
+				}, ct);
 				if(forceCompaction) {
 					await Compact(model, slots, ct);
 					forceCompaction = false;
