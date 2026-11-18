@@ -1,6 +1,6 @@
 # Marten v0 spec
 
-Last updated 2026-11-17.
+Last updated 2026-11-18.
 
 ## Stance
 
@@ -9,16 +9,17 @@ Marten is a small agent runtime that replaces all of Sera's agentic coding. It i
 - **Wide open on day 0.** Agents are trusted. No approvals, no sandbox, no review of agent-written tools. A filter can come later.
 - **Not reproducible, on purpose.** Agents may mutate process state. Reproducibility is a non-goal for now.
 - **Restart to change the core.** New C# tools are compiled in. There is no C# hot reloading. A restart resumes agents where they were.
+- **What a turn is.** For steering, a turn is one model call: immediate messages land between model calls, at a tool boundary. Everywhere else, a turn runs from a wake until the agent goes idle. A tool call that was running when Marten stopped is reported to the agent as interrupted on restart, and is never re-run.
 
 ## Shape and storage
 
-Marten is a C# monolith with a separate web frontend, and all of its state lives in one git repo.
+Marten is a C# monolith with a separate web frontend, and all of its state lives in `~/.marten`.
 
 - **Backend:** a single C# process.
-- **Exposure:** the backend listens on localhost only.
+- **Exposure:** the backend listens on localhost only. Every request carries a random token, and the Host and Origin headers are checked, so a web page Sera visits cannot drive an agent. The backend serves the built frontend, so the UI is same-origin.
+- **Platforms:** macOS first, Linux a close second. Windows is not a target.
 - **Frontend:** a simple, clean React web app, separate from the backend. Mobile and desktop apps come later.
-- **Storage:** everything lives in `~/.marten`, which is always a git repo. Config changes are committed at once. Transcripts and state are committed at the end of each turn.
-- **Git tracks everything.** Transcripts, agent state, screenshots and full tool output are tracked along with config, prompts and tools, so the repo can be pushed somewhere private and kept intact. Secrets are tracked too, so cloning the repo on another machine is a full migration. Marten commits but never pushes. Sera pushes by hand and chooses where, with care.
+- **Storage:** everything lives in `~/.marten`: config, secrets, prompts, tools, transcripts, agent state, screenshots and full tool output. It is plain files, not a git repo; durability comes later, in another way (see Deferred).
 - **Extending it:** tools written in PowerShell at runtime, or tools written in C# and built into the runtime.
 
 ## Agents and projects
@@ -42,11 +43,11 @@ Marten is project-centric: each project has one orchestrator, which spins up tas
 Each project has one shared memory that every agent in it reads, and it survives every compaction. It holds what an agent would otherwise have to ask Sera again.
 
 - **One file.** The memory is `MEMORY.md` in the project's place in `~/.marten`. It is a Markdown list, and each entry is one line.
-- **Always in context.** The memory is injected after the project prompt in every agent's system prompt. Compaction and elision never touch it.
+- **Always in context.** The memory is injected after the project prompt in every agent's system prompt when the agent is spawned and each time it is compacted. Compaction and elision never touch it.
 - **A size cap.** The cap is set in config, around 16 KB. An edit that would go past it fails loudly, so an agent has to prune before it can add. Without a cap, memory turns into a second transcript.
 - **Edited with the atomic file editor.** Agents use the same anchored edits as on any file, so two agents can't overwrite each other. The edit fails if memory changed since the agent last saw it, and the agent re-reads and tries again. There is no whole-file replace.
-- **Fresh at each turn.** An edit becomes visible to other agents at the start of their next turn, not mid-turn. This keeps prompt caching intact.
-- **Committed at once.** Each edit is its own commit, made by the agent that edited it, with the agent's id and reason in the message. `git log -p MEMORY.md` is the audit trail.
+- **Fresh at each turn.** An edit becomes visible to other agents at the start of their next turn, not mid-turn. It arrives as a short note at the end of the context listing the lines added and removed, not as a change to the system prompt, so the cached prefix stays intact. The next compaction folds the current memory back into the system prompt. Agent notes and tool list changes work the same way.
+- **Audited.** Each edit is recorded with the agent's id, its reason and the lines changed, so the UI can show who changed each line.
 
 ### Entry shape
 
@@ -88,7 +89,7 @@ PowerShell is embedded in-process and is the default way agents act on the world
 
 - **In-process on purpose.** It lets agents introspect the core. The trust this requires is accepted.
 - **A `$Marten` object in every runspace.** It exposes the project, the agent roster and the message bus, for introspection and scripting. Messaging, elision, model changes and spawning are direct tools, and scripts can reach them through it.
-- **One-off commands.** Each command runs on its own. No PowerShell state carries from one run to the next.
+- **One-off commands.** Each command runs in a fresh runspace. No PowerShell variables carry from one run to the next. Process-wide state, such as environment variables and loaded assemblies, is shared by every agent and the core; that is accepted for now.
 - **One command at a time.** PowerShell commands for one agent never overlap, so the state variable has one writer. A scheduled command runs as its owner and waits its turn.
 - **One state variable per agent.** A single named global is serialized to JSON and stored with the agent's state. It may hold only JSON-serializable types; anything else is a loud error.
 - **Timeouts.** Every command has a timeout, set in config and overridable per call. On timeout the runtime stops the pipeline and kills any child process the command started.
@@ -144,11 +145,13 @@ Besides messages, two things can wake an agent: an unfinished task and a schedul
 
 - Each agent has a task list that lives outside its context, so it survives compaction.
 - An orchestrator can add tasks to its task agents' lists.
-- A task is open, blocked or done. Blocked carries a reason.
-- An agent that goes idle with an open task is nudged awake. To stop on purpose, it marks the task blocked or done.
+- A task is open, waiting, blocked or done. Waiting and blocked carry a reason.
+  - **Waiting** is on another agent or a schedule. It is not nudged and does not reach Sera.
+  - **Blocked** is on Sera.
+- An agent that goes idle with an open task is nudged awake. To stop on purpose, it marks the task waiting, blocked or done.
 - After three nudges in a row with no task changing state, nudging stops and the agent is flagged in the UI.
-- When a task turns done or blocked, the agent that assigned it is woken.
-- A blocked orchestrator tells Sera by sending her a message.
+- When a task turns done, waiting or blocked, the agent that assigned it is woken.
+- An orchestrator with a blocked task tells Sera by sending her a message.
 
 **Schedules**
 
@@ -210,7 +213,7 @@ Nothing below is built on day 0. The first list may come later; the second is ru
 - Reproducible, notebook-style PowerShell execution
 - Mobile and desktop apps
 - Limited tool schemas, with tool search for the rest
-- Encrypted backups, as the durable alternative to relying on the git repo
+- Durable, versioned storage for `~/.marten`, such as encrypted backups or a git history
 
 **Non-goals**
 
