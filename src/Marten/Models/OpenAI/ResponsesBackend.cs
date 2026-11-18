@@ -27,7 +27,9 @@ public sealed class ResponsesBackend(ChatGptAuth auth, HttpClient http) : IModel
 			try {
 				response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
 			} catch(HttpRequestException e) {
-				throw new TransientModelException("Could not reach OpenAI.", e);
+				ct.ThrowIfCancellationRequested();
+				throw ModelHttp.IsConnectFailure(e) ? new ProviderUnreachableException("Could not reach OpenAI.", e)
+					: new TransientModelException("OpenAI request failed before receiving response headers.", e);
 			}
 			if(response.StatusCode == HttpStatusCode.Unauthorized && attempt == 0) {
 				response.Dispose();

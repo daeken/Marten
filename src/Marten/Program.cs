@@ -102,12 +102,15 @@ if(webRoot != null) {
 	});
 }
 
-object AgentSummary(Agent a) => new {
-	a.Info.Id, a.Info.Kind, a.Info.Name, a.Info.Created, a.Info.WorkingDirectory, a.Info.Model, a.Info.Effort,
-	a.Status, a.StatusDetail, a.ModelCall, Pending = a.PendingCount, a.AbandonedRunspaces,
-	a.Info.ProjectId, a.Info.ParentId, a.Info.Closed, a.Info.Worktree, a.NudgesStopped, a.Info.Paused, PausedEffective = a.IsPaused,
-	OpenTasks = a.Tasks.Count(t => t.State != TaskState.Done),
-};
+object AgentSummary(Agent a) {
+	var (status, statusDetail, retryAt) = a.CurrentStatus;
+	return new {
+		a.Info.Id, a.Info.Kind, a.Info.Name, a.Info.Created, a.Info.WorkingDirectory, a.Info.Model, a.Info.Effort,
+		status, statusDetail, retryAt, a.ModelCall, Pending = a.PendingCount, a.AbandonedRunspaces,
+		a.Info.ProjectId, a.Info.ParentId, a.Info.Closed, a.Info.Worktree, a.NudgesStopped, a.Info.Paused, PausedEffective = a.IsPaused,
+		OpenTasks = a.Tasks.Count(t => t.State != TaskState.Done),
+	};
+}
 
 object BackendSummary(MessagesBackend b) => new {
 	b.Provider, b.Settings.Label, b.Connected, b.KeySource, b.Settings.EnvVar,
@@ -184,10 +187,13 @@ api.MapDelete("/clients/{name}", (string name) => manager.Outside.Remove(name) ?
 var ext = api.MapGroup("/ext");
 string? ClientOf(HttpContext ctx) => ctx.Items["client"] as string;
 IResult NeedsClient() => Results.Problem("Use an outside client's token (secrets/clients/NAME.token) for /api/ext.", statusCode: 403);
-object ExtAgent(Agent a) => new {
-	a.Info.Id, a.Info.Name, a.Info.Kind, a.Info.ProjectId, a.Status, a.StatusDetail, a.ModelCall, Pending = a.PendingCount,
-	a.Info.Closed, Paused = a.IsPaused, OpenTasks = a.Tasks.Count(t => t.State != TaskState.Done),
-};
+object ExtAgent(Agent a) {
+	var (status, statusDetail, retryAt) = a.CurrentStatus;
+	return new {
+		a.Info.Id, a.Info.Name, a.Info.Kind, a.Info.ProjectId, status, statusDetail, retryAt, a.ModelCall, Pending = a.PendingCount,
+		a.Info.Closed, Paused = a.IsPaused, OpenTasks = a.Tasks.Count(t => t.State != TaskState.Done),
+	};
+}
 ext.MapGet("/whoami", (HttpContext ctx) => ClientOf(ctx) is { } c ? Results.Ok(new { client = c, replyAs = Outside.Prefix + c }) : NeedsClient());
 ext.MapGet("/status", (HttpContext ctx) => ClientOf(ctx) is null ? NeedsClient() : Results.Ok(new {
 	projects = manager.Projects.Select(p => new { p.Info.Id, p.Info.Name, p.Info.Bindings, p.Info.OrchestratorId, p.Info.Paused }),
@@ -244,7 +250,7 @@ api.MapGet("/models", async (CancellationToken ct) => {
 		return Results.Ok(await backend.ListModelsAsync(linked.Token));
 	} catch(OperationCanceledException) when(restart.IsStopping) {
 		return Results.StatusCode(503);
-	} catch(Exception e) when(e is NotConnectedException or InvalidOperationException or TransientModelException or RateLimitedException) {
+	} catch(Exception e) when(e is NotConnectedException or InvalidOperationException or TransientModelException or ProviderUnreachableException or RateLimitedException) {
 		return Results.Problem(e.Message, statusCode: 502);
 	}
 });

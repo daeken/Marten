@@ -4,21 +4,21 @@ namespace Marten.Agents;
 
 public sealed partial class Agent {
 	readonly object statusGate = new();
-	(AgentStatus Status, string? Detail) turnStatus = (AgentStatus.Idle, null);
+	(AgentStatus Status, string? Detail, DateTimeOffset? RetryAt) turnStatus = (AgentStatus.Idle, null, null);
 	string? commandSlotWait;
 
 	// A scheduled command or notebook replay may wait even when the agent has no turn.
-	(AgentStatus Status, string? Detail) CurrentStatus {
+	internal (AgentStatus Status, string? Detail, DateTimeOffset? RetryAt) CurrentStatus {
 		get {
-			lock(statusGate) return commandSlotWait == null ? turnStatus : (AgentStatus.WaitingForSlot, commandSlotWait);
+			lock(statusGate) return commandSlotWait == null || turnStatus.Status == AgentStatus.WaitingForNetwork ? turnStatus : (AgentStatus.WaitingForSlot, commandSlotWait, null);
 		}
 	}
 
 	AgentStatus TurnStatus { get { lock(statusGate) return turnStatus.Status; } }
 
-	void SetStatus(AgentStatus status, string? detail = null) {
+	void SetStatus(AgentStatus status, string? detail = null, DateTimeOffset? retryAt = null) {
 		lock(statusGate) {
-			turnStatus = (status, detail);
+			turnStatus = (status, detail, retryAt);
 			PublishStatus();
 		}
 	}
@@ -31,8 +31,8 @@ public sealed partial class Agent {
 	}
 
 	void PublishStatus() {
-		var (status, detail) = CurrentStatus;
-		manager.Publish(new { type = "status", agentId = Info.Id, status, detail });
+		var (status, detail, retryAt) = CurrentStatus;
+		manager.Publish(new { type = "status", agentId = Info.Id, status, detail, retryAt });
 	}
 
 	/// <summary>One turn can hold an agent slot and briefly a model slot, always in that order.
@@ -65,21 +65,30 @@ public sealed partial class Agent {
 			agent.SetStatus(AgentStatus.Running);
 		}
 
-		public async Task<ModelResult> Complete(ModelRequest request, ModelCallKind kind, Action<string> onDelta, string? detail, CancellationToken ct) {
+		public Task<ModelResult> Complete(ModelRequest request, ModelCallKind kind, Action<string> onDelta, string? detail, CancellationToken ct) =>
+			agent.RecoverNetwork(this, (recovery, token) => CompleteOnce(request, kind, onDelta, detail, recovery, token), ct);
+
+		async Task<ModelResult> CompleteOnce(ModelRequest request, ModelCallKind kind, Action<string> onDelta, string? detail, NetworkRetry? recovery, CancellationToken ct) {
 			while(true) {
 				await EnsureAgent(ct);
-				using var model = await AcquireUntilPaused(pools.Models, "Concurrent model call limit", ct);
-				if(model == null) {
-					ReleaseAgent();
-					continue;
+				TimeSpan wait;
+				using(var model = await AcquireUntilPaused(pools.Models, "Concurrent model call limit", ct)) {
+					if(model == null) {
+						ReleaseAgent();
+						continue;
+					}
+					lock(agent.gate) {
+						ThrowIfStopped(ct);
+						agent.manager.Restart.ThrowIfStopping();
+						if(agent.IsPaused) continue;
+						recovery?.CheckDeadline(ct);
+						wait = recovery == null ? TimeSpan.Zero : agent.manager.NetworkPacer.Admit();
+						if(wait == TimeSpan.Zero) agent.SetStatus(AgentStatus.Running, detail);
+					}
+					if(wait == TimeSpan.Zero) return await agent.CompleteModel(request, kind, onDelta, ct, turnToken);
 				}
-				lock(agent.gate) {
-					ThrowIfStopped(ct);
-					agent.manager.Restart.ThrowIfStopping();
-					if(agent.IsPaused) continue;
-					agent.SetStatus(AgentStatus.Running, detail);
-				}
-				return await agent.CompleteModel(request, kind, onDelta, ct, turnToken);
+				// Do not sleep with either lease, and check pacing again at actual dispatch.
+				await recovery!.Wait(this, wait + TimeSpan.FromSeconds(agent.manager.NetworkJitter()), ct);
 			}
 		}
 

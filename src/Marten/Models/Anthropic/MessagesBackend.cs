@@ -123,6 +123,10 @@ public sealed class MessagesBackend(MessagesProvider provider, Home home, Func<s
 	}
 
 	Exception Map(Exception e) {
+		// The SDK can wrap handler failures, but only the transport has enough phase
+		// information to mark the error as occurring before any response arrived.
+		for(Exception? cause = e; cause != null; cause = cause.InnerException)
+			if(cause is ProviderUnreachableException) return cause;
 		var message = e.Message ?? "";
 		return e switch {
 			NotConnectedException => e,

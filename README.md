@@ -47,6 +47,10 @@ Omit either `max…` setting or set it to `0` for no limit. Turns yield their ag
 
 Named slots are opt-in and shared by all agents. In a PowerShell command, run `$Marten.WithSlot('build', { dotnet build })`; `$Marten.Slots` lists the configured names. A slot must have positive capacity. The wait counts toward the command timeout. Wrap only foreground work, and don't nest slots or wait for another agent while holding one.
 
+## Provider network recovery
+
+If DNS or connection establishment fails, the agent shows **Waiting for network** with the reason and next retry time. The turn releases its slots while waiting and retries the failed model operation without rerunning tools. Retries use jittered exponential backoff (up to five minutes) and are staggered across agents. A continuous outage can wait up to 45 minutes before the turn reports an error to its parent. Pause holds dispatch; Stop, Close, and shutdown cancel the wait. Header/stream timeouts, server errors, and quota still have their separate retry policies.
+
 ## Pausing and closing agents
 
 **Pause** holds the turn at its next model or tool dispatch. A model reply or compaction that finishes while paused is held off the transcript until resume, without keeping either slot; streamed text is suppressed while paused. A tool that already started can finish and its result is kept. The rest of the batch continues when the agent, project, and global pauses have all cleared.

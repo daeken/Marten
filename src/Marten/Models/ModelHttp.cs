@@ -7,6 +7,27 @@ internal static class ModelHttp {
 	internal const int DefaultIdleTimeoutSeconds = 300;
 	internal static readonly HttpClient DefaultClient = CreateClient();
 
+	// .NET distinguishes opening the connection from protocol/response failures. Do not
+	// promote TLS, proxy, generic I/O, missing headers or truncated responses to an outage.
+	internal static bool IsConnectFailure(HttpRequestException e) => e.StatusCode == null &&
+		e.HttpRequestError is HttpRequestError.NameResolutionError or HttpRequestError.ConnectionError;
+
+	// Mark failures at SendAsync (before response content can be read), so SDK wrappers
+	// cannot make a body/stream failure look like a connection failure.
+	internal sealed class ConnectionHandler(HttpMessageHandler transport, string provider) : DelegatingHandler(transport) {
+		protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) {
+			try {
+				return await base.SendAsync(request, ct);
+			} catch(HttpRequestException e) when(IsConnectFailure(e)) {
+				ct.ThrowIfCancellationRequested();
+				throw new ProviderUnreachableException($"Could not reach {provider}.", e);
+			} catch(OperationCanceledException e) when(!ct.IsCancellationRequested && e.InnerException is TimeoutException) {
+				// SocketsHttpHandler's own connect deadline, not the outer headers/total deadline.
+				throw new ProviderUnreachableException($"Timed out connecting to {provider}.", e);
+			}
+		}
+	}
+
 	internal static HttpClient CreateClient(Func<int>? idleTimeoutSeconds = null) => CreateClient(
 		new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(30) },
 		TimeSpan.FromSeconds(120),
@@ -17,7 +38,7 @@ internal static class ModelHttp {
 		});
 
 	internal static HttpClient CreateClient(HttpMessageHandler transport, TimeSpan headersTimeout, Func<TimeSpan> idleTimeout) =>
-		new(new DeadlineHandler(transport, headersTimeout, idleTimeout)) { Timeout = Timeout.InfiniteTimeSpan };
+		new(new DeadlineHandler(new ConnectionHandler(transport, "the model provider"), headersTimeout, idleTimeout)) { Timeout = Timeout.InfiniteTimeSpan };
 
 	sealed class DeadlineHandler(HttpMessageHandler transport, TimeSpan headersTimeout, Func<TimeSpan> idleTimeout) : DelegatingHandler(transport) {
 		protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) {
@@ -29,10 +50,7 @@ internal static class ModelHttp {
 				response = await base.SendAsync(request, deadline.Token);
 			} catch(OperationCanceledException e) {
 				ct.ThrowIfCancellationRequested();
-				// SocketsHttpHandler also reports its own connect deadline as cancellation.
-				throw new TransientModelException(deadline.IsCancellationRequested
-					? "Timed out waiting for model response headers."
-					: "Timed out connecting to the model provider.", e);
+				throw new TransientModelException("Timed out waiting for model response headers.", e);
 			}
 			response.Content = new IdleContent(response.Content, idle);
 			return response;
