@@ -179,6 +179,8 @@ Four model backends are supported, and model choice is a setting rather than som
 - **Who sets model and effort.** An agent can change its own when asked. An orchestrator can change them for its task agents.
 - **Defaults and exceptions** live in config and belong to Sera. Agents do not weigh cost or context windows.
 - **Rate limits.** When a backend refuses a request or a subscription quota runs out, the agent waits and retries. It does not fail or switch models. This is a default Sera can adjust.
+- **Failed turns.** A terminal error, including a missing model or exhaustion of the five transient retries, ends the turn without nudging or changing tasks. Marten queues one notice each to the parent and to distinct other agent assigners of unfinished tasks, waking them if idle. Quota waits and an explicit interrupt are not terminal errors. A model setting is not rejected based on an advisory provider catalog.
+- **Model calls.** Per agent, the runtime exposes the latest completion attempt, including retries and context compaction: model, kind, start time, end time, and outcome (`succeeded`, `failed`, or `cancelled`). An attempt is in flight when it has no end time. Time spent waiting for quota or backoff is not in flight. This status is process-local, not transcript history.
 - **MCP is stdio only.** No OAuth and no external services.
 - **MCP is lazy, per agent.** A server is started once to read and cache its schema. It is launched for real only when an agent first calls one of its tools.
 

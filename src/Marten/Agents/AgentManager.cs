@@ -31,6 +31,7 @@ public sealed class AgentManager {
 	public Home Home { get; }
 	public Config Config { get; private set; }
 	public IModelBackend Backend { get; }
+	internal Func<TimeSpan, CancellationToken, Task> ModelRetryDelay { get; init; } = Task.Delay;
 	public ToolRegistry Tools { get; }
 	/// <summary>Starts agents' background processes; Program shares the PowerShell tool's child watcher with it.</summary>
 	public ProcessLauncher Launcher { get; init; } = new();

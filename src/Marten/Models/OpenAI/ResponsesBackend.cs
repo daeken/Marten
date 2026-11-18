@@ -13,6 +13,8 @@ public sealed class ResponsesBackend(ChatGptAuth auth, HttpClient http) : IModel
 	public const string ToolNamespace = "marten";
 	static readonly HashSet<string> ContextCodes = ["context_length_exceeded", "context_window_exceeded", "too_many_tokens"];
 	static readonly HashSet<string> QuotaCodes = ["subscription_sharing_usage_limit_exceeded", "subscription_sharing_usage_unavailable", "rate_limit_exceeded", "usage_limit_reached"];
+	const string ModelNotFoundCode = "model_not_found";
+	static InvalidOperationException ModelNotFound() => new("The selected model is unavailable or not accessible (model_not_found). Check the agent's model settings.");
 
 	public string Provider => ProviderName;
 	public bool Connected => auth.Connected;
@@ -42,7 +44,8 @@ public sealed class ResponsesBackend(ChatGptAuth auth, HttpClient http) : IModel
 		try {
 			var body = JsonNode.Parse(await response.Content.ReadAsStringAsync(ct));
 			code = body?["error"]?["code"]?.GetValue<string>() ?? body?["error"]?["type"]?.GetValue<string>();
-		} catch { }
+		} catch when(!ct.IsCancellationRequested) { }
+		if(code == ModelNotFoundCode) return ModelNotFound();
 		if(status == 413 || (code != null && ContextCodes.Contains(code))) return new ContextFullException();
 		if(status == 429 || (code != null && QuotaCodes.Contains(code)))
 			return new RateLimitedException($"ChatGPT usage limit reached ({code ?? "429"}).", response.Headers.RetryAfter?.Delta);
@@ -201,6 +204,7 @@ public sealed class ResponsesBackend(ChatGptAuth auth, HttpClient http) : IModel
 				case "error":
 					var code = ev["response"]?["error"]?["code"]?.GetValue<string>() ?? ev["error"]?["code"]?.GetValue<string>()
 						?? ev["code"]?.GetValue<string>() ?? ev["response"]?["incomplete_details"]?["reason"]?.GetValue<string>();
+					if(code == ModelNotFoundCode) throw ModelNotFound();
 					if(code != null && ContextCodes.Contains(code)) throw new ContextFullException();
 					if(code != null && QuotaCodes.Contains(code)) throw new RateLimitedException($"ChatGPT usage limit reached ({code}).");
 					throw new TransientModelException($"The model response {(ev["type"]!.GetValue<string>() == "response.incomplete" ? "was incomplete" : "failed")}{(code != null ? $" ({code})" : "")}.");
