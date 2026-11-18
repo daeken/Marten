@@ -18,7 +18,8 @@ if(args is ["backup", ..]) {
 	return;
 }
 if(args is ["client", "add" or "rotate", var clientName, ..]) {
-	var m = new AgentManager(home, config, new BackendRouter(new ResponsesBackend(new ChatGptAuth(home, new HttpClient()), new HttpClient()), [], null), new ToolRegistry());
+	using var cliAuthHttp = ChatGptAuth.CreateHttpClient();
+	var m = new AgentManager(home, config, new BackendRouter(new ResponsesBackend(new ChatGptAuth(home, cliAuthHttp), ModelHttp.DefaultClient), [], null), new ToolRegistry());
 	var c = m.Outside.Register(clientName, rotate: args[1] == "rotate");
 	Console.WriteLine($"Client {c.Name}: token in {m.Outside.TokenPath(c.Name)}");
 	return;
@@ -31,21 +32,23 @@ if(args is ["restore", var archive, ..]) {
 	Console.WriteLine($"Restored into {Path.GetFullPath(target)}. Run Marten on it with MARTEN_HOME={Path.GetFullPath(target)}, or move it to {home.Root} while Marten is stopped.");
 	return;
 }
-var http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
-http.DefaultRequestHeaders.UserAgent.ParseAdd("Marten/0.1");
-var auth = new ChatGptAuth(home, http);
+using var authHttp = ChatGptAuth.CreateHttpClient();
+var auth = new ChatGptAuth(home, authHttp);
+using var modelHttp = ModelHttp.CreateClient(() => (managerRef?.Config ?? config).ModelIdleTimeoutSeconds);
+modelHttp.DefaultRequestHeaders.UserAgent.ParseAdd("Marten/0.1");
 var messagesBackends = MessagesProvider.All.Select(p => new MessagesBackend(p, home,
-	name => managerRef?.Config.Models.GetValueOrDefault(name) ?? [])).ToList();
+	name => managerRef?.Config.Models.GetValueOrDefault(name) ?? [], modelHttp)).ToList();
 var ledger = new UsageLedger(home, () => managerRef?.Config ?? config);
-var backend = new BackendRouter(new ResponsesBackend(auth, http), messagesBackends.Select(b => ((IModelBackend) b, b.Settings.Prefixes)).ToList(), ledger);
+var backend = new BackendRouter(new ResponsesBackend(auth, modelHttp), messagesBackends.Select(b => ((IModelBackend) b, b.Settings.Prefixes)).ToList(), ledger);
 Func<AgentManager> getManager = () => managerRef!;
 var childWatcher = new ChildProcessWatcher();
+var restart = new RestartDrain();
 var scriptTools = new ScriptToolSource(getManager);
 var mcp = new Marten.Mcp.McpHub(getManager);
 var tools = new ToolRegistry()
 	.Add(new ReadFileTool())
 	.Add(new EditFileTool(new MemoryGuard(getManager)))
-	.Add(new PowerShellTool(() => managerRef!.Config.CommandTimeoutSeconds, () => managerRef!.Config.StopGraceSeconds, childWatcher))
+	.Add(new PowerShellTool(() => managerRef!.Config.CommandTimeoutSeconds, () => managerRef!.Config.StopGraceSeconds, childWatcher, restart.Stopping))
 	.Add(new SendMessageTool(getManager))
 	.Add(new TaskAddTool(getManager))
 	.Add(new TaskUpdateTool(getManager))
@@ -67,7 +70,7 @@ var tools = new ToolRegistry()
 	.Add(new RemoveToolTool(getManager, scriptTools))
 	.AddSource(scriptTools)
 	.AddSource(mcp);
-var manager = managerRef = new AgentManager(home, config, backend, tools) { Launcher = new ProcessLauncher(), Mcp = mcp };
+var manager = managerRef = new AgentManager(home, config, backend, tools) { Launcher = new ProcessLauncher(), Mcp = mcp, Restart = restart };
 var hub = new EventHub();
 manager.Events += hub.Broadcast;
 var security = new Security(home, config) { ClientAuth = manager.Outside.Authenticate };
@@ -101,7 +104,7 @@ if(webRoot != null) {
 
 object AgentSummary(Agent a) => new {
 	a.Info.Id, a.Info.Kind, a.Info.Name, a.Info.Created, a.Info.WorkingDirectory, a.Info.Model, a.Info.Effort,
-	a.Status, a.StatusDetail, Pending = a.PendingCount, a.AbandonedRunspaces,
+	a.Status, a.StatusDetail, a.ModelCall, Pending = a.PendingCount, a.AbandonedRunspaces,
 	a.Info.ProjectId, a.Info.ParentId, a.Info.Closed, a.Info.Worktree, a.NudgesStopped, a.Info.Paused, PausedEffective = a.IsPaused,
 	OpenTasks = a.Tasks.Count(t => t.State != TaskState.Done),
 };
@@ -182,7 +185,7 @@ var ext = api.MapGroup("/ext");
 string? ClientOf(HttpContext ctx) => ctx.Items["client"] as string;
 IResult NeedsClient() => Results.Problem("Use an outside client's token (secrets/clients/NAME.token) for /api/ext.", statusCode: 403);
 object ExtAgent(Agent a) => new {
-	a.Info.Id, a.Info.Name, a.Info.Kind, a.Info.ProjectId, a.Status, a.StatusDetail, Pending = a.PendingCount,
+	a.Info.Id, a.Info.Name, a.Info.Kind, a.Info.ProjectId, a.Status, a.StatusDetail, a.ModelCall, Pending = a.PendingCount,
 	a.Info.Closed, Paused = a.IsPaused, OpenTasks = a.Tasks.Count(t => t.State != TaskState.Done),
 };
 ext.MapGet("/whoami", (HttpContext ctx) => ClientOf(ctx) is { } c ? Results.Ok(new { client = c, replyAs = Outside.Prefix + c }) : NeedsClient());
@@ -235,7 +238,12 @@ ext.MapGet("/agents/{id}/tasks", (HttpContext ctx, string id) =>
 api.MapGet("/usage", (int? days) => ledger.Recent(Math.Clamp(days ?? 7, 1, 90)));
 api.MapGet("/models", async (CancellationToken ct) => {
 	try {
-		return Results.Ok(await backend.ListModelsAsync(ct));
+		using var operation = restart.Enter();
+		if(operation == null) return Results.StatusCode(503);
+		using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, restart.Stopping);
+		return Results.Ok(await backend.ListModelsAsync(linked.Token));
+	} catch(OperationCanceledException) when(restart.IsStopping) {
+		return Results.StatusCode(503);
 	} catch(Exception e) when(e is NotConnectedException or InvalidOperationException or TransientModelException or RateLimitedException) {
 		return Results.Problem(e.Message, statusCode: 502);
 	}
@@ -273,6 +281,8 @@ api.MapPost("/agents/{id}/notebook/{n:int}/rerun", async (string id, int n, Canc
 		return Results.Ok(new { run, sameOutput, sameState });
 	} catch(KeyNotFoundException) {
 		return Results.NotFound();
+	} catch(OperationCanceledException) when(restart.IsStopping) {
+		return Results.StatusCode(503);
 	}
 });
 api.MapGet("/agents/{id}/notebook.ipynb", (string id) =>
@@ -341,7 +351,7 @@ api.MapGet("/mcp", () => {
 api.MapPost("/mcp/refresh", async () => {
 	var fresh = Config.Load(home);
 	manager.UpdateConfig(c => c with { Mcp = fresh.Mcp });
-	await mcp.RefreshAsync(true, CancellationToken.None);
+	await RefreshMcp(true);
 	return Results.Ok();
 });
 api.MapPost("/projects", (CreateProject req) => {
@@ -376,17 +386,32 @@ api.Map("/events", async (HttpContext ctx) => {
 	await hub.Serve(socket, ctx.RequestAborted);
 });
 
+async Task RefreshMcp(bool force) {
+	using var operation = restart.Enter();
+	if(operation == null) return;
+	try { await mcp.RefreshAsync(force, restart.CancelTools); }
+	catch(OperationCanceledException) when(restart.IsStopping) { }
+}
+
+var drain = new Lazy<Task>(async () => {
+	var grace = TimeSpan.FromSeconds(Math.Max(0, manager.Config.StopGraceSeconds));
+	try { await restart.DrainAsync(grace, grace + TimeSpan.FromSeconds(2), childWatcher.CleanForeground); }
+	catch(Exception e) { Console.Error.WriteLine($"Restart drain: {e.Message}"); }
+	try { await mcp.StopAll().WaitAsync(TimeSpan.FromSeconds(5)); }
+	catch(Exception e) { Console.Error.WriteLine($"MCP shutdown: {e.Message}"); }
+});
+using var onStopping = app.Lifetime.ApplicationStopping.Register(() => { _ = drain.Value; });
 manager.LoadAll();
 new Scheduler(manager).Start(app.Lifetime.ApplicationStopping);
 backups.Start(app.Lifetime.ApplicationStopping, Console.Error.WriteLine);
-_ = Task.Run(() => mcp.RefreshAsync(false, app.Lifetime.ApplicationStopping));
-app.Lifetime.ApplicationStopping.Register(() => mcp.StopAll().Wait(TimeSpan.FromSeconds(5)));
+_ = Task.Run(() => RefreshMcp(false));
 Console.WriteLine($"Marten home: {home.Root}");
 Console.WriteLine($"Backups: {backups.Directory}{(backups.Encrypting ? " (encrypted)" : "")}");
 Console.WriteLine(webRoot == null
 	? "No built UI found (web/dist). Run `npm run build` in web/, or set MARTEN_WEB_ROOT."
-	: $"Marten UI: http://127.0.0.1:{config.Port}/#token={security.Token}");
-app.Run();
+	: $"Marten UI: http://127.0.0.1:{config.Port}/ (paste the token from the Marten home's secrets/ui-token into the page)");
+try { await app.RunAsync(); }
+finally { await drain.Value; }
 
 static string? Blank(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
 

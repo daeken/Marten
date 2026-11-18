@@ -61,6 +61,7 @@ public sealed class McpClient : IAsyncDisposable {
 	}
 
 	public static async Task<McpClient> StartAsync(string name, McpServerConfig config, string workingDirectory, string? stderrLogPath, TimeSpan timeout, CancellationToken ct) {
+		ct.ThrowIfCancellationRequested();
 		var psi = new ProcessStartInfo(config.Command) {
 			WorkingDirectory = config.Cwd ?? workingDirectory, UseShellExecute = false,
 			RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,

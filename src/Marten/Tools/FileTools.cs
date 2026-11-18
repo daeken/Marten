@@ -10,6 +10,19 @@ public static class Paths {
 			path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), path.Length > 2 ? path[2..] : "");
 		return Path.GetFullPath(Path.Combine(ctx.WorkingDirectory, path));
 	}
+
+	// Resolve directory aliases, not the final file: AtomicFile replaces the directory entry itself.
+	// Missing directories are allowed (create can make them).
+	public static string PhysicalDirectory(string path, int links = 0) {
+		if(links > 40) throw new ToolException($"Too many directory links in {path}.");
+		var parent = Path.GetDirectoryName(path);
+		if(parent == null) return path;
+		var candidate = Path.Combine(PhysicalDirectory(parent, links), Path.GetFileName(path));
+		return new DirectoryInfo(candidate).LinkTarget is { } target
+			? PhysicalDirectory(Path.GetFullPath(target, Path.GetDirectoryName(candidate)!), links + 1) : candidate;
+	}
+
+	public static bool IsLink(string path) => new FileInfo(path).LinkTarget is not null;
 }
 
 public sealed class ReadFileTool : ITool {
@@ -47,7 +60,8 @@ public sealed class ReadFileTool : ITool {
 
 /// <summary>Extra rules for particular files, such as project memory. Runs inside the per-path lock.</summary>
 public interface IEditGuard {
-	bool Applies(string path);
+	/// <summary>Return the canonical lock key for a protected path, or null if unguarded.</summary>
+	string? LockPath(string path);
 	/// <summary>Throw ToolException to refuse the edit.</summary>
 	void Validate(IToolContext ctx, string path, string before, string after);
 	void Committed(IToolContext ctx, string path, string before, string after, string? reason);
@@ -66,12 +80,12 @@ public sealed class EditFileTool(IEditGuard? guard = null) : ITool {
 		"Ops: replace (anchor -> text), insert_before, insert_after, delete (removes the anchor; text is ignored). " +
 		"Either every edit applies or none does, and a failure names the edit that missed. " +
 		"You must have read the file (read_file) since it last changed. To create a new file, pass a single edit with op " +
-		"'create' and the whole contents as text; the file must not exist.";
+		"'create' and the whole contents as text; the file must not exist. To initialize a zero-byte file, read it first, then use a single 'replace' with an empty anchor.";
 	public JsonObject Parameters => Schema.Object(
 		("path", Schema.Str("File path, absolute or relative to your working directory.")),
 		("edits", Schema.Array("Edits to apply together.", Schema.Object(
 			("op", Schema.Enum("What to do at the anchor.", "replace", "insert_before", "insert_after", "delete", "create")),
-			("anchor", Schema.Str("Exact text to find; must match once. Null only for create.", nullable: true)),
+			("anchor", Schema.Str("Exact text to find; must match once. Empty only for a single replace of a zero-byte file. Null only for create.", nullable: true)),
 			("text", Schema.Str("New text. Null for delete.", nullable: true))))),
 		("reason", Schema.Str("Why you are making this edit. Recorded in the audit log for project memory edits; null elsewhere is fine.", nullable: true)));
 
@@ -81,7 +95,7 @@ public sealed class EditFileTool(IEditGuard? guard = null) : ITool {
 	/// One lock per path, so the version check and the write are a single step for every agent in
 	/// this process. Without it two agents can both pass the check and the second write erases the first.
 	/// </summary>
-	static readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> PathLocks = new(StringComparer.Ordinal);
+	static readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> PathLocks = new(StringComparer.OrdinalIgnoreCase);
 
 	public async Task<ToolOutput> InvokeAsync(IToolContext ctx, JsonObject args, CancellationToken ct) {
 		var path = Paths.Resolve(ctx, args.ReqString("path"));
@@ -90,17 +104,17 @@ public sealed class EditFileTool(IEditGuard? guard = null) : ITool {
 			.Select(e => new Edit(e.ReqString("op"), e.OptString("anchor"), e.OptString("text"))).ToList();
 		if(edits.Count == 0) throw new ToolException("No edits given.");
 
-		var gate = PathLocks.GetOrAdd(path, _ => new SemaphoreSlim(1, 1));
+		var lockPath = guard?.LockPath(path);
+		var gate = PathLocks.GetOrAdd(lockPath ?? path, _ => new SemaphoreSlim(1, 1));
 		await gate.WaitAsync(ct);
 		try {
-			return await ApplyLocked(ctx, path, edits, args.OptString("reason"), ct);
+			return await ApplyLocked(ctx, path, edits, args.OptString("reason"), lockPath == null ? null : guard, ct);
 		} finally {
 			gate.Release();
 		}
 	}
 
-	async Task<ToolOutput> ApplyLocked(IToolContext ctx, string path, List<Edit> edits, string? reason, CancellationToken ct) {
-		var guarded = guard != null && guard.Applies(path) ? guard : null;
+	async Task<ToolOutput> ApplyLocked(IToolContext ctx, string path, List<Edit> edits, string? reason, IEditGuard? guarded, CancellationToken ct) {
 
 		if(edits.Any(e => e.Op == "create")) {
 			if(edits.Count != 1) throw new ToolException("create must be the only edit.");
@@ -133,6 +147,8 @@ public sealed class EditFileTool(IEditGuard? guard = null) : ITool {
 
 	/// <summary>Pure core of the editor; throws ToolException naming the first edit that can't apply.</summary>
 	public static string Apply(string text, IReadOnlyList<Edit> edits) {
+		if(text.Length == 0 && edits is [{ Op: "replace", Anchor: "" } init])
+			return init.Text ?? throw new ToolException("Edit 1 (replace) needs text.");
 		var spans = new List<(int Start, int End, string Insert, int Index)>();
 		for(var i = 0; i < edits.Count; i++) {
 			var e = edits[i];

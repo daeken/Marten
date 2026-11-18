@@ -17,8 +17,12 @@ function mergeEntries(a: Entry[], b: Entry[]): Entry[] {
   return [...bySeq.values()].sort((x, y) => x.seq - y.seq);
 }
 
+type ModelCall = AgentSummary['modelCall'];
+const latestCall = (current: ModelCall, incoming: ModelCall): ModelCall =>
+  current && (!incoming || current.id > incoming.id || (current.id === incoming.id && current.endedAt)) ? current : incoming;
+
 const statusLabel: Record<AgentSummary['status'], string> = {
-  idle: 'Idle', running: 'Working', waiting_for_quota: 'Waiting for quota', paused: 'Paused', error: 'Error',
+  idle: 'Idle', running: 'Working', waiting_for_quota: 'Waiting for quota', waiting_for_slot: 'Waiting for slot', paused: 'Paused', error: 'Error',
 };
 
 export function App() {
@@ -41,14 +45,20 @@ export function App() {
     if (api && connected.includes('1')) api.models().then(setModels).catch(() => setModels([]));
   }, [api, connected]);
 
+  const refreshGeneration = useRef(0);
   const refresh = useCallback(async () => {
     if (!api) return;
+    const generation = ++refreshGeneration.current;
     try {
       const s = await api.status();
-      setStatus(s);
+      if (generation !== refreshGeneration.current) return;
+      setStatus(current => ({ ...s, agents: s.agents.map(a => ({
+        ...a, modelCall: latestCall(current?.agents.find(prior => prior.id === a.id)?.modelCall, a.modelCall),
+      })) }));
       setError(null);
       setSelected(cur => cur ?? s.agents[s.agents.length - 1]?.id ?? 'new:project');
     } catch (e) {
+      if (generation !== refreshGeneration.current) return;
       setError((e as Error).message === 'unauthorized' ? 'unauthorized' : (e as Error).message);
     }
   }, [api]);
@@ -75,6 +85,12 @@ export function App() {
           if (e.entry.kind === 'assistant' || e.entry.kind === 'tool_call' || e.entry.kind === 'idle' || e.entry.kind === 'error')
             setStreaming(s => ({ ...s, [e.agentId]: '' }));
           if (e.entry.kind === 'tool_result') setRunning(r => { const { [e.agentId]: _, ...rest } = r; return rest; });
+          break;
+        case 'model_call_start':
+        case 'model_call_end':
+          setStatus(s => s && { ...s, agents: s.agents.map(a => a.id === e.agentId ? { ...a, modelCall: latestCall(a.modelCall, e.modelCall) } : a) });
+          if (e.type === 'model_call_start' || e.modelCall.outcome !== 'succeeded')
+            setStreaming(s => ({ ...s, [e.agentId]: '' }));
           break;
         case 'delta':
           setStreaming(s => ({ ...s, [e.agentId]: (s[e.agentId] ?? '') + e.text }));
@@ -106,6 +122,9 @@ export function App() {
       }
     };
     return api.events(onEvent, () => {
+      // A reconnect may be to a fresh process; its attempt ids start over.
+      setStatus(s => s && { ...s, agents: s.agents.map(a => ({ ...a, modelCall: null })) });
+      setStreaming({});
       refresh();
       if (selectedRef.current) loadTranscript(selectedRef.current);
     });
@@ -335,7 +354,7 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
   const [mode, setMode] = useState<'queued' | 'immediate'>('queued');
   const [showNotebook, setShowNotebook] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
-  const busy = agent.status === 'running' || agent.status === 'waiting_for_quota';
+  const busy = agent.status === 'running' || agent.status === 'waiting_for_quota' || agent.status === 'waiting_for_slot';
 
   useEffect(() => {
     const el = scroller.current;
@@ -387,6 +406,10 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
               title={agent.paused ? 'Resume this agent' : 'Hold this agent before its next model call'}>{agent.paused ? '▶ Resume' : '⏸ Pause'}</button>
           </div>
           <div className={`state ${agent.status}`}>{statusLabel[agent.status]}{agent.statusDetail ? ` · ${agent.statusDetail}` : ''}</div>
+          {agent.modelCall && <div className="small muted">
+            {agent.modelCall.kind === 'compaction' ? 'Context compaction' : 'Model reply'} · {agent.modelCall.model} · started {new Date(agent.modelCall.startedAt).toLocaleTimeString()}
+            {agent.modelCall.endedAt ? ` · ${agent.modelCall.outcome} at ${new Date(agent.modelCall.endedAt).toLocaleTimeString()}` : ' · in flight'}
+          </div>}
         </div>
       </header>
       {tasks.length > 0 && (
@@ -436,8 +459,10 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
       <div className="log" ref={scroller} style={showNotebook ? { display: 'none' } : undefined}>
         {entries.map(e => <EntryView key={e.seq} entry={e} result={e.kind === 'tool_call' ? results.get(e.callId) : undefined} running={e.callId === runningCall} imageUrl={p => api.imageUrl(agent.id, p)} />)}
         {streaming && <div className="assistant streaming"><Md text={streaming} /></div>}
-        {agent.status === 'running' && !streaming && !runningCall && <Thinking />}
+        {agent.modelCall && !agent.modelCall.endedAt && !streaming && !runningCall &&
+          <Thinking label={agent.modelCall.kind === 'compaction' ? 'Compacting context' : 'Thinking'} />}
         {agent.status === 'waiting_for_quota' && <Thinking label="Waiting for quota" />}
+        {agent.status === 'waiting_for_slot' && <Thinking label="Waiting for slot" />}
         {questions.map(q => <div key={q.id} className="inbox-item card-inline"><QuestionCard api={api} q={q} /></div>)}
       </div>
       <footer className="composer">
@@ -696,7 +721,7 @@ function MemoryView({ api, project, agents, tick }: { api: Api; project?: Projec
         <ul className="history">
           {memory?.log.slice().reverse().map((e, i) => (
             <li key={i}>
-              <div className="small"><strong>{name(e.agentId)}</strong> <span className="muted">{time(e.at)}{e.reason ? ` · ${e.reason}` : ''}</span></div>
+              <div className="small"><strong>{name(e.agentId)}</strong> <code>{e.path ?? 'MEMORY.md'}</code> <span className="muted">{time(e.at)}{e.reason ? ` · ${e.reason}` : ''}</span></div>
               {e.removed.map((l, j) => <div key={`r${j}`} className="diff del">− {l}</div>)}
               {e.added.map((l, j) => <div key={`a${j}`} className="diff add">+ {l}</div>)}
             </li>
