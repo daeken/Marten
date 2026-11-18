@@ -34,7 +34,7 @@ public static partial class Posix {
 /// Starts commands detached from Marten: in their own process group, reparented away from Marten, with
 /// output going to a log file rather than a pipe. A restart of Marten leaves them running.
 /// </summary>
-public sealed class ProcessLauncher(ChildProcessWatcher? watcher = null) {
+public sealed class ProcessLauncher {
 	static readonly string Shell = File.Exists("/bin/bash") ? "/bin/bash" : "/bin/sh";
 
 	public int Start(string command, string workingDirectory, string logPath) {
@@ -50,7 +50,7 @@ public sealed class ProcessLauncher(ChildProcessWatcher? watcher = null) {
 		psi.Environment["MARTEN_CMD"] = command;
 		psi.Environment["MARTEN_LOG"] = logPath;
 		using var launcher = Process.Start(psi) ?? throw new ToolException("Couldn't start the shell.");
-		watcher?.Exclude(launcher.Id);
+		ChildProcessWatcher.Exclude(launcher.Id);
 		launcher.StandardInput.Close();
 		var output = launcher.StandardOutput.ReadToEnd();
 		launcher.WaitForExit();

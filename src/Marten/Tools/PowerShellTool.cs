@@ -127,7 +127,8 @@ public sealed class PowerShellTool(Func<int> defaultTimeoutSeconds, Func<int> st
 		children.Refresh();
 		var map = ProcessTable.ParentMap();
 		var killed = new List<int>();
-		foreach(var pid in lease.Owned.Where(map.ContainsKey)) {
+		// Recheck exclusions: a poll can land between a deliberate start and its Exclude call.
+		foreach(var pid in lease.Owned.Where(p => map.ContainsKey(p) && !ChildProcessWatcher.IsExcluded(p))) {
 			ProcessTable.KillTree(pid);
 			killed.Add(pid);
 		}

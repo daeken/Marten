@@ -47,7 +47,7 @@ var tools = new ToolRegistry()
 	.Add(new RemoveToolTool(getManager, scriptTools))
 	.AddSource(scriptTools)
 	.AddSource(mcp);
-var manager = managerRef = new AgentManager(home, config, backend, tools) { Launcher = new ProcessLauncher(childWatcher), Mcp = mcp };
+var manager = managerRef = new AgentManager(home, config, backend, tools) { Launcher = new ProcessLauncher(), Mcp = mcp };
 var hub = new EventHub();
 manager.Events += hub.Broadcast;
 var security = new Security(home, config);
