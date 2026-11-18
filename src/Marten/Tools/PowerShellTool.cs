@@ -10,6 +10,7 @@ namespace Marten.Tools;
 public interface IPowerShellOwner : IToolContext {
 	JsonNode? PowerShellState { get; set; }
 	object MartenObject { get; }
+	object MartenObjectForRun(CancellationToken ct) => MartenObject;
 	void RunspaceAbandoned(string command);
 	/// <summary>Called after every run with what went in and what came out, for the agent's notebook.</summary>
 	void RecordCell(NotebookCell cell) { }
@@ -47,6 +48,7 @@ public sealed class PowerShellTool(Func<int> defaultTimeoutSeconds, Func<int> st
 		"JSON-serializable values (hashtables, arrays, strings, numbers, booleans, null). $Marten exposes the runtime. " +
 		"Every Marten tool is also a PowerShell function of the same name (e.g. read_file -path x). " +
 		"Strings come back as written, other objects as formatted text, with errors and warnings inline. " +
+		"$Marten.Slots lists configured heavy-command slots; use $Marten.WithSlot('name', { command }) to take one. " +
 		"timeout_seconds overrides the default timeout for long work such as test runs.";
 	public JsonObject Parameters => Schema.Object(
 		("command", Schema.Str("PowerShell script to run.")),
@@ -89,7 +91,8 @@ public sealed class PowerShellTool(Func<int> defaultTimeoutSeconds, Func<int> st
 	}
 
 	async Task<ToolOutput> RunLockedAsync(IPowerShellOwner owner, string command, TimeSpan timeout, CancellationToken ct) {
-		var runspace = RunspaceFactory.CreateRunspace(BuildSessionState(owner));
+		using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
+		var runspace = RunspaceFactory.CreateRunspace(BuildSessionState(owner, linked.Token));
 		runspace.Open();
 		var abandoned = false;
 		try {
@@ -101,11 +104,13 @@ public sealed class PowerShellTool(Func<int> defaultTimeoutSeconds, Func<int> st
 			ps.Commands.Commands[0].MergeMyResults(PipelineResultTypes.All, PipelineResultTypes.Output);
 			var output = new PSDataCollection<PSObject>();
 			using var lease = children.Begin();
+			// The timeout must cancel a slot wait inside the pipeline before StopAsync waits for it.
+			var interrupt = Task.Delay(timeout, linked.Token);
 			var invoke = ps.InvokeAsync(new PSDataCollection<PSObject>(), output);
-			using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
-			var finished = await Task.WhenAny(invoke, Task.Delay(timeout, linked.Token));
+			var finished = await Task.WhenAny(invoke, interrupt);
 			string? interruption = null;
-			if(finished != invoke) {
+			if(finished != invoke || ct.IsCancellationRequested) {
+				linked.Cancel();
 				interruption = ct.IsCancellationRequested ? "Cancelled" : $"Timed out after {timeout.TotalSeconds:0}s";
 				var killed = KillOwnedChildren(lease);
 				var stop = ps.StopAsync(null, null);
@@ -163,10 +168,10 @@ public sealed class PowerShellTool(Func<int> defaultTimeoutSeconds, Func<int> st
 		return (killed, lease.Ambiguous.Where(map.ContainsKey).ToList());
 	}
 
-	InitialSessionState BuildSessionState(IPowerShellOwner owner) {
+	InitialSessionState BuildSessionState(IPowerShellOwner owner, CancellationToken ct) {
 		var iss = InitialSessionState.CreateDefault2();
 		if(OperatingSystem.IsWindows()) iss.ExecutionPolicy = Microsoft.PowerShell.ExecutionPolicy.Bypass;
-		iss.Variables.Add(new SessionStateVariableEntry("Marten", owner.MartenObject, "The Marten runtime."));
+		iss.Variables.Add(new SessionStateVariableEntry("Marten", owner.MartenObjectForRun(ct), "The Marten runtime."));
 		foreach(var tool in owner.Tools.For(owner).Where(t => t.CallableFromPowerShell))
 			iss.Commands.Add(new SessionStateFunctionEntry(tool.Name, ToolFunction(tool)));
 		iss.Commands.Add(new SessionStateFunctionEntry("View-Image", ViewImageFunction));

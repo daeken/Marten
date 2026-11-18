@@ -40,6 +40,7 @@ public sealed class AgentManager {
 	public LoopBreaker Loops { get; }
 	public Guard Guard { get; }
 	public Outside Outside { get; }
+	internal ResourceSlots Resources { get; }
 	readonly ConcurrentDictionary<string, Agent> agents = new();
 	readonly ConcurrentDictionary<string, Project> projects = new();
 	readonly SemaphoreSlim modelGate = new(1, 1);
@@ -52,6 +53,7 @@ public sealed class AgentManager {
 	public AgentManager(Home home, Config config, IModelBackend backend, ToolRegistry tools) {
 		Home = home;
 		Config = config;
+		Resources = new ResourceSlots(config);
 		Backend = backend;
 		Loops = new LoopBreaker(() => Config);
 		Guard = new Guard(this);

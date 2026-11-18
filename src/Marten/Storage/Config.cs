@@ -7,6 +7,12 @@ public sealed record Config {
 	/// <summary>Reasoning effort sent to the backend, or null for the backend default.</summary>
 	public string? Effort { get; init; }
 	public int Port { get; init; } = 7450;
+	/// <summary>Concurrent model completions (including compaction). Zero means unlimited.</summary>
+	public int MaxConcurrentModelCalls { get; init; }
+	/// <summary>Concurrent active agent turns. Zero means unlimited.</summary>
+	public int MaxRunningAgents { get; init; }
+	/// <summary>Named, opt-in PowerShell command limits, shared across all agents.</summary>
+	public Dictionary<string, int> Slots { get; init; } = new();
 	public int CommandTimeoutSeconds { get; init; } = 120;
 	/// <summary>How long to wait for the next bytes of a model response, not for the whole response.</summary>
 	public int ModelIdleTimeoutSeconds { get; init; } = Marten.Models.ModelHttp.DefaultIdleTimeoutSeconds;

@@ -16,8 +16,8 @@ public sealed partial class Agent : IPowerShellOwner {
 	public string Directory { get; }
 	public Transcript Transcript { get; }
 	public FileTracker Files { get; }
-	public AgentStatus Status { get; private set; } = AgentStatus.Idle;
-	public string? StatusDetail { get; private set; }
+	public AgentStatus Status => CurrentStatus.Status;
+	public string? StatusDetail => CurrentStatus.Detail;
 	public string Instructions { get; private set; }
 
 	readonly AgentManager manager;
@@ -60,6 +60,7 @@ public sealed partial class Agent : IPowerShellOwner {
 	public string WorkingDirectory => Info.WorkingDirectory;
 	public ToolRegistry Tools => manager.Tools;
 	public object MartenObject => api ??= new MartenApi(this, manager);
+	public object MartenObjectForRun(CancellationToken ct) => new MartenApi(this, manager, ct);
 	public IReadOnlyList<AbandonedRunspace> AbandonedRunspaces => state.AbandonedRunspaces;
 	public bool NudgesStopped => state.NudgesStopped;
 	public Project? Project => manager.ProjectOf(this);
@@ -151,12 +152,6 @@ public sealed partial class Agent : IPowerShellOwner {
 		var e = Transcript.Append(entry);
 		manager.Publish(new { type = "entry", agentId = Info.Id, entry = e });
 		return e;
-	}
-
-	void SetStatus(AgentStatus status, string? detail = null) {
-		Status = status;
-		StatusDetail = detail;
-		manager.Publish(new { type = "status", agentId = Info.Id, status, detail });
 	}
 
 	/// <summary>Repair the log after a restart and decide whether a turn was cut short.</summary>
@@ -251,6 +246,7 @@ public sealed partial class Agent : IPowerShellOwner {
 	async Task RunTurn(string reason) {
 		using var cts = new CancellationTokenSource();
 		turnCts = cts;
+		using var slots = new TurnSlots(this);
 		try {
 			SetStatus(AgentStatus.Running);
 			Append(new Entry { Kind = EntryKind.Wake, Reason = reason });
@@ -260,7 +256,7 @@ public sealed partial class Agent : IPowerShellOwner {
 			var changesAtStart = taskChanges;
 			while(true) {
 				await WaitWhilePaused(cts.Token);
-				var result = await CallModel(cts.Token);
+				var result = await CallModel(slots, cts.Token);
 				var calls = new List<Entry>();
 				foreach(var item in result.Items) {
 					var e = Append(item);
@@ -375,26 +371,26 @@ public sealed partial class Agent : IPowerShellOwner {
 		return (head + note + tail, Path.GetRelativePath(Directory, path));
 	}
 
-	async Task<ModelResult> CallModel(CancellationToken ct) {
+	async Task<ModelResult> CallModel(TurnSlots slots, CancellationToken ct) {
 		var transientFailures = 0;
 		var quotaWait = TimeSpan.FromSeconds(30);
 		var recoveringOverflow = false;
 		var forceCompaction = false;
 		while(true) {
-			await WaitWhilePaused(ct);
 			ct.ThrowIfCancellationRequested();
 			try {
+				await slots.EnsureAgent(ct);
 				var model = Info.Model ?? await manager.DefaultModel(ct);
 				if(forceCompaction) {
-					await Compact(model, ct);
+					await Compact(model, slots, ct);
 					forceCompaction = false;
-				} else if(!recoveringOverflow) await ManageContext(model, ct);
+				} else if(!recoveringOverflow) await ManageContext(model, slots, ct);
 				var view = View();
 				var request = new ModelRequest(model, Info.Effort ?? manager.Config.Effort, Instructions,
 					view, RequestTools(), CacheKey: $"marten:{Info.Id}");
 				SetStatus(AgentStatus.Running);
-				var result = await CompleteModel(request, ModelCallKind.Reply,
-					delta => manager.Publish(new { type = "delta", agentId = Info.Id, text = delta }), ct);
+				var result = await slots.Complete(request, ModelCallKind.Reply,
+					delta => manager.Publish(new { type = "delta", agentId = Info.Id, text = delta }), null, ct);
 				RecordUsage(result, view);
 				// Keep each call's usage in the log, on its last item.
 				if(result.Usage != null && result.Items.Count > 0)
@@ -407,12 +403,14 @@ public sealed partial class Agent : IPowerShellOwner {
 				// Keep the forced compaction inside the retry loop, including its own quota/transient failures.
 				recoveringOverflow = forceCompaction = true;
 			} catch(RateLimitedException e) {
+				slots.ReleaseAgent();
 				// Wait it out; never fail and never switch models.
 				var wait = e.RetryAfter ?? quotaWait;
 				SetStatus(AgentStatus.WaitingForQuota, $"{e.Message} Retrying at {DateTimeOffset.Now + wait:HH:mm}.");
 				await manager.ModelRetryDelay(wait, ct);
 				quotaWait = TimeSpan.FromSeconds(Math.Min(quotaWait.TotalSeconds * 2, 15 * 60));
 			} catch(TransientModelException e) when(++transientFailures <= 5) {
+				slots.ReleaseAgent();
 				SetStatus(AgentStatus.Running, $"{e.Message} Retrying.");
 				await manager.ModelRetryDelay(TimeSpan.FromSeconds(Math.Pow(2, transientFailures)), ct);
 			}

@@ -31,6 +31,22 @@ Agents outside Marten (e.g. Claude Code sessions) can create projects and messag
 
 The agent header and status APIs (`/api/status`, `/api/ext/status`, and `$Marten.Agents()`) show the start and end of the latest model attempt, including compaction. If a turn fails outright (for example, its model is unavailable or retries run out), Marten wakes the parent and agent assigners of unfinished tasks with a queued error message. It does not change task states.
 
+## Resource limits
+
+Set process-wide limits in `~/.marten/config.json` (read at startup):
+
+```json
+{
+  "maxConcurrentModelCalls": 3,
+  "maxRunningAgents": 5,
+  "slots": { "build": 1, "integration-tests": 2 }
+}
+```
+
+Omit either `max…` setting or set it to `0` for no limit. Turns yield their agent slot while paused or backing off after a model error. The UI and status APIs show **Waiting for slot** and which limit the agent hit; **Stop** interrupts a turn even while it is queued.
+
+Named slots are opt-in and shared by all agents. In a PowerShell command, run `$Marten.WithSlot('build', { dotnet build })`; `$Marten.Slots` lists the configured names. A slot must have positive capacity. The wait counts toward the command timeout. Wrap only foreground work, and don't nest slots or wait for another agent while holding one.
+
 ## As an app (desktop and phone)
 
 Marten's UI is an installable web app.

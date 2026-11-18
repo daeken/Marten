@@ -24,14 +24,14 @@ public sealed partial class Agent {
 			// Take the signal before checking, so a resume between the two isn't missed.
 			var changed = manager.PauseSignal;
 			if(!IsPaused) return;
-			if(Status != AgentStatus.Paused) SetStatus(AgentStatus.Paused, "Paused");
+			if(TurnStatus != AgentStatus.Paused) SetStatus(AgentStatus.Paused, "Paused");
 			await changed.WaitAsync(ct);
 		}
 	}
 
 	/// <summary>After a resume: an agent that went idle with open tasks while paused gets the nudge it missed.</summary>
 	internal void PauseChangedHere() {
-		if(IsPaused || turnCts != null || Status != AgentStatus.Idle || state.NudgesStopped) return;
+		if(IsPaused || turnCts != null || TurnStatus != AgentStatus.Idle || state.NudgesStopped) return;
 		MaybeNudge(taskChanges);
 	}
 }
