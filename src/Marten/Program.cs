@@ -27,6 +27,7 @@ var tools = new ToolRegistry()
 	.Add(new SpawnAgentTool(getManager))
 	.Add(new CloseAgentTool(getManager))
 	.Add(new CreateProjectTool(getManager))
+	.Add(new AskSeraTool(getManager))
 	.Add(new ElideResultsTool())
 	.Add(new SetModelTool(getManager))
 	.Add(new ScheduleAddTool())
@@ -78,6 +79,7 @@ api.MapGet("/status", () => new {
 	agents = manager.Agents.Select(AgentSummary),
 	projects = manager.Projects.Select(ProjectSummary),
 	inbox = manager.SeraInbox().Count,
+	openQuestions = manager.SeraInbox().Count(m => m.Question && m.Answer == null),
 	paused = manager.PausedAll,
 });
 api.MapPost("/pause", (PauseRequest req) => {
@@ -175,6 +177,17 @@ api.MapPost("/projects", (CreateProject req) => {
 api.MapGet("/projects/{id}/memory", (string id) =>
 	manager.GetProject(id) is { } p ? Results.Ok(new { path = p.MemoryPath, text = p.Memory, log = p.MemoryLog(), prompt = p.Prompt }) : Results.NotFound());
 api.MapGet("/inbox", () => manager.SeraInbox().AsEnumerable().Reverse());
+api.MapPost("/questions/{id}/answer", (string id, AnswerRequest req) => {
+	try {
+		return Results.Ok(manager.AnswerQuestion(id, req.Choice, req.Text));
+	} catch(KeyNotFoundException) {
+		return Results.NotFound();
+	} catch(Exception e) when(e is InvalidOperationException or ArgumentException) {
+		return Results.Problem(e.Message, statusCode: 409);
+	}
+});
+api.MapGet("/messages", (string? agentId, string? projectId, int? limit) =>
+	manager.AgentMessages(agentId, projectId, Math.Clamp(limit ?? 500, 1, 5000)).AsEnumerable().Reverse());
 api.Map("/events", async (HttpContext ctx) => {
 	if(!ctx.WebSockets.IsWebSocketRequest) {
 		ctx.Response.StatusCode = 400;
@@ -208,3 +221,4 @@ record ConfigUpdate(string? Model, string? Effort);
 record CreateAgent(string? Name, string? WorkingDirectory);
 record SendMessage(string Text, SendMode? Mode);
 record PauseRequest(bool Paused);
+record AnswerRequest(int? Choice, string? Text);

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { AgentSummary, Api, BackgroundProcess, Entry, Project, ProjectMemory, Schedule, ScriptToolInfo, SeraMessage, ServerEvent, Status_, TaskItem, takeToken } from './api';
+import { AgentMessage, AgentSummary, Api, BackgroundProcess, Entry, Project, ProjectMemory, Schedule, ScriptToolInfo, SeraMessage, ServerEvent, Status_, TaskItem, takeToken } from './api';
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh'];
 
@@ -80,6 +80,7 @@ export function App() {
         case 'schedules':
         case 'processes':
         case 'tools':
+        case 'agent_message':
         case 'memory':
           setTick(t => t + 1);
           break;
@@ -120,7 +121,9 @@ export function App() {
   else if (selected === 'processes')
     main = <ProcessesView api={api} tick={tick} onSelect={setSelected} />;
   else if (selected === 'inbox')
-    main = <InboxView api={api} status={status} tick={status.inbox} onSelect={setSelected} />;
+    main = <InboxView api={api} status={status} tick={tick + status.inbox * 1000 + status.openQuestions} onSelect={setSelected} />;
+  else if (selected === 'messages')
+    main = <MessagesView api={api} status={status} tick={tick} onSelect={setSelected} />;
   else if (selected?.startsWith('memory:'))
     main = <MemoryView api={api} project={status.projects.find(p => p.id === selected.slice(7))} agents={status.agents} tick={tick} />;
   else if (selected === 'new:project')
@@ -187,7 +190,12 @@ function Sidebar({ api, status, selected, onSelect, onChange }: {
       <nav className="agents">
         <button className={`agent inbox ${selected === 'inbox' ? 'active' : ''}`} onClick={() => onSelect('inbox')}>
           <span className="name">Inbox</span>
-          {status.inbox > 0 && <span className="badge">{status.inbox}</span>}
+          {status.openQuestions > 0
+            ? <span className="badge warn" title="Questions waiting for you">? {status.openQuestions}</span>
+            : status.inbox > 0 && <span className="badge">{status.inbox}</span>}
+        </button>
+        <button className={`agent inbox ${selected === 'messages' ? 'active' : ''}`} onClick={() => onSelect('messages')}>
+          <span className="name">Messages</span>
         </button>
         <button className={`agent inbox ${selected === 'processes' ? 'active' : ''}`} onClick={() => onSelect('processes')}>
           <span className="name">Processes</span>
@@ -242,6 +250,10 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
 }) {
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   useEffect(() => { api.tasks(agent.id).then(setTasks).catch(() => setTasks([])); }, [api, agent.id, tick]);
+  const [questions, setQuestions] = useState<SeraMessage[]>([]);
+  useEffect(() => {
+    api.inbox().then(all => setQuestions(all.filter(m => m.question && !m.answer && m.from === agent.id))).catch(() => setQuestions([]));
+  }, [api, agent.id, tick]);
   const [procs, setProcs] = useState<BackgroundProcess[]>([]);
   useEffect(() => { api.agentProcesses(agent.id).then(setProcs).catch(() => setProcs([])); }, [api, agent.id, tick]);
   const [schedules, setSchedules] = useState<Schedule[]>([]);
@@ -347,6 +359,7 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
         {streaming && <div className="assistant streaming"><Md text={streaming} /></div>}
         {agent.status === 'running' && !streaming && !runningCall && <Thinking />}
         {agent.status === 'waiting_for_quota' && <Thinking label="Waiting for quota" />}
+        {questions.map(q => <div key={q.id} className="inbox-item card-inline"><QuestionCard api={api} q={q} /></div>)}
       </div>
       <footer className="composer">
         <div className="composer-row">
@@ -592,6 +605,65 @@ function ProcessesView({ api, tick, onSelect }: { api: Api; tick: number; onSele
   );
 }
 
+function QuestionCard({ api, q }: { api: Api; q: SeraMessage }) {
+  const [text, setText] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const answer = (choice: number | null) =>
+    api.answer(q.id, choice, text.trim() || null).then(() => setText('')).catch(e => setError(String(e.message ?? e)));
+  return (
+    <div className="question">
+      <div className="q-text"><Md text={q.text} /></div>
+      {q.context && <div className="q-context small"><Md text={q.context} /></div>}
+      {q.answer ? (
+        <div className="q-answer small"><span className="muted">You answered{q.answeredAt ? ` ${time(q.answeredAt)}` : ''}:</span> {q.answer}</div>
+      ) : (
+        <>
+          {q.options && (
+            <div className="q-options">
+              {q.options.map((o, i) => <button key={i} className={i === 0 ? 'primary' : ''} onClick={() => answer(i)} title={text.trim() ? 'Answer with this option and your note' : ''}>{o}</button>)}
+            </div>
+          )}
+          <div className="q-free">
+            <input value={text} onChange={e => setText(e.target.value)} placeholder={q.options ? 'Add a note, or answer in your own words' : 'Your answer'}
+              onKeyDown={e => { if (e.key === 'Enter' && text.trim()) answer(null); }} />
+            <button onClick={() => answer(null)} disabled={!text.trim()}>Answer</button>
+          </div>
+          {error && <div className="error small">{error}</div>}
+        </>
+      )}
+    </div>
+  );
+}
+
+function MessagesView({ api, status, tick, onSelect }: { api: Api; status: Status_; tick: number; onSelect: (id: string) => void }) {
+  const [projectId, setProjectId] = useState('');
+  const [messages, setMessages] = useState<AgentMessage[]>([]);
+  useEffect(() => { api.agentMessages({ projectId: projectId || undefined }).then(setMessages).catch(() => setMessages([])); }, [api, projectId, tick]);
+  return (
+    <div className="page">
+      <div className="doc wide">
+        <h2>Messages between agents</h2>
+        <select value={projectId} onChange={e => setProjectId(e.target.value)}>
+          <option value="">All projects and chats</option>
+          {status.projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+        </select>
+        {messages.length === 0 && <div className="muted">No messages yet.</div>}
+        {messages.map((m, i) => (
+          <div key={`${m.at}-${i}`} className="inbox-item">
+            <div className="small">
+              <button className="link" onClick={() => onSelect(m.fromId)}>{m.fromName}</button>
+              <span className="muted"> → </span>
+              <button className="link" onClick={() => onSelect(m.toId)}>{m.toName}</button>
+              <span className="muted"> · {m.mode}{m.reason ? ` · ${m.reason}` : ''} · {time(m.at)}</span>
+            </div>
+            <Md text={m.text} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function InboxView({ api, status, tick, onSelect }: { api: Api; status: Status_; tick: number; onSelect: (id: string) => void }) {
   const [messages, setMessages] = useState<SeraMessage[]>([]);
   useEffect(() => { api.inbox().then(setMessages).catch(() => setMessages([])); }, [api, tick]);
@@ -608,7 +680,7 @@ function InboxView({ api, status, tick, onSelect }: { api: Api; status: Status_;
                 <button className="link" onClick={() => onSelect(m.from)}>{project ? `${project.name} / ` : ''}{m.fromName}</button>
                 <span className="muted"> · {time(m.at)}</span>
               </div>
-              <Md text={m.text} />
+              {m.question ? <QuestionCard api={api} q={m} /> : <Md text={m.text} />}
             </div>
           );
         })}

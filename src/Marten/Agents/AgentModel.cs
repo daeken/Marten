@@ -67,4 +67,7 @@ public sealed record AbandonedRunspace(DateTimeOffset At, string Command);
 public enum SendMode { Immediate, Queued }
 
 /// <summary>A message waiting for an agent. Reason, if set, is recorded as the wake reason ("schedule", say).</summary>
-public sealed record Inbound(string From, string Text, SendMode Mode, string? Reason = null);
+public sealed record Inbound(string From, string Text, SendMode Mode, string? Reason = null, string? FromId = null) {
+	/// <summary>A message from another agent; these are logged so the UI shows every exchange.</summary>
+	public static Inbound FromAgent(Agent from, string text, SendMode mode) => new(AgentManager.Label(from), text, mode, FromId: from.Info.Id);
+}

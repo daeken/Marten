@@ -71,7 +71,14 @@ export interface TaskItem {
 
 export interface MemoryEdit { at: string; agentId: string; reason?: string; added: string[]; removed: string[] }
 export interface ProjectMemory { path: string; text: string; prompt: string; log: MemoryEdit[] }
-export interface SeraMessage { id: string; at: string; from: string; fromName: string; projectId?: string; text: string }
+export interface SeraMessage {
+  id: string; at: string; from: string; fromName: string; projectId?: string; text: string;
+  question?: boolean; options?: string[]; context?: string; answer?: string; answeredAt?: string;
+}
+export interface AgentMessage {
+  at: string; fromId: string; fromName: string; toId: string; toName: string; projectId?: string;
+  mode: 'immediate' | 'queued'; text: string; reason?: string;
+}
 
 export interface Entry {
   seq: number;
@@ -96,6 +103,7 @@ export interface Status_ {
   agents: AgentSummary[];
   projects: Project[];
   inbox: number;
+  openQuestions: number;
   paused: boolean;
 }
 
@@ -112,6 +120,7 @@ export type ServerEvent =
   | { type: 'schedules'; agentId: string }
   | { type: 'processes'; agentId: string }
   | { type: 'tools' }
+  | { type: 'agent_message'; message: AgentMessage }
   | { type: 'memory'; projectId: string }
   | { type: 'sera_message'; message: SeraMessage }
   | { type: 'config' };
@@ -172,6 +181,11 @@ export class Api {
     this.call<Project>('POST', '/projects', p);
   memory = (projectId: string) => this.call<ProjectMemory>('GET', `/projects/${projectId}/memory`);
   inbox = () => this.call<SeraMessage[]>('GET', '/inbox');
+  answer = (id: string, choice: number | null, text: string | null) => this.call<SeraMessage>('POST', `/questions/${id}/answer`, { choice, text });
+  agentMessages = (q: { agentId?: string; projectId?: string } = {}) => {
+    const params = new URLSearchParams(Object.entries(q).filter(([, v]) => v) as [string, string][]);
+    return this.call<AgentMessage[]>('GET', `/messages${params.size ? `?${params}` : ''}`);
+  };
   interrupt = (id: string) => this.call<void>('POST', `/agents/${id}/interrupt`);
   pauseAgent = (id: string, paused: boolean) => this.call<AgentSummary>('POST', `/agents/${id}/pause`, { paused });
   pauseProject = (id: string, paused: boolean) => this.call<Project>('POST', `/projects/${id}/pause`, { paused });
