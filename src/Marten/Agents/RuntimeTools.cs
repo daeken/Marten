@@ -85,7 +85,7 @@ public sealed class SendMessageTool(Func<AgentManager> manager) : ITool {
 		if(to.StartsWith(Outside.Prefix, StringComparison.OrdinalIgnoreCase) || to.EndsWith(" (outside)", StringComparison.OrdinalIgnoreCase)) {
 			var client = (to.StartsWith(Outside.Prefix, StringComparison.OrdinalIgnoreCase) ? to[Outside.Prefix.Length..] : to[..^" (outside)".Length]).Trim().ToLowerInvariant();
 			var mail = m.Outside.Write(from, client, text);
-			return Task.FromResult(new ToolOutput($"Left in {client}'s mailbox ({Path.GetFileName(mail.File)}). It reads it when it next checks."));
+			return Task.FromResult(new ToolOutput($"Queued for {client}; it reads it when it next checks."));
 		}
 		var target = AgentTools.Resolve(m, from, to);
 		if(MessagingRules.Check(from, target, mode) is { } why) throw new ToolException(why);

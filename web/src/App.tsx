@@ -643,7 +643,7 @@ function McpPanel({ api, tick, onSelect }: { api: Api; tick: number; onSelect: (
   );
 }
 
-/** Agents outside Marten (Claude Code sessions and the like) with their own token and mailbox. */
+/** Agents outside Marten (Claude Code sessions and the like) with their own token. */
 function ClientsPanel({ api, tick }: { api: Api; tick: number }) {
   const [clients, setClients] = useState<OutsideClient[]>([]);
   const [name, setName] = useState('');
@@ -657,13 +657,12 @@ function ClientsPanel({ api, tick }: { api: Api; tick: number }) {
   return (
     <>
       <h2>Outside agents</h2>
-      <div className="muted small">Agents outside Marten talk to yours through <code>scripts/marten-ext</code> or their mailbox folder. See <code>docs/outside-agents.md</code>.</div>
+      <div className="muted small">Agents outside Marten talk to yours through <code>scripts/marten-ext</code> or the <code>/api/ext</code> routes. See <code>docs/outside-agents.md</code>.</div>
       {clients.map(c => (
         <div key={c.name} className="inbox-item small">
           <div className="row"><strong>{c.name}</strong>{c.unread > 0 && <span className="muted">{c.unread} unread by it</span>}
             <button className="link small" onClick={() => api.removeClient(c.name).then(load)}>Remove</button></div>
           <div className="muted">token <code>{c.tokenPath}</code></div>
-          <div className="muted">mailbox <code>{c.mailbox}</code></div>
         </div>
       ))}
       <form className="row" onSubmit={e => { e.preventDefault(); if (name.trim()) add(); }}>

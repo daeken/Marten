@@ -20,7 +20,7 @@ if(args is ["backup", ..]) {
 if(args is ["client", "add" or "rotate", var clientName, ..]) {
 	var m = new AgentManager(home, config, new BackendRouter(new ResponsesBackend(new ChatGptAuth(home, new HttpClient()), new HttpClient()), [], null), new ToolRegistry());
 	var c = m.Outside.Register(clientName, rotate: args[1] == "rotate");
-	Console.WriteLine($"Client {c.Name}: token in {m.Outside.TokenPath(c.Name)}, mailbox in {Path.Combine(m.Outside.MailboxRoot, c.Name)}");
+	Console.WriteLine($"Client {c.Name}: token in {m.Outside.TokenPath(c.Name)}");
 	return;
 }
 if(args is ["restore", var archive, ..]) {
@@ -160,7 +160,7 @@ api.MapPut("/backups/passphrase", (BackendKey req) => {
 });
 // ---- Outside agents ----
 object ClientSummary(OutsideClient c) => new {
-	c.Name, c.Created, tokenPath = manager.Outside.TokenPath(c.Name), mailbox = Path.Combine(manager.Outside.MailboxRoot, c.Name),
+	c.Name, c.Created, tokenPath = manager.Outside.TokenPath(c.Name),
 	unread = manager.Outside.Inbox(c.Name, false).Count,
 };
 api.MapGet("/clients", () => manager.Outside.Clients.Select(ClientSummary));
@@ -358,7 +358,6 @@ api.Map("/events", async (HttpContext ctx) => {
 manager.LoadAll();
 new Scheduler(manager).Start(app.Lifetime.ApplicationStopping);
 backups.Start(app.Lifetime.ApplicationStopping, Console.Error.WriteLine);
-manager.Outside.Start(app.Lifetime.ApplicationStopping);
 _ = Task.Run(() => mcp.RefreshAsync(false, app.Lifetime.ApplicationStopping));
 app.Lifetime.ApplicationStopping.Register(() => mcp.StopAll().Wait(TimeSpan.FromSeconds(5)));
 Console.WriteLine($"Marten home: {home.Root}");
