@@ -385,6 +385,9 @@ public sealed partial class Agent : IPowerShellOwner {
 				var result = await manager.Backend.CompleteAsync(request,
 					delta => manager.Publish(new { type = "delta", agentId = Info.Id, text = delta }), ct);
 				RecordUsage(result, view);
+				// Keep each call's usage in the log, on its last item.
+				if(result.Usage != null && result.Items.Count > 0)
+					result = result with { Items = [.. result.Items.SkipLast(1), result.Items[^1] with { Usage = result.Usage }] };
 				return result;
 			} catch(ContextFullException) when(!compactedForOverflow) {
 				// The estimate was off; compact now and try once more.

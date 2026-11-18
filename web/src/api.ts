@@ -101,6 +101,8 @@ export interface Entry {
   fullOutput?: string;
   images?: { path: string; mimeType: string }[];
   model?: string;
+  /** Token usage of the model call this entry ended. */
+  usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number };
 }
 
 export interface Backend {
@@ -208,6 +210,7 @@ export class Api {
     return this.call<AgentMessage[]>('GET', `/messages${params.size ? `?${params}` : ''}`);
   };
   interrupt = (id: string) => this.call<void>('POST', `/agents/${id}/interrupt`);
+  closeAgent = (id: string, closed: boolean) => this.call<AgentSummary>('POST', `/agents/${id}/close`, { closed });
   pauseAgent = (id: string, paused: boolean) => this.call<AgentSummary>('POST', `/agents/${id}/pause`, { paused });
   pauseProject = (id: string, paused: boolean) => this.call<Project>('POST', `/projects/${id}/pause`, { paused });
   pauseAll = (paused: boolean) => this.call<void>('POST', '/pause', { paused });

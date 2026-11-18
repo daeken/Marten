@@ -157,6 +157,7 @@ function Sidebar({ api, status, selected, onSelect, onChange }: {
     onChange();
   };
 
+  const [showClosed, setShowClosed] = useState(false);
   const newChat = async () => {
     const name = prompt('Name this chat', 'Chat');
     if (name === null) return;
@@ -226,7 +227,12 @@ function Sidebar({ api, status, selected, onSelect, onChange }: {
           <span className="muted small">Chats</span>
           <button className="link" onClick={newChat}>New</button>
         </div>
-        {status.agents.filter(a => a.kind === 'chat').map(a => <AgentRow key={a.id} agent={a} selected={selected} onSelect={onSelect} />)}
+        {status.agents.filter(a => a.kind === 'chat' && (!a.closed || showClosed || a.id === selected)).map(a => <AgentRow key={a.id} agent={a} selected={selected} onSelect={onSelect} />)}
+        {status.agents.some(a => a.kind === 'chat' && a.closed) && (
+          <button className="link small" onClick={() => setShowClosed(v => !v)}>
+            {showClosed ? 'Hide closed chats' : `Show ${status.agents.filter(a => a.kind === 'chat' && a.closed).length} closed`}
+          </button>
+        )}
       </nav>
     </aside>
   );
@@ -336,6 +342,8 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
             </select>
           </div>
           <div className="head-actions">
+            <button className="small" onClick={() => api.closeAgent(agent.id, !agent.closed).then(onChange)}
+              title={agent.closed ? 'Reopen this agent' : 'Close this agent: it keeps its history, stops its processes and schedules, and wakes again when messaged'}>{agent.closed ? 'Reopen' : 'Close'}</button>
             <button className="small" onClick={() => api.pauseAgent(agent.id, !agent.paused).then(onChange)}
               title={agent.paused ? 'Resume this agent' : 'Hold this agent before its next model call'}>{agent.paused ? '▶ Resume' : '⏸ Pause'}</button>
           </div>
@@ -429,6 +437,15 @@ function formatWhen(iso: string) {
   return sameDay ? d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
 
+/** Hover text for a reply: the model, and the call's tokens when the backend reported them. */
+function usageTitle(e: Entry) {
+  const u = e.usage;
+  const parts = [e.model];
+  if (u?.input_tokens != null) parts.push(`${u.input_tokens.toLocaleString()} in${u.cache_read_input_tokens ? ` (${u.cache_read_input_tokens.toLocaleString()} cached)` : ''}`);
+  if (u?.output_tokens != null) parts.push(`${u.output_tokens.toLocaleString()} out`);
+  return parts.filter(Boolean).join(' · ') || undefined;
+}
+
 function EntryView({ entry: e, result, running, imageUrl }: { entry: Entry; result?: Entry; running: boolean; imageUrl: (path: string) => string }) {
   switch (e.kind) {
     case 'message':
@@ -438,7 +455,7 @@ function EntryView({ entry: e, result, running, imageUrl }: { entry: Entry; resu
           ? <div className="message system"><Md text={e.text ?? ''} /></div>
           : <div className="message other"><div className="from">{shortFrom(e.from)}</div><Md text={e.text ?? ''} /></div>;
     case 'assistant':
-      return e.text ? <div className="assistant"><Md text={e.text} /></div> : null;
+      return e.text ? <div className="assistant" title={usageTitle(e)}><Md text={e.text} /></div> : null;
     case 'reasoning':
       return e.text ? <details className="reasoning"><summary>Reasoning</summary><div><Md text={e.text} /></div></details> : null;
     case 'tool_call':

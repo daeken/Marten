@@ -75,8 +75,9 @@ public class MessagesBackendTests {
 	public async Task OnlyConnectedBackendsListModels() {
 		using var dir = new TempDir();
 		var home = new Home(dir.File("home"));
-		var zai = new MessagesBackend(MessagesProvider.Zai, home);
-		var deepseek = new MessagesBackend(MessagesProvider.DeepSeek, home);
+		// Nothing listens on the discard port, so the live listing fails fast and the built-in list stands in.
+		var zai = new MessagesBackend(MessagesProvider.Zai with { BaseUrl = "http://127.0.0.1:9", EnvVar = null }, home);
+		var deepseek = new MessagesBackend(MessagesProvider.DeepSeek with { EnvVar = null }, home);
 		var router = new BackendRouter(new FakeBackend(), [(zai, zai.Settings.Prefixes), (deepseek, deepseek.Settings.Prefixes)]);
 		var before = await router.ListModelsAsync(default);
 		zai.SetKey("k");
@@ -162,6 +163,17 @@ public class MessagesBackendTests {
 		var e = await Assert.ThrowsAnyAsync<Exception>(() =>
 			backend.CompleteAsync(new ModelRequest("claude-opus-5-5", null, "x", [E(EntryKind.Message, "hi")], [], "c"), _ => { }, default));
 		Assert.IsType(expected, e);
+	}
+
+	[Fact]
+	public async Task TheProvidersOwnListWinsAndConfigExtrasComeFirst() {
+		using var dir = new TempDir();
+		using var server = new FakeMessagesServer(
+			"""{"data":[{"type":"model","id":"glm-9","display_name":"GLM 9","created_at":"2026-01-01T00:00:00Z"}],"has_more":false,"first_id":"glm-9","last_id":"glm-9"}""",
+			contentType: "application/json");
+		var zai = new MessagesBackend(MessagesProvider.Zai with { BaseUrl = server.Url, EnvVar = null }, new Home(dir.File("home")), _ => ["glm-custom"]);
+		zai.SetKey("k");
+		Assert.Equal(["glm-custom", "glm-9"], await zai.ListModelsAsync(default));
 	}
 
 	[Fact]
