@@ -409,7 +409,7 @@ Console.WriteLine($"Marten home: {home.Root}");
 Console.WriteLine($"Backups: {backups.Directory}{(backups.Encrypting ? " (encrypted)" : "")}");
 Console.WriteLine(webRoot == null
 	? "No built UI found (web/dist). Run `npm run build` in web/, or set MARTEN_WEB_ROOT."
-	: $"Marten UI: http://127.0.0.1:{config.Port}/#token={security.Token}");
+	: $"Marten UI: http://127.0.0.1:{config.Port}/ (paste the token from the Marten home's secrets/ui-token into the page)");
 try { await app.RunAsync(); }
 finally { await drain.Value; }
 

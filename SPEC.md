@@ -18,7 +18,7 @@ Marten is a small agent runtime that replaces all of Sera's agentic coding. It i
 Marten is a C# monolith with a separate web frontend, and all of its state lives in `~/.marten`.
 
 - **Backend:** a single C# process.
-- **Exposure:** the backend listens on localhost only. Every request carries a random token, and the Host and Origin headers are checked, so a web page Sera visits cannot drive an agent. The backend serves the built frontend, so the UI is same-origin.
+- **Exposure:** the backend listens on localhost only. Every request carries a random token, and the Host and Origin headers are checked, so a web page Sera visits cannot drive an agent. The backend serves the built frontend, so the UI is same-origin. The startup banner prints the UI URL without the token; users enter the token from `secrets/ui-token`.
 - **Platforms:** macOS first, Linux a close second. Windows is not a target.
 - **Frontend:** a simple, clean React web app, separate from the backend. Mobile and desktop apps come later.
 - **Storage:** everything lives in `~/.marten`: config, secrets, prompts, tools, transcripts, agent state, screenshots and full tool output. It is plain files, not a git repo. Durability comes from snapshots: every `backup.intervalMinutes` (60), when anything changed, Marten writes `~/.marten-backups/marten-<utc stamp>.tar.gz`, leaving out secrets, browser profiles and worktrees. It keeps the newest 48 plus one a day for 30 days. With a passphrase saved (in the UI, stored in `secrets/backup-passphrase`), snapshots are AES-256-GCM encrypted. `marten backup` takes one now; `marten restore <file> [<dir>]` extracts one into a new folder, never over a live home.
