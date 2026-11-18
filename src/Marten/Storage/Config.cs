@@ -12,6 +12,8 @@ public sealed record Config {
 	public int StopGraceSeconds { get; init; } = 5;
 	/// <summary>Tool results longer than this are truncated on arrival, with a pointer to the full text.</summary>
 	public int ToolResultMaxChars { get; init; } = 30_000;
+	/// <summary>Project memory size cap. An edit past it fails, so agents prune before adding.</summary>
+	public int MemoryCapBytes { get; init; } = 16 * 1024;
 	/// <summary>Extra Origin allowed to call the API, e.g. the Vite dev server.</summary>
 	public string? DevOrigin { get; init; }
 

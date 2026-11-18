@@ -13,7 +13,35 @@ export interface AgentSummary {
   statusDetail?: string;
   pending: number;
   abandonedRunspaces: { at: string; command: string }[];
+  projectId?: string;
+  parentId?: string;
+  closed?: boolean;
+  worktree?: string;
+  nudgesStopped: boolean;
+  openTasks: number;
 }
+
+export interface Project {
+  id: string;
+  name: string;
+  created: string;
+  bindings: string[];
+  worktreesByDefault: boolean;
+  orchestratorId?: string;
+}
+
+export interface TaskItem {
+  id: number;
+  title: string;
+  state: 'open' | 'waiting' | 'blocked' | 'done';
+  reason?: string;
+  assignedBy: string;
+  updated: string;
+}
+
+export interface MemoryEdit { at: string; agentId: string; reason?: string; added: string[]; removed: string[] }
+export interface ProjectMemory { path: string; text: string; prompt: string; log: MemoryEdit[] }
+export interface SeraMessage { id: string; at: string; from: string; fromName: string; projectId?: string; text: string }
 
 export interface Entry {
   seq: number;
@@ -34,6 +62,8 @@ export interface Status_ {
   auth: { connected: boolean; email?: string; signingIn: boolean; lastError?: string };
   config: { model?: string; effort?: string; defaultModel?: string };
   agents: AgentSummary[];
+  projects: Project[];
+  inbox: number;
 }
 
 export type ServerEvent =
@@ -44,6 +74,10 @@ export type ServerEvent =
   | { type: 'tool_start'; agentId: string; callId: string; name: string }
   | { type: 'flag'; agentId: string; flag: string; command: string }
   | { type: 'agents' }
+  | { type: 'projects' }
+  | { type: 'tasks'; agentId: string }
+  | { type: 'memory'; projectId: string }
+  | { type: 'sera_message'; message: SeraMessage }
   | { type: 'config' };
 
 const TOKEN_KEY = 'marten.token';
@@ -87,6 +121,11 @@ export class Api {
   send = (id: string, text: string, mode: 'immediate' | 'queued') => this.call<void>('POST', `/agents/${id}/messages`, { text, mode });
   setAgentSettings = (id: string, model: string | null, effort: string | null) =>
     this.call<AgentSummary>('PUT', `/agents/${id}/settings`, { model, effort });
+  tasks = (id: string) => this.call<TaskItem[]>('GET', `/agents/${id}/tasks`);
+  createProject = (p: { name: string; bindings: string[]; prompt: string | null; worktreesByDefault: boolean; brief: string | null }) =>
+    this.call<Project>('POST', '/projects', p);
+  memory = (projectId: string) => this.call<ProjectMemory>('GET', `/projects/${projectId}/memory`);
+  inbox = () => this.call<SeraMessage[]>('GET', '/inbox');
   interrupt = (id: string) => this.call<void>('POST', `/agents/${id}/interrupt`);
 
   /** Subscribe to runtime events, reconnecting with backoff. Returns an unsubscribe function. */

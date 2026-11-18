@@ -1,6 +1,7 @@
 using Marten.Agents;
 using Marten.Models;
 using Marten.Models.OpenAI;
+using Marten.Projects;
 using Marten.Storage;
 using Marten.Tools;
 using Marten.Web;
@@ -13,10 +14,17 @@ http.DefaultRequestHeaders.UserAgent.ParseAdd("Marten/0.1");
 var auth = new ChatGptAuth(home, http);
 var backend = new ResponsesBackend(auth, http);
 AgentManager? managerRef = null;
+Func<AgentManager> getManager = () => managerRef!;
 var tools = new ToolRegistry()
 	.Add(new ReadFileTool())
-	.Add(new EditFileTool())
-	.Add(new PowerShellTool(() => managerRef!.Config.CommandTimeoutSeconds, () => managerRef!.Config.StopGraceSeconds, new ChildProcessWatcher()));
+	.Add(new EditFileTool(new MemoryGuard(getManager)))
+	.Add(new PowerShellTool(() => managerRef!.Config.CommandTimeoutSeconds, () => managerRef!.Config.StopGraceSeconds, new ChildProcessWatcher()))
+	.Add(new SendMessageTool(getManager))
+	.Add(new TaskAddTool(getManager))
+	.Add(new TaskUpdateTool(getManager))
+	.Add(new SpawnAgentTool(getManager))
+	.Add(new CloseAgentTool(getManager))
+	.Add(new CreateProjectTool(getManager));
 var manager = managerRef = new AgentManager(home, config, backend, tools);
 var hub = new EventHub();
 manager.Events += hub.Broadcast;
@@ -44,13 +52,19 @@ if(webRoot != null) {
 object AgentSummary(Agent a) => new {
 	a.Info.Id, a.Info.Kind, a.Info.Name, a.Info.Created, a.Info.WorkingDirectory, a.Info.Model, a.Info.Effort,
 	a.Status, a.StatusDetail, Pending = a.PendingCount, a.AbandonedRunspaces,
+	a.Info.ProjectId, a.Info.ParentId, a.Info.Closed, a.Info.Worktree, a.NudgesStopped,
+	OpenTasks = a.Tasks.Count(t => t.State != TaskState.Done),
 };
+
+object ProjectSummary(Project p) => new { p.Info.Id, p.Info.Name, p.Info.Created, p.Info.Bindings, p.Info.WorktreesByDefault, p.Info.OrchestratorId };
 
 var api = app.MapGroup("/api");
 api.MapGet("/status", () => new {
 	auth = new { connected = auth.Connected, email = auth.Email, signingIn = auth.SigningIn, lastError = auth.LastError },
 	config = new { manager.Config.Model, manager.Config.Effort, DefaultModel = manager.KnownDefaultModel },
 	agents = manager.Agents.Select(AgentSummary),
+	projects = manager.Projects.Select(ProjectSummary),
+	inbox = manager.SeraInbox().Count,
 });
 api.MapPost("/auth/login", () => new { url = auth.BeginLogin() });
 api.MapPost("/auth/logout", () => { auth.Logout(); return Results.Ok(); });
@@ -85,6 +99,20 @@ api.MapPost("/agents/{id}/interrupt", (string id) => {
 	a.Interrupt();
 	return Results.Ok();
 });
+api.MapGet("/agents/{id}/tasks", (string id) =>
+	manager.Get(id) is { } a ? Results.Ok(a.Tasks) : Results.NotFound());
+api.MapPost("/projects", (CreateProject req) => {
+	try {
+		var (project, orchestrator) = manager.CreateProject(req.Name ?? "", req.Bindings ?? [], req.Prompt, req.WorktreesByDefault ?? false);
+		if(Blank(req.Brief) is { } brief) orchestrator.Send(new Inbound("Sera", brief, SendMode.Queued));
+		return Results.Ok(ProjectSummary(project));
+	} catch(ArgumentException e) {
+		return Results.Problem(e.Message, statusCode: 400);
+	}
+});
+api.MapGet("/projects/{id}/memory", (string id) =>
+	manager.GetProject(id) is { } p ? Results.Ok(new { path = p.MemoryPath, text = p.Memory, log = p.MemoryLog(), prompt = p.Prompt }) : Results.NotFound());
+api.MapGet("/inbox", () => manager.SeraInbox().AsEnumerable().Reverse());
 api.Map("/events", async (HttpContext ctx) => {
 	if(!ctx.WebSockets.IsWebSocketRequest) {
 		ctx.Response.StatusCode = 400;
@@ -112,6 +140,7 @@ static string? FindWebRoot() {
 	return null;
 }
 
+record CreateProject(string? Name, List<string>? Bindings, string? Prompt, bool? WorktreesByDefault, string? Brief);
 record ConfigUpdate(string? Model, string? Effort);
 record CreateAgent(string? Name, string? WorkingDirectory);
 record SendMessage(string Text, SendMode? Mode);

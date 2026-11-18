@@ -138,7 +138,7 @@ public sealed class PowerShellTool(Func<int> defaultTimeoutSeconds, Func<int> st
 		var iss = InitialSessionState.CreateDefault2();
 		if(OperatingSystem.IsWindows()) iss.ExecutionPolicy = Microsoft.PowerShell.ExecutionPolicy.Bypass;
 		iss.Variables.Add(new SessionStateVariableEntry("Marten", owner.MartenObject, "The Marten runtime."));
-		foreach(var tool in owner.Tools.All.Where(t => t.CallableFromPowerShell))
+		foreach(var tool in owner.Tools.For(owner).Where(t => t.CallableFromPowerShell))
 			iss.Commands.Add(new SessionStateFunctionEntry(tool.Name, ToolFunction(tool)));
 		return iss;
 	}

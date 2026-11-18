@@ -16,6 +16,7 @@ public sealed class Home {
 		Directory.CreateDirectory(Root);
 		Directory.CreateDirectory(Secrets);
 		Directory.CreateDirectory(Agents);
+		Directory.CreateDirectory(Projects);
 		Directory.CreateDirectory(Prompts);
 		if(!OperatingSystem.IsWindows())
 			File.SetUnixFileMode(Secrets, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
@@ -24,6 +25,8 @@ public sealed class Home {
 	public string ConfigPath => Path.Combine(Root, "config.json");
 	public string Secrets => Path.Combine(Root, "secrets");
 	public string Agents => Path.Combine(Root, "agents");
+	public string Projects => Path.Combine(Root, "projects");
+	public string SeraInboxPath => Path.Combine(Root, "inbox.jsonl");
 	public string Prompts => Path.Combine(Root, "prompts");
 	public string AgentDir(string id) => Path.Combine(Agents, id);
 }
