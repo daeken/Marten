@@ -40,3 +40,26 @@ public class ToolSearchTests {
 		Assert.Contains(m2.CreateChat("b", dir2.Path).RequestTools(), t => t.Name == "fake__echo");
 	}
 }
+
+public class McpProcessTests {
+	[Fact]
+	public async Task ACommandTimingOutWhileAServerStartsDoesNotKillTheServer() {
+		using var dir = new TempDir();
+		var (m, hub) = McpTests.Manager(dir, new FakeBackend());
+		await hub.RefreshAsync(false, default);
+		var a = m.CreateChat("a", dir.Path);
+		var b = m.CreateChat("b", dir.Path);
+		try {
+			var sleeping = m.Tools.InvokeAsync(a, "powershell", """{"command":"Start-Sleep 30","timeout_seconds":3}""", default);
+			await Task.Delay(500);
+			// b's server starts while a's command is the only one running, so a naive watcher would pin it on a.
+			var first = await m.Tools.InvokeAsync(b, "fake__echo", """{"text":"x"}""", default);
+			var timedOut = await sleeping;
+			Assert.Contains("Timed out", timedOut.Text);
+			var second = await m.Tools.InvokeAsync(b, "fake__echo", """{"text":"x"}""", default);
+			Assert.Equal(first.Text, second.Text);
+		} finally {
+			await hub.StopFor(b.Info.Id);
+		}
+	}
+}

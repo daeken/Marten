@@ -99,11 +99,15 @@ public sealed class ChildProcessWatcher {
 	readonly object gate = new();
 	readonly List<Lease> active = new();
 	HashSet<int> known = ProcessTable.ChildrenOf(ProcessTable.Self);
-	/// <summary>Children Marten started on purpose (background processes, MCP servers), never attributed to a command.</summary>
-	readonly HashSet<int> excluded = new();
+	/// <summary>
+	/// Children Marten started on purpose (background processes, MCP servers), never attributed to a command.
+	/// Process-wide, because every watcher sees every child of this process.
+	/// </summary>
+	static readonly HashSet<int> excluded = new();
 	Timer? timer;
 
-	public void Exclude(int pid) { lock(gate) excluded.Add(pid); }
+	public static void Exclude(int pid) { lock(excluded) excluded.Add(pid); }
+	public static bool IsExcluded(int pid) { lock(excluded) return excluded.Contains(pid); }
 
 	public Lease Begin() {
 		lock(gate) {
@@ -131,7 +135,7 @@ public sealed class ChildProcessWatcher {
 	void Poll() {
 		var now = ProcessTable.ChildrenOf(ProcessTable.Self);
 		foreach(var pid in now) {
-			if(known.Contains(pid) || excluded.Contains(pid)) continue;
+			if(known.Contains(pid) || IsExcluded(pid)) continue;
 			if(active.Count == 1) active[0].Owned.Add(pid);
 			else foreach(var lease in active) lease.Ambiguous.Add(pid);
 		}
