@@ -49,7 +49,7 @@ Named slots are opt-in and shared by all agents. In a PowerShell command, run `$
 
 ## Pausing and closing agents
 
-**Pause** holds the turn at its next model or tool dispatch and releases its agent slot. A tool that already started can finish and its result is kept. The rest of the batch continues when the agent, project, and global pauses have all cleared.
+**Pause** holds the turn at its next model or tool dispatch. A model reply or compaction that finishes while paused is held off the transcript until resume, without keeping either slot; streamed text is suppressed while paused. A tool that already started can finish and its result is kept. The rest of the batch continues when the agent, project, and global pauses have all cleared.
 
 **Close** (including `close_agent`) cancels the current turn and its slot waits. Late model output and remaining tools are dropped, even if the agent is reopened immediately. A new message from its orchestrator or Sera reopens it for a fresh turn; explicitly reopening can also wake queued messages. Neither replays the interrupted turn. Close cannot undo tool side effects that already happened. Scheduled runs already admitted may finish without reopening their owner; explicit notebook replays remain operator actions.
 

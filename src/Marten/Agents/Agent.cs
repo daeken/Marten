@@ -317,17 +317,15 @@ public sealed partial class Agent : IPowerShellOwner {
 			var changesAtStart = taskChanges;
 			while(true) {
 				manager.Restart.ThrowIfStopping();
-				var result = await CallModel(slots, modelCts.Token);
+				var (result, view) = await CallModel(slots, modelCts.Token);
 				var calls = new List<Entry>();
-				lock(gate) {
-					// Commit model output and close under the same lock. This token belongs to
-					// this turn, not the reopened agent or the asynchronously linked token.
-					slots.ThrowIfStopped(modelCts.Token);
+				await CommitModelOutput(slots, modelCts.Token, () => {
+					RecordUsage(result, view);
 					foreach(var item in result.Items) {
 						var e = Append(item);
 						if(e.Kind == EntryKind.ToolCall) calls.Add(e);
 					}
-				}
+				});
 				// No tool boundary left in this turn: anything that arrived during the reply wakes a new one.
 				if(calls.Count == 0) break;
 				foreach(var call in calls) {
@@ -466,7 +464,26 @@ public sealed partial class Agent : IPowerShellOwner {
 		return (head + note + tail, Path.GetRelativePath(Directory, path));
 	}
 
-	async Task<ModelResult> CallModel(TurnSlots slots, CancellationToken ct) {
+	// A completion's model lease has already been returned. Don't retain the agent lease
+	// while its reply is buffered; close must still invalidate this turn before commit.
+	async Task CommitModelOutput(TurnSlots slots, CancellationToken ct, Action commit) {
+		bool yielded = false;
+		while(true) {
+			lock(gate) {
+				slots.ThrowIfStopped(ct);
+				if(!IsPaused) {
+					if(yielded) SetStatus(AgentStatus.Running);
+					commit();
+					return;
+				}
+			}
+			slots.ReleaseAgent();
+			yielded = true;
+			await WaitWhilePaused(ct);
+		}
+	}
+
+	async Task<(ModelResult Result, List<Entry> View)> CallModel(TurnSlots slots, CancellationToken ct) {
 		var transientFailures = 0;
 		var quotaWait = TimeSpan.FromSeconds(30);
 		var recoveringOverflow = false;
@@ -487,14 +504,10 @@ public sealed partial class Agent : IPowerShellOwner {
 				SetStatus(AgentStatus.Running);
 				var result = await slots.Complete(request, ModelCallKind.Reply,
 					delta => manager.Publish(new { type = "delta", agentId = Info.Id, text = delta }), null, ct);
-				lock(gate) {
-					slots.ThrowIfStopped(ct);
-					RecordUsage(result, view);
-				}
 				// Keep each call's usage in the log, on its last item.
 				if(result.Usage != null && result.Items.Count > 0)
 					result = result with { Items = [.. result.Items.SkipLast(1), result.Items[^1] with { Usage = result.Usage }] };
-				return result;
+				return (result, view);
 			} catch(Exception) when(ct.IsCancellationRequested || slots.TurnToken.IsCancellationRequested) {
 				slots.ThrowIfStopped(ct);
 				throw;

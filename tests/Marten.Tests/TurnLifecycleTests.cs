@@ -64,6 +64,55 @@ public class TurnLifecycleTests {
 		Assert.Empty(deltas);
 	}
 
+	[Theory]
+	[InlineData(false)]
+	[InlineData(true)]
+	public async Task PausedReplyCommitsOnlyOnResumeUnlessClosed(bool close) {
+		using var dir = new TempDir();
+		var entered = Signal();
+		var release = Signal();
+		var backend = new Backend(async (_, delta, _) => {
+			entered.SetResult();
+			await release.Task;
+			delta("paused delta");
+			return new([.. FakeBackend.Say("complete buffered reply").Items, .. Batch.Items], null);
+		});
+		var tool = new HeldTool();
+		var (m, _, _, agent) = Create(dir, backend, tool, new Config {
+			Model = "fake-1", MaxRunningAgents = 1, MaxConcurrentModelCalls = 1,
+		});
+		var deltas = new ConcurrentQueue<object>();
+		m.Events += ev => {
+			if(ev.GetType().GetProperty("type")?.GetValue(ev) as string == "delta") deltas.Enqueue(ev);
+		};
+		Tell(agent, "old wake");
+		await entered.Task.WaitAsync(Timeout);
+		agent.SetPaused(true);
+		release.SetResult();
+		await Wait.Until(() => agent.Status == AgentStatus.Paused);
+		Assert.Equal(ModelCallOutcome.Succeeded, agent.ModelCall!.Outcome);
+		Assert.DoesNotContain(agent.Transcript.Entries, e => e.Kind is EntryKind.Assistant or EntryKind.ToolCall or EntryKind.ToolResult);
+		Assert.Equal(0, tool.Calls);
+		Assert.Empty(deltas);
+
+		// Both slots must be available while the completed reply is buffered.
+		var other = m.CreateChat("other", dir.Path);
+		Tell(other, "take both slots");
+		await Wait.Until(() => Idle(other));
+		Assert.Equal(2, backend.Calls);
+		if(close) {
+			agent.SetClosed(true);
+			Tell(agent, "new wake");
+		}
+		tool.Release.SetResult();
+		agent.SetPaused(false);
+		await Wait.Until(() => Idle(agent) && agent.Transcript.Entries.Any(e => e.Text == "fresh reply"));
+		Assert.Equal(3, backend.Calls);
+		Assert.Equal(close ? 0 : 2, tool.Calls);
+		Assert.Equal(!close, agent.Transcript.Entries.Any(e => e.Text == "complete buffered reply"));
+		Assert.Equal(close, agent.Transcript.Entries.Any(e => e.Kind == EntryKind.Idle && e.Reason == "interrupted"));
+	}
+
 	[Fact]
 	public async Task CloseAndImmediateReopenDuringAToolFencesTheRestOfTheBatch() {
 		using var dir = new TempDir();

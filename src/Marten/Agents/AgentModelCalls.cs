@@ -26,7 +26,7 @@ public sealed partial class Agent {
 			manager.Publish(new { type = "model_call_start", agentId = Info.Id, modelCall = call });
 			var pending = manager.Backend.CompleteAsync(request, delta => {
 				lock(gate) {
-					if(!turnToken.IsCancellationRequested && !ct.IsCancellationRequested) onDelta(delta);
+					if(!turnToken.IsCancellationRequested && !ct.IsCancellationRequested && !IsPaused) onDelta(delta);
 				}
 			}, ct);
 			ModelResult result;

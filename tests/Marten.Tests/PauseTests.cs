@@ -47,8 +47,7 @@ public class PauseTests {
 		agent.SetPaused(true);
 		backend.Gate.SetResult();
 		await Wait.Until(() => agent.Status == AgentStatus.Paused);
-		Assert.Equal(EntryKind.ToolCall, agent.Transcript.Last!.Kind);
-		Assert.DoesNotContain(agent.Transcript.Entries, e => e.Kind == EntryKind.ToolResult);
+		Assert.DoesNotContain(agent.Transcript.Entries, e => e.Kind is EntryKind.ToolCall or EntryKind.ToolResult);
 		Assert.Single(backend.Requests);
 
 		agent.SetPaused(false);
