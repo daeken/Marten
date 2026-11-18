@@ -227,6 +227,13 @@ public sealed class AgentManager {
 	/// <summary>A fresh system prompt for compaction: current project prompt, AGENTS.md, memory and notes.</summary>
 	public string RebuildInstructions(Agent agent) => BuildInstructions(agent.Info, agent.Directory);
 
+	/// <summary>The hand-edited prompts an agent's system prompt is built from, so a change can trigger a reload.</summary>
+	public List<string> PromptSources(AgentInfo info) {
+		var sources = new List<string> { ReadPrompt("marten.md"), ReadPrompt($"{info.Kind.ToString().ToLowerInvariant()}.md") };
+		if(GetProject(info.ProjectId) is { } project) sources.Add(project.Prompt);
+		return sources.Where(s => s.Length > 0).ToList();
+	}
+
 	string BuildInstructions(AgentInfo info, string dir) {
 		var kind = info.Kind.ToString().ToLowerInvariant();
 		var parts = new List<string> { ReadPrompt("marten.md"), ReadPrompt($"{kind}.md") };

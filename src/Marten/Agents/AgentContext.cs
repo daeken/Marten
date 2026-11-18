@@ -28,7 +28,7 @@ public sealed partial class Agent {
 			});
 		foreach(var e in entries) {
 			if(compaction != null && e.Seq <= compaction.UpTo) continue;
-			if(e.Kind is EntryKind.Elide or EntryKind.Compaction) continue;
+			if(e.Kind is EntryKind.Elide or EntryKind.Compaction or EntryKind.Reload) continue;
 			view.Add(e.Kind == EntryKind.ToolResult && elided.Contains(e.Seq) ? e with { Text = ElidedNote(e), Images = null } : e);
 		}
 		return view;
@@ -52,7 +52,7 @@ public sealed partial class Agent {
 		long lastSeq;
 		long lastTokens;
 		lock(gate) (lastSeq, lastTokens) = (state.LastInputSeq, state.LastInputTokens);
-		var changedSince = Transcript.Entries.Any(e => e.Seq > lastSeq && e.Kind is EntryKind.Elide or EntryKind.Compaction);
+		var changedSince = Transcript.Entries.Any(e => e.Seq > lastSeq && e.Kind is EntryKind.Elide or EntryKind.Compaction or EntryKind.Reload);
 		if(lastTokens > 0 && !changedSince)
 			return lastTokens + view.Where(e => e.Seq > lastSeq).Sum(Chars) / CharsPerToken;
 		return baseTokens + view.Sum(Chars) / CharsPerToken;
@@ -146,6 +146,7 @@ public sealed partial class Agent {
 		Instructions = instructions;
 		AtomicFile.Write(Path.Combine(Directory, "system.md"), instructions);
 		if(Project is { } project) SawMemory(project.Memory);
+		MarkPromptSeen(string.Join("\n\n", manager.PromptSources(Info)));
 		SnapshotDynamicTools();
 		lock(gate) state = state with { LastInputTokens = 0 };
 		SaveState();

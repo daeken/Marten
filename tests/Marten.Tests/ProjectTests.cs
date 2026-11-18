@@ -173,6 +173,52 @@ public class ProjectTests {
 	}
 
 	[Fact]
+	public async Task EditedProjectPromptReloadsTheSystemPromptOnceAndSurvivesRestart() {
+		using var dir = RepoDir();
+		var backend = new RoutedBackend();
+		var m = Manager(dir, backend);
+		var (project, orch) = m.CreateProject("p", [dir.File("repo")], "Never merge to main.", false);
+		orch.Send(new Inbound("Sera", "hi", SendMode.Queued));
+		await Wait.Until(() => Idle(orch));
+		Assert.DoesNotContain(orch.Transcript.Entries, e => e.Kind == EntryKind.Reload);
+
+		File.WriteAllText(project.PromptPath, "You own merges end-to-end.\n");
+		orch.Send(new Inbound("Sera", "merge it", SendMode.Queued));
+		await Wait.Until(() => Idle(orch) && orch.Transcript.Entries.Count(e => e.Kind == EntryKind.Idle) == 2);
+		Assert.Single(orch.Transcript.Entries, e => e.Kind == EntryKind.Reload);
+		Assert.Contains("You own merges end-to-end.", orch.Instructions);
+		Assert.DoesNotContain("Never merge to main.", orch.Instructions);
+		var note = orch.Transcript.Entries.Single(e => e.From == Agent.NudgeSender && e.Text!.Contains("reloaded"));
+		Assert.Contains("- removed: Never merge to main.", note.Text);
+		Assert.Contains("+ added: You own merges end-to-end.", note.Text);
+		Assert.Equal(orch.Instructions, backend.Requests[^1].Instructions);
+		Assert.Contains("You own merges end-to-end.", File.ReadAllText(Path.Combine(orch.Directory, "system.md")));
+
+		// A restart keeps the reloaded prompt, and no further reload happens while nothing changes.
+		var m2 = Manager(dir, backend);
+		m2.LoadAll();
+		var again = m2.Get(orch.Info.Id)!;
+		Assert.Contains("You own merges end-to-end.", again.Instructions);
+		again.Send(new Inbound("Sera", "still there?", SendMode.Queued));
+		await Wait.Until(() => Idle(again) && again.Transcript.Entries.Count(e => e.Kind == EntryKind.Idle) >= 3);
+		Assert.Single(again.Transcript.Entries, e => e.Kind == EntryKind.Reload);
+	}
+
+	[Fact]
+	public async Task AgentsFromBeforeReloadsPickUpAPromptEditedWhileTheyRan() {
+		using var dir = RepoDir();
+		var backend = new RoutedBackend();
+		var m = Manager(dir, backend);
+		var (project, orch) = m.CreateProject("p", [dir.File("repo")], "Old rule.", false);
+		File.WriteAllText(project.PromptPath, "New rule.\n");
+		// No PromptSeen yet, as for agents spawned before this existed.
+		orch.Send(new Inbound("Sera", "hi", SendMode.Queued));
+		await Wait.Until(() => Idle(orch));
+		Assert.Contains("New rule.", orch.Instructions);
+		Assert.Single(orch.Transcript.Entries, e => e.Kind == EntryKind.Reload);
+	}
+
+	[Fact]
 	public async Task IdleWithOpenTasksIsNudgedThreeTimesThenFlagged() {
 		using var dir = RepoDir();
 		var backend = new RoutedBackend();

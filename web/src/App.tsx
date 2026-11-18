@@ -566,6 +566,8 @@ function EntryView({ entry: e, result, running, imageUrl }: { entry: Entry; resu
         : e.reason === 'nudge' ? <div className="divider">Nudged: open tasks</div> : null;
     case 'elide':
       return <div className="divider">Elided {e.seqs?.length ?? 0} old tool result{e.seqs?.length === 1 ? '' : 's'} from context</div>;
+    case 'reload':
+      return <div className="divider">System prompt reloaded after a prompt edit</div>;
     case 'compaction':
       return (
         <details className="compaction">
