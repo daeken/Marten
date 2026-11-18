@@ -13,6 +13,22 @@ public sealed record McpServerConfig {
 	/// <summary>Working directory; null means the calling agent's.</summary>
 	public string? Cwd { get; init; }
 	public bool Disabled { get; init; }
+
+	/// <summary>
+	/// Fill {agent}, {agentDir} and {martenHome} in args, env and cwd, and expand a leading ~/, so each agent's
+	/// instance can get its own state, e.g. a browser profile under its own directory.
+	/// </summary>
+	public McpServerConfig Expand(string agentId, string agentDir, string martenHome) {
+		var userHome = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+		string X(string v) {
+			v = v.Replace("{agent}", agentId).Replace("{agentDir}", agentDir).Replace("{martenHome}", martenHome);
+			return v.StartsWith("~/") ? Path.Combine(userHome, v[2..]) : v;
+		}
+		return this with {
+			Command = X(Command), Args = Args.Select(X).ToList(),
+			Env = Env.ToDictionary(kv => kv.Key, kv => X(kv.Value)), Cwd = Cwd == null ? null : X(Cwd),
+		};
+	}
 }
 
 public sealed class McpException(string message) : Exception(message);
