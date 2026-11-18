@@ -86,7 +86,7 @@ public sealed class ResponsesBackend(ChatGptAuth auth, HttpClient http) : IModel
 				["type"] = "namespace", ["name"] = ToolNamespace, ["description"] = "Marten runtime tools",
 				["tools"] = new JsonArray(req.Tools.Select(t => (JsonNode) new JsonObject {
 					["type"] = "function", ["name"] = t.Name, ["description"] = t.Description,
-					["parameters"] = t.Parameters.DeepClone(), ["strict"] = true,
+					["parameters"] = t.Parameters.DeepClone(), ["strict"] = t.Strict,
 				}).ToArray()),
 			}),
 			["store"] = false,
@@ -133,11 +133,23 @@ public sealed class ResponsesBackend(ChatGptAuth auth, HttpClient http) : IModel
 					}
 					break;
 				case EntryKind.ToolResult:
-					input.Add(new JsonObject { ["type"] = "function_call_output", ["call_id"] = e.CallId, ["output"] = e.Text ?? "" });
+					input.Add(new JsonObject { ["type"] = "function_call_output", ["call_id"] = e.CallId, ["output"] = ToolOutputWire(e) });
 					break;
 			}
 		}
 		return input;
+	}
+
+	/// <summary>Plain text, or text plus images as input content when the result carries images.</summary>
+	static JsonNode ToolOutputWire(Entry e) {
+		if(e.Images is not { Count: > 0 } images) return e.Text ?? "";
+		var parts = new JsonArray(new JsonObject { ["type"] = "input_text", ["text"] = e.Text ?? "" });
+		foreach(var img in images) {
+			byte[] bytes;
+			try { bytes = File.ReadAllBytes(img.Path); } catch { parts.Add(new JsonObject { ["type"] = "input_text", ["text"] = $"[image {img.Path} is gone]" }); continue; }
+			parts.Add(new JsonObject { ["type"] = "input_image", ["image_url"] = $"data:{img.MimeType};base64,{Convert.ToBase64String(bytes)}" });
+		}
+		return parts;
 	}
 
 	/// <summary>

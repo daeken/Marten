@@ -3,7 +3,8 @@ using Marten.Storage;
 
 namespace Marten.Models;
 
-public sealed record ToolSpec(string Name, string Description, JsonObject Parameters);
+/// <summary>A tool as the model sees it. Strict schemas are enforced by the backend; MCP schemas aren't strict-compatible.</summary>
+public sealed record ToolSpec(string Name, string Description, JsonObject Parameters, bool Strict = true);
 
 public sealed record ModelRequest(
 	string Model,

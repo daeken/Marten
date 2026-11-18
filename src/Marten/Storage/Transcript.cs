@@ -50,7 +50,11 @@ public sealed record Entry {
 	public List<long>? Seqs { get; init; }
 	public long? UpTo { get; init; }
 	public string? Instructions { get; init; }
+	/// <summary>Images a tool result shows the model (MCP tools, View-Image): absolute paths of saved files.</summary>
+	public List<ImageRef>? Images { get; init; }
 }
+
+public sealed record ImageRef(string Path, string MimeType);
 
 /// <summary>
 /// Append-only JSONL log split into segments, so a long-lived agent never rewrites a big file.
