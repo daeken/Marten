@@ -10,15 +10,18 @@ public sealed class MartenApi(Agent agent, AgentManager manager) {
 	public string AgentKind => agent.Info.Kind.ToString();
 	public string Home => manager.Home.Root;
 	public string AgentDirectory => agent.Directory;
-	public string[] Tools => manager.Tools.All.Select(t => t.Name).ToArray();
+	public string[] Tools => manager.Tools.For(agent).Select(t => t.Name).ToArray();
+	public string? ProjectId => agent.Info.ProjectId;
+	public string? ProjectMemoryPath => manager.ProjectOf(agent)?.MemoryPath;
+	public object[] Tasks() => agent.Tasks.Select(t => new { t.Id, t.Title, State = t.State.ToString(), t.Reason }).ToArray<object>();
 
 	public object[] Agents() => manager.Agents.Select(a => new {
-		a.Info.Id, Kind = a.Info.Kind.ToString(), a.Info.Name, Status = a.Status.ToString(),
+		a.Info.Id, Kind = a.Info.Kind.ToString(), a.Info.Name, Status = a.Status.ToString(), a.Info.ProjectId, a.Info.ParentId, a.Info.Closed,
 	}).ToArray<object>();
 
 	/// <summary>Call any Marten tool by name. Arguments are plain data; failures throw so PowerShell reports them.</summary>
 	public string CallTool(string name, IDictionary? arguments) {
-		var tool = manager.Tools.Get(name) ?? throw new ArgumentException($"Unknown tool: {name}");
+		var tool = manager.Tools.Get(name) is { } t && t.AvailableTo(agent) ? t : throw new ArgumentException($"Unknown tool: {name}");
 		if(!tool.CallableFromPowerShell) throw new InvalidOperationException($"{name} can't be called from PowerShell.");
 		var args = StateJson.FromPowerShell(arguments ?? new Hashtable(), "arguments")?.ToJsonString() ?? "{}";
 		var result = manager.Tools.InvokeAsync(agent, name, args, CancellationToken.None).GetAwaiter().GetResult();

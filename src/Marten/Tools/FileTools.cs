@@ -45,12 +45,20 @@ public sealed class ReadFileTool : ITool {
 	}
 }
 
+/// <summary>Extra rules for particular files, such as project memory. Runs inside the per-path lock.</summary>
+public interface IEditGuard {
+	bool Applies(string path);
+	/// <summary>Throw ToolException to refuse the edit.</summary>
+	void Validate(IToolContext ctx, string path, string before, string after);
+	void Committed(IToolContext ctx, string path, string before, string after, string? reason);
+}
+
 /// <summary>
 /// Applies a list of anchored insertions, replacements and deletions to one file, all or nothing.
 /// Anchors match exactly and must each match once in the file as it stood. The edit fails if the
 /// file changed since the agent last read it.
 /// </summary>
-public sealed class EditFileTool : ITool {
+public sealed class EditFileTool(IEditGuard? guard = null) : ITool {
 	public string Name => "edit_file";
 	public string Description =>
 		"Edit one file atomically with a list of anchored edits. Each anchor is exact text that must occur exactly once " +
@@ -64,7 +72,8 @@ public sealed class EditFileTool : ITool {
 		("edits", Schema.Array("Edits to apply together.", Schema.Object(
 			("op", Schema.Enum("What to do at the anchor.", "replace", "insert_before", "insert_after", "delete", "create")),
 			("anchor", Schema.Str("Exact text to find; must match once. Null only for create.", nullable: true)),
-			("text", Schema.Str("New text. Null for delete.", nullable: true))))));
+			("text", Schema.Str("New text. Null for delete.", nullable: true))))),
+		("reason", Schema.Str("Why you are making this edit. Recorded in the audit log for project memory edits; null elsewhere is fine.", nullable: true)));
 
 	public sealed record Edit(string Op, string? Anchor, string? Text);
 
@@ -84,20 +93,23 @@ public sealed class EditFileTool : ITool {
 		var gate = PathLocks.GetOrAdd(path, _ => new SemaphoreSlim(1, 1));
 		await gate.WaitAsync(ct);
 		try {
-			return await ApplyLocked(ctx, path, edits, ct);
+			return await ApplyLocked(ctx, path, edits, args.OptString("reason"), ct);
 		} finally {
 			gate.Release();
 		}
 	}
 
-	static async Task<ToolOutput> ApplyLocked(IToolContext ctx, string path, List<Edit> edits, CancellationToken ct) {
+	async Task<ToolOutput> ApplyLocked(IToolContext ctx, string path, List<Edit> edits, string? reason, CancellationToken ct) {
+		var guarded = guard != null && guard.Applies(path) ? guard : null;
 
 		if(edits.Any(e => e.Op == "create")) {
 			if(edits.Count != 1) throw new ToolException("create must be the only edit.");
 			if(File.Exists(path)) throw new ToolException($"{path} already exists. Read it and edit it instead.");
 			var bytes = Encoding.UTF8.GetBytes(edits[0].Text ?? "");
+			guarded?.Validate(ctx, path, "", edits[0].Text ?? "");
 			AtomicFile.Write(path, bytes);
 			ctx.Files.Saw(path, bytes);
+			guarded?.Committed(ctx, path, "", edits[0].Text ?? "", reason);
 			return new ToolOutput($"Created {path} ({CountLines(edits[0].Text ?? "")} lines).");
 		}
 
@@ -107,10 +119,13 @@ public sealed class EditFileTool : ITool {
 		if(seen == null) throw new ToolException($"Read {path} before editing it.");
 		if(seen != FileTracker.Hash(original)) throw new ToolException($"{path} changed since you last read it. Read it again, then retry.");
 
-		var result = Apply(Encoding.UTF8.GetString(original), edits);
+		var before = Encoding.UTF8.GetString(original);
+		var result = Apply(before, edits);
+		guarded?.Validate(ctx, path, before, result);
 		var updated = Encoding.UTF8.GetBytes(result);
 		AtomicFile.Write(path, updated);
 		ctx.Files.Saw(path, updated);
+		guarded?.Committed(ctx, path, before, result, reason);
 		return new ToolOutput($"Applied {edits.Count} edit{(edits.Count == 1 ? "" : "s")} to {path}.");
 	}
 

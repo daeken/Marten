@@ -23,6 +23,8 @@ public interface ITool {
 	JsonObject Parameters { get; }
 	/// <summary>False for tools that can't be reached from inside PowerShell (powershell itself would deadlock).</summary>
 	bool CallableFromPowerShell => true;
+	/// <summary>Whether this agent gets the tool at all, e.g. spawning is for orchestrators only.</summary>
+	bool AvailableTo(IToolContext ctx) => true;
 	Task<ToolOutput> InvokeAsync(IToolContext ctx, JsonObject args, CancellationToken ct);
 }
 
@@ -37,9 +39,11 @@ public sealed class ToolRegistry {
 	public IEnumerable<ITool> All => tools.Values;
 	public ITool? Get(string name) => tools.GetValueOrDefault(name);
 	public IReadOnlyList<ToolSpec> Specs => tools.Values.Select(t => new ToolSpec(t.Name, t.Description, t.Parameters)).ToList();
+	public IEnumerable<ITool> For(IToolContext ctx) => tools.Values.Where(t => t.AvailableTo(ctx));
+	public IReadOnlyList<ToolSpec> SpecsFor(IToolContext ctx) => For(ctx).Select(t => new ToolSpec(t.Name, t.Description, t.Parameters)).ToList();
 
 	public async Task<ToolOutput> InvokeAsync(IToolContext ctx, string name, string? arguments, CancellationToken ct) {
-		if(Get(name) is not { } tool) return ToolOutput.Error($"Unknown tool: {name}");
+		if(Get(name) is not { } tool || !tool.AvailableTo(ctx)) return ToolOutput.Error($"Unknown tool: {name}");
 		JsonObject args;
 		try {
 			args = JsonNode.Parse(string.IsNullOrWhiteSpace(arguments) ? "{}" : arguments) as JsonObject

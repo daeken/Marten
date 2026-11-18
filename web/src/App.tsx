@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { AgentSummary, Api, Entry, ServerEvent, Status_, takeToken } from './api';
+import { AgentSummary, Api, Entry, Project, ProjectMemory, SeraMessage, ServerEvent, Status_, TaskItem, takeToken } from './api';
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh'];
+
+/** "Name (id)" labels from the runtime, shown as just the name. */
+const shortFrom = (from?: string) => (from ?? '').replace(/ \([^)]*\)$/, '');
+const time = (iso: string) => new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 
 /** Merge entries by sequence number, so a late HTTP snapshot never erases live websocket entries. */
 function mergeEntries(a: Entry[], b: Entry[]): Entry[] {
@@ -27,6 +31,8 @@ export function App() {
   const [streaming, setStreaming] = useState<Record<string, string>>({});
   const [running, setRunning] = useState<Record<string, string>>({});
   const [models, setModels] = useState<string[]>([]);
+  /** Bumped on task and memory events so open panels refetch. */
+  const [tick, setTick] = useState(0);
   const connected = status?.auth.connected ?? false;
   useEffect(() => {
     if (api && connected) api.models().then(setModels).catch(() => setModels([]));
@@ -38,7 +44,7 @@ export function App() {
       const s = await api.status();
       setStatus(s);
       setError(null);
-      setSelected(cur => cur ?? s.agents[s.agents.length - 1]?.id ?? null);
+      setSelected(cur => cur ?? s.agents[s.agents.length - 1]?.id ?? 'new:project');
     } catch (e) {
       setError((e as Error).message === 'unauthorized' ? 'unauthorized' : (e as Error).message);
     }
@@ -51,7 +57,7 @@ export function App() {
   }, [api]);
 
   useEffect(() => { refresh(); }, [refresh]);
-  useEffect(() => { if (selected) loadTranscript(selected); }, [selected, loadTranscript]);
+  useEffect(() => { if (selected && !selected.includes(':') && selected !== 'inbox') loadTranscript(selected); }, [selected, loadTranscript]);
 
   // Keep the latest selection visible to the socket handler without resubscribing.
   const selectedRef = useRef(selected);
@@ -70,6 +76,10 @@ export function App() {
         case 'delta':
           setStreaming(s => ({ ...s, [e.agentId]: (s[e.agentId] ?? '') + e.text }));
           break;
+        case 'tasks':
+        case 'memory':
+          setTick(t => t + 1);
+          break;
         case 'tool_start':
           setRunning(r => ({ ...r, [e.agentId]: e.callId }));
           break;
@@ -82,6 +92,8 @@ export function App() {
         case 'flag':
         case 'agents':
         case 'config':
+        case 'projects':
+        case 'sera_message':
           refresh();
           break;
       }
@@ -98,14 +110,24 @@ export function App() {
     return <div className="gate"><p>{error ?? 'Connecting…'}</p></div>;
 
   const agent = status.agents.find(a => a.id === selected) ?? null;
+  const project = agent ? status.projects.find(p => p.id === agent.projectId) : undefined;
+  let main;
+  if (agent)
+    main = <AgentView api={api} agent={agent} project={project} agents={status.agents} models={models} tick={tick} defaultModel={status.config.model ?? status.config.defaultModel ?? models[0]} defaultEffort={status.config.effort} onChange={refresh} onSelect={setSelected} entries={transcripts[agent.id] ?? []} streaming={streaming[agent.id] ?? ''} runningCall={running[agent.id]} />;
+  else if (selected === 'inbox')
+    main = <InboxView api={api} status={status} tick={status.inbox} onSelect={setSelected} />;
+  else if (selected?.startsWith('memory:'))
+    main = <MemoryView api={api} project={status.projects.find(p => p.id === selected.slice(7))} agents={status.agents} tick={tick} />;
+  else if (selected === 'new:project')
+    main = <NewProject api={api} onCreated={id => { refresh(); setSelected(id); }} />;
+  else
+    main = <div className="empty">Start a chat or a project to begin.</div>;
 
   return (
     <div className="shell">
       <Sidebar api={api} status={status} selected={selected} onSelect={setSelected} onChange={refresh} />
       <main className="main">
-        {agent
-          ? <AgentView api={api} agent={agent} models={models} defaultModel={status.config.model ?? status.config.defaultModel ?? models[0]} defaultEffort={status.config.effort} onChange={refresh} entries={transcripts[agent.id] ?? []} streaming={streaming[agent.id] ?? ''} runningCall={running[agent.id]} />
-          : <div className="empty">Start a chat to begin.</div>}
+        {main}
       </main>
     </div>
   );
@@ -153,27 +175,58 @@ function Sidebar({ api, status, selected, onSelect, onChange }: {
         )}
       </section>
       <nav className="agents">
+        <button className={`agent inbox ${selected === 'inbox' ? 'active' : ''}`} onClick={() => onSelect('inbox')}>
+          <span className="name">Inbox</span>
+          {status.inbox > 0 && <span className="badge">{status.inbox}</span>}
+        </button>
+        <div className="row">
+          <span className="muted small">Projects</span>
+          <button className="link" onClick={() => onSelect('new:project')}>New</button>
+        </div>
+        {status.projects.map(p => {
+          const members = status.agents.filter(a => a.projectId === p.id);
+          const orch = members.filter(a => a.kind === 'orchestrator');
+          const tasks = members.filter(a => a.kind === 'task');
+          return (
+            <div key={p.id} className="project">
+              <div className="project-head">
+                <span className="project-name" title={p.bindings.join('\n')}>{p.name}</span>
+                <button className={`link small ${selected === `memory:${p.id}` ? 'on' : ''}`} onClick={() => onSelect(`memory:${p.id}`)}>Memory</button>
+              </div>
+              {[...orch, ...tasks].map(a => <AgentRow key={a.id} agent={a} selected={selected} onSelect={onSelect} nested={a.kind === 'task'} />)}
+            </div>
+          );
+        })}
         <div className="row">
           <span className="muted small">Chats</span>
           <button className="link" onClick={newChat}>New</button>
         </div>
-        {status.agents.map(a => (
-          <button key={a.id} className={`agent ${a.id === selected ? 'active' : ''}`} onClick={() => onSelect(a.id)}>
-            <span className={`dot ${a.status}`} title={statusLabel[a.status]} />
-            <span className="name">{a.name}</span>
-            {a.pending > 0 && <span className="badge">{a.pending}</span>}
-            {a.abandonedRunspaces.length > 0 && <span className="badge warn" title="Abandoned runspaces">!</span>}
-          </button>
-        ))}
+        {status.agents.filter(a => a.kind === 'chat').map(a => <AgentRow key={a.id} agent={a} selected={selected} onSelect={onSelect} />)}
       </nav>
     </aside>
   );
 }
 
-function AgentView({ api, agent, models, defaultModel, defaultEffort, onChange, entries, streaming, runningCall }: {
-  api: Api; agent: AgentSummary; models: string[]; defaultModel?: string; defaultEffort?: string; onChange: () => void;
+function AgentRow({ agent: a, selected, onSelect, nested }: { agent: AgentSummary; selected: string | null; onSelect: (id: string) => void; nested?: boolean }) {
+  return (
+    <button className={`agent ${a.id === selected ? 'active' : ''} ${nested ? 'nested' : ''} ${a.closed ? 'closed' : ''}`} onClick={() => onSelect(a.id)}>
+      <span className={`dot ${a.status}`} title={a.closed ? 'Closed' : statusLabel[a.status]} />
+      <span className="name">{a.name}</span>
+      {a.openTasks > 0 && <span className="badge" title="Open tasks">{a.openTasks}</span>}
+      {a.pending > 0 && <span className="badge" title="Queued messages">✉ {a.pending}</span>}
+      {(a.abandonedRunspaces.length > 0 || a.nudgesStopped) && <span className="badge warn" title={a.nudgesStopped ? 'Nudges stopped' : 'Abandoned runspaces'}>!</span>}
+    </button>
+  );
+}
+
+function AgentView({ api, agent, project, agents, models, tick, defaultModel, defaultEffort, onChange, onSelect, entries, streaming, runningCall }: {
+  api: Api; agent: AgentSummary; project?: Project; agents: AgentSummary[]; models: string[]; tick: number;
+  defaultModel?: string; defaultEffort?: string; onChange: () => void; onSelect: (id: string) => void;
   entries: Entry[]; streaming: string; runningCall?: string;
 }) {
+  const [tasks, setTasks] = useState<TaskItem[]>([]);
+  useEffect(() => { api.tasks(agent.id).then(setTasks).catch(() => setTasks([])); }, [api, agent.id, tick]);
+  const parent = agents.find(a => a.id === agent.parentId);
   const [text, setText] = useState('');
   const [mode, setMode] = useState<'queued' | 'immediate'>('queued');
   const scroller = useRef<HTMLDivElement>(null);
@@ -198,8 +251,15 @@ function AgentView({ api, agent, models, defaultModel, defaultEffort, onChange, 
     <div className="agent-view">
       <header className="agent-head">
         <div>
-          <div className="title">{agent.name}</div>
-          <div className="muted small">{agent.workingDirectory}</div>
+          <div className="title">
+            {project && <span className="crumb">{project.name} / </span>}
+            {agent.name}
+            {agent.closed && <span className="tag">closed</span>}
+          </div>
+          <div className="muted small">
+            {agent.worktree ?? agent.workingDirectory}
+            {parent && <> · reports to <button className="link small" onClick={() => onSelect(parent.id)}>{parent.name}</button></>}
+          </div>
         </div>
         <div className="head-right">
           <div className="pickers">
@@ -215,6 +275,18 @@ function AgentView({ api, agent, models, defaultModel, defaultEffort, onChange, 
           <div className={`state ${agent.status}`}>{statusLabel[agent.status]}{agent.statusDetail ? ` · ${agent.statusDetail}` : ''}</div>
         </div>
       </header>
+      {tasks.length > 0 && (
+        <div className="tasks">
+          {tasks.map(t => (
+            <span key={t.id} className={`task ${t.state}`} title={t.reason ?? ''}>
+              <span className="task-state">{t.state}</span> #{t.id} {t.title}{t.reason && t.state !== 'open' ? ` · ${t.reason}` : ''}
+            </span>
+          ))}
+        </div>
+      )}
+      {agent.nudgesStopped && (
+        <div className="banner">Nudges stopped: this agent went idle three times with open tasks and nothing changed. Message it to get it going again.</div>
+      )}
       {agent.abandonedRunspaces.length > 0 && (
         <div className="banner">
           {agent.abandonedRunspaces.length} PowerShell runspace{agent.abandonedRunspaces.length > 1 ? 's' : ''} abandoned after a timeout. Last: <code>{agent.abandonedRunspaces.at(-1)!.command.slice(0, 120)}</code>. Restart Marten to reclaim them.
@@ -256,7 +328,9 @@ function EntryView({ entry: e, result, running }: { entry: Entry; result?: Entry
     case 'message':
       return e.from === 'Sera'
         ? <div className="message mine">{e.text}</div>
-        : <div className="message other"><div className="from">{e.from}</div><Md text={e.text ?? ''} /></div>;
+        : e.from === 'Marten'
+          ? <div className="message system"><Md text={e.text ?? ''} /></div>
+          : <div className="message other"><div className="from">{shortFrom(e.from)}</div><Md text={e.text ?? ''} /></div>;
     case 'assistant':
       return e.text ? <div className="assistant"><Md text={e.text} /></div> : null;
     case 'reasoning':
@@ -268,7 +342,8 @@ function EntryView({ entry: e, result, running }: { entry: Entry; result?: Entry
     case 'idle':
       return e.reason === 'interrupted' ? <div className="divider">Interrupted</div> : null;
     case 'wake':
-      return e.reason === 'restart' ? <div className="divider">Resumed after restart</div> : null;
+      return e.reason === 'restart' ? <div className="divider">Resumed after restart</div>
+        : e.reason === 'nudge' ? <div className="divider">Nudged: open tasks</div> : null;
     default:
       return null;
   }
@@ -307,6 +382,108 @@ function Thinking({ label = 'Thinking' }: { label?: string }) {
     <div className="thinking" aria-live="polite">
       <span className="blob" /><span className="blob" /><span className="blob" />
       <span className="label">{label}</span>
+    </div>
+  );
+}
+
+function NewProject({ api, onCreated }: { api: Api; onCreated: (orchestratorId: string) => void }) {
+  const [name, setName] = useState('');
+  const [bindings, setBindings] = useState('');
+  const [prompt, setPrompt] = useState('');
+  const [brief, setBrief] = useState('');
+  const [worktrees, setWorktrees] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      const p = await api.createProject({
+        name, bindings: bindings.split('\n').map(b => b.trim()).filter(Boolean),
+        prompt: prompt.trim() || null, worktreesByDefault: worktrees, brief: brief.trim() || null,
+      });
+      onCreated(p.orchestratorId!);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="page">
+      <form className="form" onSubmit={submit}>
+        <h2>New project</h2>
+        <label>Name<input value={name} onChange={e => setName(e.target.value)} placeholder="Open Thedas" required /></label>
+        <label>Bound folders or repos, one per line
+          <textarea value={bindings} onChange={e => setBindings(e.target.value)} rows={3} placeholder="/Volumes/External2/projects/OpenThedas" required />
+          <span className="hint">The first one is the orchestrator's working directory. AGENTS.md at each root is read.</span>
+        </label>
+        <label>Project prompt
+          <textarea value={prompt} onChange={e => setPrompt(e.target.value)} rows={5} placeholder="Goals, rules and context every agent in this project should know." />
+        </label>
+        <label className="check"><input type="checkbox" checked={worktrees} onChange={e => setWorktrees(e.target.checked)} /> Give task agents their own git worktree by default</label>
+        <label>First message to the orchestrator
+          <textarea value={brief} onChange={e => setBrief(e.target.value)} rows={3} placeholder="Optional. What should it start on?" />
+        </label>
+        {error && <div className="error">{error}</div>}
+        <div className="form-actions"><button className="primary" disabled={busy || !name.trim() || !bindings.trim()}>Create project</button></div>
+      </form>
+    </div>
+  );
+}
+
+function MemoryView({ api, project, agents, tick }: { api: Api; project?: Project; agents: AgentSummary[]; tick: number }) {
+  const [memory, setMemory] = useState<ProjectMemory | null>(null);
+  useEffect(() => { if (project) api.memory(project.id).then(setMemory).catch(() => setMemory(null)); }, [api, project, tick]);
+  if (!project) return <div className="empty">No such project.</div>;
+  const name = (id: string) => agents.find(a => a.id === id)?.name ?? id;
+  return (
+    <div className="page">
+      <div className="doc">
+        <h2>{project.name} · memory</h2>
+        <div className="muted small">{memory?.path}</div>
+        <div className="memory">{memory?.text.trim() ? <Md text={memory.text} /> : <span className="muted">Empty so far.</span>}</div>
+        {memory?.prompt && (<><h3>Project prompt</h3><div className="memory"><Md text={memory.prompt} /></div></>)}
+        <h3>History</h3>
+        {memory && memory.log.length === 0 && <div className="muted small">No edits yet.</div>}
+        <ul className="history">
+          {memory?.log.slice().reverse().map((e, i) => (
+            <li key={i}>
+              <div className="small"><strong>{name(e.agentId)}</strong> <span className="muted">{time(e.at)}{e.reason ? ` · ${e.reason}` : ''}</span></div>
+              {e.removed.map((l, j) => <div key={`r${j}`} className="diff del">− {l}</div>)}
+              {e.added.map((l, j) => <div key={`a${j}`} className="diff add">+ {l}</div>)}
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
+function InboxView({ api, status, tick, onSelect }: { api: Api; status: Status_; tick: number; onSelect: (id: string) => void }) {
+  const [messages, setMessages] = useState<SeraMessage[]>([]);
+  useEffect(() => { api.inbox().then(setMessages).catch(() => setMessages([])); }, [api, tick]);
+  return (
+    <div className="page">
+      <div className="doc">
+        <h2>Inbox</h2>
+        {messages.length === 0 && <div className="muted">Nothing from your agents yet. Orchestrators write here when they need you.</div>}
+        {messages.map(m => {
+          const project = status.projects.find(p => p.id === m.projectId);
+          return (
+            <div key={m.id} className="inbox-item">
+              <div className="small">
+                <button className="link" onClick={() => onSelect(m.from)}>{project ? `${project.name} / ` : ''}{m.fromName}</button>
+                <span className="muted"> · {time(m.at)}</span>
+              </div>
+              <Md text={m.text} />
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
