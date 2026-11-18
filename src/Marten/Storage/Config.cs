@@ -12,6 +12,14 @@ public sealed record Config {
 	public int StopGraceSeconds { get; init; } = 5;
 	/// <summary>Tool results longer than this are truncated on arrival, with a pointer to the full text.</summary>
 	public int ToolResultMaxChars { get; init; } = 30_000;
+	/// <summary>Context window in tokens for models not listed in ContextWindows.</summary>
+	public int ContextTokens { get; init; } = 200_000;
+	/// <summary>Per-model context windows, by model slug.</summary>
+	public Dictionary<string, int> ContextWindows { get; init; } = new();
+	/// <summary>Compact when the context passes this fraction of the window.</summary>
+	public double CompactAt { get; init; } = 0.75;
+	/// <summary>Elide old tool results, in one batch, when they pass this fraction of the window.</summary>
+	public double ElideAt { get; init; } = 0.3;
 	/// <summary>Project memory size cap. An edit past it fails, so agents prune before adding.</summary>
 	public int MemoryCapBytes { get; init; } = 16 * 1024;
 	/// <summary>Extra Origin allowed to call the API, e.g. the Vite dev server.</summary>

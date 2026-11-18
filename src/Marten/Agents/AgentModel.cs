@@ -36,6 +36,9 @@ public sealed record AgentState {
 	/// <summary>Nudges sent in a row with no task changing state.</summary>
 	public int NudgeStreak { get; init; }
 	public bool NudgesStopped { get; init; }
+	/// <summary>Input tokens the backend reported for the last request, and the last log entry it included.</summary>
+	public long LastInputTokens { get; init; }
+	public long LastInputSeq { get; init; }
 }
 
 public enum TaskState { Open, Waiting, Blocked, Done }

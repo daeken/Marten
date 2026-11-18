@@ -11,14 +11,14 @@ namespace Marten.Agents;
 /// wake until the agent goes idle. Immediate messages land between model calls, at a tool
 /// boundary; queued messages wait until the agent is idle and then wake it.
 /// </summary>
-public sealed class Agent : IPowerShellOwner {
+public sealed partial class Agent : IPowerShellOwner {
 	public AgentInfo Info { get; private set; }
 	public string Directory { get; }
 	public Transcript Transcript { get; }
 	public FileTracker Files { get; }
 	public AgentStatus Status { get; private set; } = AgentStatus.Idle;
 	public string? StatusDetail { get; private set; }
-	public string Instructions { get; }
+	public string Instructions { get; private set; }
 
 	readonly AgentManager manager;
 	readonly object gate = new();
@@ -35,6 +35,7 @@ public sealed class Agent : IPowerShellOwner {
 		Info = info;
 		Instructions = instructions;
 		Transcript = new Transcript(Path.Combine(directory, "transcript"));
+		if(Transcript.Entries.LastOrDefault(e => e.Kind == EntryKind.Compaction)?.Instructions is { } rebuilt) Instructions = rebuilt;
 		state = JsonIO.Load(StatePath, () => new AgentState());
 		Files = new FileTracker(state.FileHashes);
 		Files.Changed += SaveState;
@@ -358,15 +359,24 @@ public sealed class Agent : IPowerShellOwner {
 	async Task<ModelResult?> CallModel(CancellationToken ct) {
 		var transientFailures = 0;
 		var quotaWait = TimeSpan.FromSeconds(30);
+		var compactedForOverflow = false;
 		while(true) {
 			ct.ThrowIfCancellationRequested();
 			try {
 				var model = Info.Model ?? await manager.DefaultModel(ct);
+				await ManageContext(model, ct);
+				var view = View();
 				var request = new ModelRequest(model, Info.Effort ?? manager.Config.Effort, Instructions,
-					Transcript.Entries, manager.Tools.SpecsFor(this), CacheKey: $"marten:{Info.Id}");
+					view, manager.Tools.SpecsFor(this), CacheKey: $"marten:{Info.Id}");
 				SetStatus(AgentStatus.Running);
-				return await manager.Backend.CompleteAsync(request,
+				var result = await manager.Backend.CompleteAsync(request,
 					delta => manager.Publish(new { type = "delta", agentId = Info.Id, text = delta }), ct);
+				RecordUsage(result, view);
+				return result;
+			} catch(ContextFullException) when(!compactedForOverflow) {
+				// The estimate was off; compact now and try once more.
+				compactedForOverflow = true;
+				await Compact(Info.Model ?? await manager.DefaultModel(ct), ct);
 			} catch(RateLimitedException e) {
 				// Wait it out; never fail and never switch models.
 				var wait = e.RetryAfter ?? quotaWait;

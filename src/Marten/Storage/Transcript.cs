@@ -18,6 +18,10 @@ public static class EntryKind {
 	public const string Error = "error";
 	/// <summary>The turn ended and the agent went idle.</summary>
 	public const string Idle = "idle";
+	/// <summary>Old tool results (Seqs) are replaced in the model's view by a pointer to their full text.</summary>
+	public const string Elide = "elide";
+	/// <summary>Everything up to UpTo is replaced in the model's view by Text, a summary. Instructions holds the rebuilt system prompt.</summary>
+	public const string Compaction = "compaction";
 }
 
 /// <summary>
@@ -43,6 +47,9 @@ public sealed record Entry {
 	public string? Model { get; init; }
 	public JsonElement? Raw { get; init; }
 	public JsonElement? Usage { get; init; }
+	public List<long>? Seqs { get; init; }
+	public long? UpTo { get; init; }
+	public string? Instructions { get; init; }
 }
 
 /// <summary>

@@ -344,6 +344,15 @@ function EntryView({ entry: e, result, running }: { entry: Entry; result?: Entry
     case 'wake':
       return e.reason === 'restart' ? <div className="divider">Resumed after restart</div>
         : e.reason === 'nudge' ? <div className="divider">Nudged: open tasks</div> : null;
+    case 'elide':
+      return <div className="divider">Elided {e.seqs?.length ?? 0} old tool result{e.seqs?.length === 1 ? '' : 's'} from context</div>;
+    case 'compaction':
+      return (
+        <details className="compaction">
+          <summary className="divider">{e.reason === 'whole' ? 'Context compacted' : 'Older context rolled over'} · summary</summary>
+          <div><Md text={e.text ?? ''} /></div>
+        </details>
+      );
     default:
       return null;
   }
