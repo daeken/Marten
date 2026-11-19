@@ -507,7 +507,7 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
         </div>
       </header>
       {tasks.length > 0 && (
-        <div className="tasks">
+        <div className="tasks task-list" role="region" aria-label="Agent tasks" tabIndex={0}>
           {tasks.map(t => (
             <span key={t.id} className={`task ${t.state}`} title={[t.reason, t.check && `Done when \`${t.check}\` passes`, t.lastCheck && `Last check ${formatWhen(t.lastCheck.at)}: ${t.lastCheck.passed ? 'passed' : 'failed'}\n${t.lastCheck.output.slice(-1500)}`].filter(Boolean).join('\n\n')}>
               <span className="task-state">{t.state}</span> #{t.id} {t.title}{t.reason && t.state !== 'open' ? ` · ${t.reason}` : ''}

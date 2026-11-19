@@ -201,7 +201,7 @@ The UI is how Sera watches and steers the system, so it has to show everything t
 **Shows**
 
 - Every message between agents, and messages from orchestrators to Sera.
-- Each agent's task list, with blocked tasks and their reasons.
+- Each agent's task list, with blocked tasks and their reasons, in a height-capped panel that scrolls separately from the conversation.
 - An abandoned runspace, and an agent whose nudges have stopped.
 - Background processes, and which agent owns each.
 - Each project's memory, with its history and who changed each line.
