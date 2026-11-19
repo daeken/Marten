@@ -66,7 +66,7 @@ if(args is ["bedrock-list-mantle"]) {
 	using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
 	try {
 		foreach(var id in await mantle.DiscoverMantleModelsAsync(timeout.Token)) Console.WriteLine(id);
-	} catch(Exception e) when(e is NotConnectedException or InvalidOperationException or TransientModelException or RateLimitedException or OperationCanceledException) {
+	} catch(Exception e) when(e is NotConnectedException or InvalidOperationException or ProviderUnreachableException or TransientModelException or RateLimitedException or OperationCanceledException) {
 		Console.Error.WriteLine(e.Message);
 		Environment.ExitCode = 1;
 	}
@@ -80,7 +80,7 @@ if(args is ["bedrock-check", var model]) {
 		await backend.CompleteAsync(new(model, null, "Reply briefly.",
 			[new Entry { Kind = EntryKind.Message, Text = "Reply with OK." }], [], "bedrock-check"), Console.Write, timeout.Token);
 		Console.WriteLine();
-	} catch(Exception e) when(e is NotConnectedException or InvalidOperationException or TransientModelException or RateLimitedException or OperationCanceledException) {
+	} catch(Exception e) when(e is NotConnectedException or InvalidOperationException or ProviderUnreachableException or TransientModelException or RateLimitedException or OperationCanceledException) {
 		Console.Error.WriteLine(e.Message);
 		Environment.ExitCode = 1;
 	}
