@@ -47,6 +47,10 @@ Omit either `max…` setting or set it to `0` for no limit. Turns yield their ag
 
 Named slots are opt-in and shared by all agents. In a PowerShell command, run `$Marten.WithSlot('build', { dotnet build })`; `$Marten.Slots` lists the configured names. A slot must have positive capacity. The wait counts toward the command timeout. Wrap only foreground work, and don't nest slots or wait for another agent while holding one.
 
+## Provider network recovery
+
+If DNS or connection establishment fails, the agent shows **Waiting for network** with the reason and next retry time. The turn releases its slots while waiting and retries the failed model operation without rerunning tools. Retries use jittered exponential backoff (up to five minutes) and are staggered across agents. A continuous outage can wait up to 45 minutes before the turn reports an error to its parent. Pause holds dispatch; Stop, Close, and shutdown cancel the wait. Header/stream timeouts, server errors, and quota still have their separate retry policies.
+
 ## Pausing and closing agents
 
 **Pause** holds the turn at its next model or tool dispatch. A model reply or compaction that finishes while paused is held off the transcript until resume, without keeping either slot; streamed text is suppressed while paused. A tool that already started can finish and its result is kept. The rest of the batch continues when the agent, project, and global pauses have all cleared.
@@ -65,7 +69,7 @@ Keep standing rules and short pointers in `MEMORY.md` (16 KiB by default). Link 
 
 ## As an app (desktop and phone)
 
-Marten's UI is an installable web app. Opening a conversation jumps to its latest entry. Scroll back to read older messages without being pulled to the end by new ones. Question-card answers appear in the conversation as soon as they’re saved, even if the agent is paused.
+Marten's UI is an installable web app. Opening a conversation shows the latest 80 transcript entries. Scroll back without being pulled to the end by new replies. Use **Older** and **Newer** to read one page at a time, or **Return to latest** to follow live replies. Paging changes only the display, not the agent’s history or context. Question-card answers appear in the conversation as soon as they’re saved, even if the agent is paused.
 
 - **Desktop:** open the printed URL in Chrome or Edge and choose **Install Marten**, or in Safari choose **File → Add to Dock**. It opens in its own window and keeps working across Marten restarts.
 - **Phone:** Marten listens only on 127.0.0.1, so reach it through an HTTPS proxy on the Mac. [Tailscale](https://tailscale.com) is the easy one:
@@ -82,3 +86,24 @@ For UI work, run `npm run dev` in `web/` and set `"devOrigin": "http://localhost
 ```sh
 dotnet test
 ```
+
+## Amazon Bedrock
+
+Select `bedrock/<model-id>` for Bedrock Runtime or `mantle/<model-id>` for Bedrock Mantle. Check the AWS [model card](https://docs.aws.amazon.com/bedrock/latest/userguide/model-cards.html) for Responses API support, region, model or inference profile ID, and path prefix. Support on one endpoint does not imply support on the other.
+
+Set `AWS_REGION` (or `AWS_DEFAULT_REGION`), or select an AWS profile with a region using `AWS_PROFILE`. Marten signs requests using the AWS SDK credential chain; do not put AWS credentials in `config.json`. Your identity needs the [inference permissions](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-prereq.html) for your endpoint and model.
+
+- **Runtime:** Add unprefixed model or inference profile IDs to the `models.bedrock` array in `config.json`. Runtime does not implement OpenAI-compatible model listing. Requests use `/openai/v1/responses`.
+- **Mantle:** Marten lists models with `GET /v1/models` unless you provide a `models.mantle` array of IDs. Requests use `/v1/responses` by default. If a model card specifies the `/openai/v1` prefix on Mantle, include its unprefixed model ID in `MARTEN_MANTLE_OPENAI_ROUTE_MODELS` (comma-separated; read at startup). Configuring an ID does not grant access.
+
+Marten streams responses with `store` set to `false`. A local 32,000,000-byte budget on the serialized request triggers context compaction before transport; it is not an AWS service quota.
+
+To diagnose reasoning settings, set `MARTEN_TRACE_BEDROCK_EFFORT=1` before starting Marten. The opt-in trace writes to stderr. It compares the selected effort with the effort parsed from the serialized request, then reports the completed response’s effort and reasoning token count when available. A per-call identifier joins the two records. Unrecognized effort labels are masked; model IDs, agent IDs, prompts, tool data, and credentials are not logged.
+
+To check the configuration with one billable request, for example using [gpt-oss-120b on Mantle](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-oss-120b.html):
+
+```sh
+dotnet run --project src/Marten -- bedrock-check mantle/openai.gpt-oss-120b
+```
+
+AWS reference: [Responses API endpoints, routing, and model discovery](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-responses-api.html).

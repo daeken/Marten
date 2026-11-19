@@ -32,6 +32,9 @@ public sealed class AgentManager {
 	public Config Config { get; private set; }
 	public IModelBackend Backend { get; }
 	internal Func<TimeSpan, CancellationToken, Task> ModelRetryDelay { get; init; } = Task.Delay;
+	internal TimeProvider NetworkClock { get; }
+	internal Func<double> NetworkJitter { get; init; } = Random.Shared.NextDouble;
+	internal NetworkRecoveryPacer NetworkPacer { get; }
 	public ToolRegistry Tools { get; }
 	/// <summary>Starts agents' background processes; Program shares the PowerShell tool's child watcher with it.</summary>
 	public ProcessLauncher Launcher { get; init; } = new();
@@ -51,7 +54,11 @@ public sealed class AgentManager {
 	/// <summary>Raised for every change the UI shows: entries, deltas, status, flags.</summary>
 	public event Action<object>? Events;
 
-	public AgentManager(Home home, Config config, IModelBackend backend, ToolRegistry tools) {
+	public AgentManager(Home home, Config config, IModelBackend backend, ToolRegistry tools) : this(home, config, backend, tools, TimeProvider.System) { }
+
+	internal AgentManager(Home home, Config config, IModelBackend backend, ToolRegistry tools, TimeProvider networkClock) {
+		NetworkClock = networkClock;
+		NetworkPacer = new(networkClock);
 		Home = home;
 		Config = config;
 		Resources = new ResourceSlots(config);

@@ -39,7 +39,7 @@ public sealed class ChatGptAuth {
 
 	// OAuth replies are small and buffered. Unlike inference, bound the entire request and body.
 	internal static HttpClient CreateHttpClient() {
-		var client = new HttpClient(new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(30) }) {
+		var client = new HttpClient(new ModelHttp.ConnectionHandler(new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(30) }, "ChatGPT authorization")) {
 			Timeout = TimeSpan.FromSeconds(60),
 		};
 		client.DefaultRequestHeaders.UserAgent.ParseAdd("Marten/0.1");
@@ -208,7 +208,9 @@ public sealed class ChatGptAuth {
 			throw new TransientModelException("Timed out waiting for ChatGPT authorization.", e);
 		} catch(Exception e) when(e is HttpRequestException or IOException) {
 			ct.ThrowIfCancellationRequested();
-			throw new TransientModelException("Could not reach ChatGPT authorization.", e);
+			// PostAsync also buffers the body. Only the handler (before buffering) can
+			// mark a failure for long recovery.
+			throw new TransientModelException("ChatGPT authorization transport failed.", e);
 		}
 		if(tokens["access_token"] == null || tokens["expires_in"] == null ||
 		   !string.Equals(tokens["token_type"]?.GetValue<string>(), "bearer", StringComparison.OrdinalIgnoreCase))

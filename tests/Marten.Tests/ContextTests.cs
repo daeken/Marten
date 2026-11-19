@@ -177,6 +177,77 @@ public class ContextTests {
 	}
 
 	[Fact]
+	public async Task OversizedSummaryRetriesWithoutInlineImagesOrReplay() {
+		using var dir = new TempDir();
+		var backend = new FakeBackend();
+		var m = Manager(dir, backend);
+		var (_, orch) = m.CreateProject("p", [dir.Path], null, false);
+		var task = m.SpawnTask(orch, "worker", false, null, null);
+		Exchange(task, "first", "answer");
+		task.Transcript.Append(new Entry { Kind = EntryKind.Reasoning, Text = "readable", Raw = JsonSerializer.SerializeToElement("opaque") });
+		task.Transcript.Append(new Entry { Kind = EntryKind.ToolCall, CallId = "x", Name = "read", Arguments = "{}" });
+		task.Transcript.Append(new Entry { Kind = EntryKind.ToolResult, CallId = "x", Text = "figure", Images = [new("saved.png", "image/png")] });
+		backend.Script.Enqueue(_ => throw new ContextFullException(32_000_001));
+		backend.Script.Enqueue(_ => FakeBackend.Say("SUMMARY"));
+		await task.Compact("fake-1", default);
+
+		var retry = backend.Requests[1];
+		Assert.Empty(retry.Tools);
+		Assert.All(retry.History, e => { Assert.Null(e.Raw); Assert.Null(e.Images); });
+		Assert.Contains(retry.History, e => e.Kind == EntryKind.Assistant && e.Text == "readable");
+		Assert.Contains(retry.History, e => e.CallId == "x" && e.Text == "figure\nSaved images: saved.png");
+		Assert.Contains("SUMMARY", Assert.Single(task.View()).Text);
+	}
+
+	[Theory]
+	[InlineData(false)]
+	[InlineData(true)]
+	public async Task OversizedReplyAndSummaryCompactOnlyThePrefixThatFit(bool needsAnotherPass) {
+		using var dir = new TempDir();
+		var backend = new FakeBackend();
+		var m = Manager(dir, backend);
+		var (_, orch) = m.CreateProject("p", [dir.Path], null, false);
+		var task = m.SpawnTask(orch, "worker", false, null, null);
+		Exchange(task, "old", "old answer");
+		ToolRound(task, "paired", "old result");
+		Exchange(task, "recent", "recent answer");
+		for(var i = 0; i < 3; i++) backend.Script.Enqueue(_ => throw new ContextFullException(50_000_000));
+		backend.Script.Enqueue(_ => FakeBackend.Say("PREFIX SUMMARY"));
+		if(needsAnotherPass) {
+			backend.Script.Enqueue(_ => throw new ContextFullException(32_000_000 + 1));
+			backend.Script.Enqueue(_ => FakeBackend.Say("CUMULATIVE SUMMARY"));
+		}
+		backend.Script.Enqueue(_ => FakeBackend.Say("reply"));
+		task.Send(new Inbound("Sera", "now", SendMode.Queued));
+		await Wait.Until(() => Idle(task));
+
+		Assert.Equal(needsAnotherPass ? 7 : 5, backend.Requests.Count);
+		var summarized = backend.Requests[3].History.SkipLast(1).ToList();
+		Assert.Contains(summarized, e => e.Text == "old result");
+		var reply = backend.Requests[4].History;
+		Assert.Contains("PREFIX SUMMARY", reply[0].Text);
+		Assert.Equal(backend.Requests[0].History.Skip(summarized.Count), reply.Skip(1));
+		Assert.Contains(reply, e => e.Text == "recent");
+		Assert.Contains(reply, e => e.Text == "now");
+		Assert.Equal("rollover", task.Transcript.Entries.First(e => e.Kind == EntryKind.Compaction).Reason);
+		Assert.Contains(task.Transcript.Entries, e => e.Text == "reply");
+	}
+
+	[Fact]
+	public async Task IndivisibleOversizedSummaryLeavesViewIntact() {
+		using var dir = new TempDir();
+		var backend = new FakeBackend();
+		var agent = Manager(dir, backend).CreateChat("t", dir.Path);
+		Exchange(agent, "single input", "answer");
+		var before = agent.View();
+		for(var i = 0; i < 2; i++) backend.Script.Enqueue(_ => throw new ContextFullException(32_000_025));
+		var error = await Assert.ThrowsAsync<InvalidOperationException>(() => agent.Compact("fake-1", default));
+		Assert.Contains("requestBytes=32000025", error.Message);
+		Assert.Equal(2, backend.Requests.Count);
+		Assert.Equal(before, agent.View());
+	}
+
+	[Fact]
 	public async Task OrchestratorsSetTheirTaskAgentsModelsButNotTheOtherWayRound() {
 		using var dir = new TempDir();
 		Directory.CreateDirectory(dir.File("repo"));

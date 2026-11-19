@@ -20,9 +20,12 @@ public sealed class MartenApi(Agent agent, AgentManager manager, CancellationTok
 	public string? ProjectMemoryPath => manager.ProjectOf(agent)?.MemoryPath;
 	public object[] Tasks() => agent.Tasks.Select(t => new { t.Id, t.Title, State = t.State.ToString(), t.Reason }).ToArray<object>();
 
-	public object[] Agents() => manager.Agents.Select(a => new {
-		a.Info.Id, Kind = a.Info.Kind.ToString(), a.Info.Name, Status = a.Status.ToString(), a.Info.ProjectId, a.Info.ParentId, a.Info.Closed,
-		a.StatusDetail, a.ModelCall,
+	public object[] Agents() => manager.Agents.Select(a => {
+		var (status, statusDetail, retryAt) = a.CurrentStatus;
+		return new {
+			a.Info.Id, Kind = a.Info.Kind.ToString(), a.Info.Name, Status = status.ToString(), a.Info.ProjectId, a.Info.ParentId, a.Info.Closed,
+			StatusDetail = statusDetail, RetryAt = retryAt, a.ModelCall,
+		};
 	}).ToArray<object>();
 
 	/// <summary>Your last few PowerShell runs: command, directory, $State in and out, output. Re-run one by pasting its command with its state.</summary>

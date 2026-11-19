@@ -7,6 +7,8 @@ using Marten.Storage;
 
 namespace Marten.Models.OpenAI;
 
+internal sealed record ResponseCompletedMetadata(string? Model, string? ReasoningEffort, long? ReasoningTokens);
+
 /// <summary>The OpenAI Responses API over a ChatGPT subscription token. Stateless: store=false, full history each call.</summary>
 public sealed class ResponsesBackend(ChatGptAuth auth, HttpClient http) : IModelBackend {
 	public const string ProviderName = "openai";
@@ -27,7 +29,9 @@ public sealed class ResponsesBackend(ChatGptAuth auth, HttpClient http) : IModel
 			try {
 				response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
 			} catch(HttpRequestException e) {
-				throw new TransientModelException("Could not reach OpenAI.", e);
+				ct.ThrowIfCancellationRequested();
+				throw ModelHttp.IsConnectFailure(e) ? new ProviderUnreachableException("Could not reach OpenAI.", e)
+					: new TransientModelException("OpenAI request failed before receiving response headers.", e);
 			}
 			if(response.StatusCode == HttpStatusCode.Unauthorized && attempt == 0) {
 				response.Dispose();
@@ -70,14 +74,20 @@ public sealed class ResponsesBackend(ChatGptAuth auth, HttpClient http) : IModel
 			Content = new StringContent(json, Encoding.UTF8, "application/json"),
 			Headers = { Accept = { new("text/event-stream") } },
 		}, ct);
-		var stream = new ResponseStream();
+		return await ReadResponse(response, req, onTextDelta, ct);
+	}
+
+	internal static async Task<ModelResult> ReadResponse(HttpResponseMessage response, ModelRequest req, Action<string> onTextDelta, CancellationToken ct, string provider = ProviderName, Action<ResponseCompletedMetadata>? onCompleted = null) {
+		var stream = new ResponseStream(provider);
 		try {
 			await foreach(var ev in Sse.ReadAsync(await response.Content.ReadAsStreamAsync(ct), ct))
 				if(stream.Feed(ev) is { } delta) onTextDelta(delta);
 		} catch(IOException e) {
 			throw new TransientModelException("The model stream was cut off.", e);
 		}
-		return stream.Finish(req.Model);
+		var result = stream.Finish(req.Model);
+		if(stream.Metadata is { } metadata) onCompleted?.Invoke(metadata);
+		return result;
 	}
 
 	public static JsonObject BuildBody(ModelRequest req) {
@@ -103,10 +113,10 @@ public sealed class ResponsesBackend(ChatGptAuth auth, HttpClient http) : IModel
 	}
 
 	/// <summary>Convert the neutral log into Responses input items. Our own raw items replay verbatim.</summary>
-	public static JsonArray ToWire(IEnumerable<Entry> history) {
+	public static JsonArray ToWire(IEnumerable<Entry> history, string provider = ProviderName) {
 		var input = new JsonArray();
 		foreach(var e in history) {
-			var mine = e.Provider == ProviderName && e.Raw is { } raw;
+			var mine = e.Provider == provider && e.Raw is { } raw;
 			switch(e.Kind) {
 				case EntryKind.Message:
 					input.Add(new JsonObject {
@@ -132,7 +142,7 @@ public sealed class ResponsesBackend(ChatGptAuth auth, HttpClient http) : IModel
 							["type"] = "function_call", ["call_id"] = e.CallId, ["name"] = e.Name, ["arguments"] = e.Arguments ?? "{}",
 						};
 						// Calls from other providers carry no namespace; every Marten tool lives in ours.
-						call["namespace"] = e.Namespace ?? ToolNamespace;
+						if(provider == ProviderName) call["namespace"] = e.Namespace ?? ToolNamespace;
 						input.Add(call);
 					}
 					break;
@@ -160,11 +170,14 @@ public sealed class ResponsesBackend(ChatGptAuth auth, HttpClient http) : IModel
 	/// Accumulates a streamed response. Items are collected from output_item events as well as
 	/// response.completed, because the completed event's output can arrive empty.
 	/// </summary>
-	public sealed class ResponseStream {
+	public sealed class ResponseStream(string provider = ProviderName) {
 		readonly List<JsonObject> output = new();
 		readonly StringBuilder text = new();
 		bool completed;
 		JsonNode? usage;
+		internal ResponseCompletedMetadata? Metadata { get; private set; }
+
+		static string? StringValue(JsonNode? value) => value is JsonValue v && v.TryGetValue<string>(out var s) ? s : null;
 
 		void Put(JsonNode? node) {
 			if(node is not JsonObject item) return;
@@ -197,7 +210,11 @@ public sealed class ResponsesBackend(ChatGptAuth auth, HttpClient http) : IModel
 					completed = true;
 					if(ev["response"]?["output"] is JsonArray items)
 						foreach(var item in items) Put(item);
-					usage = ev["response"]?["usage"]?.DeepClone();
+					var response = ev["response"] as JsonObject;
+					usage = response?["usage"]?.DeepClone();
+					var details = (usage as JsonObject)?["output_tokens_details"] as JsonObject;
+					Metadata = new(StringValue(response?["model"]), StringValue((response?["reasoning"] as JsonObject)?["effort"]),
+						details?["reasoning_tokens"] is JsonValue tokens && tokens.TryGetValue<long>(out var n) ? n : null);
 					break;
 				case "response.failed":
 				case "response.incomplete":
@@ -222,18 +239,18 @@ public sealed class ResponsesBackend(ChatGptAuth auth, HttpClient http) : IModel
 						var t = string.Concat(item["content"]?.AsArray()
 							.Where(c => c?["type"]?.GetValue<string>() == "output_text")
 							.Select(c => c!["text"]?.GetValue<string>()) ?? []);
-						items.Add(new Entry { Kind = EntryKind.Assistant, Text = t, Provider = ProviderName, Model = model, Raw = raw });
+						items.Add(new Entry { Kind = EntryKind.Assistant, Text = t, Provider = provider, Model = model, Raw = raw });
 						break;
 					case "reasoning":
 						var summary = string.Join("\n\n", item["summary"]?.AsArray()
 							.Select(s => s?["text"]?.GetValue<string>()).Where(s => s != null) ?? []);
-						items.Add(new Entry { Kind = EntryKind.Reasoning, Text = summary.Length > 0 ? summary : null, Provider = ProviderName, Model = model, Raw = raw });
+						items.Add(new Entry { Kind = EntryKind.Reasoning, Text = summary.Length > 0 ? summary : null, Provider = provider, Model = model, Raw = raw });
 						break;
 					case "function_call":
 						items.Add(new Entry {
 							Kind = EntryKind.ToolCall, CallId = item["call_id"]?.GetValue<string>(), Name = item["name"]?.GetValue<string>(),
 							Namespace = item["namespace"]?.GetValue<string>(), Arguments = item["arguments"]?.GetValue<string>() ?? "{}",
-							Provider = ProviderName, Model = model, Raw = raw,
+							Provider = provider, Model = model, Raw = raw,
 						});
 						break;
 				}

@@ -12,7 +12,9 @@ public sealed record ModelRequest(
 	string Instructions,
 	IReadOnlyList<Entry> History,
 	IReadOnlyList<ToolSpec> Tools,
-	string CacheKey);
+	string CacheKey) {
+	public string? EffortSource { get; init; }
+}
 
 /// <summary>Entries produced by one model call, not yet sequenced into the log.</summary>
 public sealed record ModelResult(IReadOnlyList<Entry> Items, System.Text.Json.JsonElement? Usage);
@@ -30,9 +32,16 @@ public sealed class RateLimitedException(string message, TimeSpan? retryAfter = 
 	public TimeSpan? RetryAfter { get; } = retryAfter;
 }
 
-/// <summary>A failure worth retrying after a short backoff: network errors, 5xx, a stream cut off mid-response.</summary>
+/// <summary>DNS or connection establishment failed before the HTTP response. Uses the long recovery policy.</summary>
+public sealed class ProviderUnreachableException(string message, Exception? inner = null) : Exception(message, inner);
+
+/// <summary>A failure worth retrying after a short backoff: response timeouts, 5xx, a stream cut off mid-response.</summary>
 public sealed class TransientModelException(string message, Exception? inner = null) : Exception(message, inner);
 
-public sealed class ContextFullException() : Exception("The model context window is full.");
+public sealed class ContextFullException(int? requestBytes = null) : Exception(requestBytes is int bytes
+	? $"The serialized model request exceeds the payload budget (requestBytes={bytes})."
+	: "The model context window is full.") {
+	public int? RequestBytes { get; } = requestBytes;
+}
 
 public sealed class NotConnectedException(string message) : Exception(message);

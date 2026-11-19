@@ -27,13 +27,13 @@ public sealed class ModelHttpTests {
 			await Task.Delay(Timeout.InfiniteTimeSpan, ct);
 		});
 		using var http = server.Client(Guard, TimeSpan.FromMilliseconds(300));
-		var model = Backend(provider, dir, server, http);
+		var model = Backend(provider, dir, server.Url, http);
 		var error = await Assert.ThrowsAsync<TransientModelException>(() => model.CompleteAsync(Request, _ => { }, default).WaitAsync(Guard));
 		Assert.Contains("waiting for bytes", error.Message);
 	}
 
 	[Fact]
-	public async Task AConnectDeadlineIsTransient() {
+	public async Task AConnectDeadlineUsesNetworkRecovery() {
 		using var http = ModelHttp.CreateClient(new SocketsHttpHandler {
 			UseProxy = false, ConnectTimeout = TimeSpan.FromMilliseconds(300),
 			ConnectCallback = async (_, ct) => {
@@ -41,7 +41,7 @@ public sealed class ModelHttpTests {
 				return Stream.Null;
 			},
 		}, Guard, () => Guard);
-		var error = await Assert.ThrowsAsync<TransientModelException>(() => http.GetAsync("http://127.0.0.1").WaitAsync(Guard));
+		var error = await Assert.ThrowsAsync<ProviderUnreachableException>(() => http.GetAsync("http://127.0.0.1").WaitAsync(Guard));
 		Assert.Contains("connecting", error.Message);
 	}
 
@@ -52,7 +52,7 @@ public sealed class ModelHttpTests {
 		using var dir = new TempDir();
 		await using var server = new Loopback((_, ct) => Task.Delay(Timeout.InfiniteTimeSpan, ct));
 		using var http = server.Client(TimeSpan.FromMilliseconds(300), Guard);
-		var model = Backend(provider, dir, server, http);
+		var model = Backend(provider, dir, server.Url, http);
 		var error = await Assert.ThrowsAsync<TransientModelException>(() => model.CompleteAsync(Request, _ => { }, default).WaitAsync(Guard));
 		Assert.Contains("response headers", error.Message);
 	}
@@ -73,7 +73,7 @@ public sealed class ModelHttpTests {
 				: "\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", ct);
 		});
 		using var http = server.Client(TimeSpan.FromSeconds(1), TimeSpan.FromMilliseconds(750));
-		var model = Backend(provider, dir, server, http);
+		var model = Backend(provider, dir, server.Url, http);
 		await model.CompleteAsync(Request, _ => { }, default).WaitAsync(Guard);
 	}
 
@@ -89,7 +89,7 @@ public sealed class ModelHttpTests {
 		});
 		using var http = server.Client(Guard, Guard);
 		using var stop = new CancellationTokenSource();
-		var model = Backend(provider, dir, server, http);
+		var model = Backend(provider, dir, server.Url, http);
 		var completion = model.CompleteAsync(Request, _ => { }, stop.Token);
 		await (await Task.WhenAny(waiting.Task, completion).WaitAsync(Guard));
 		await stop.CancelAsync();
@@ -107,7 +107,7 @@ public sealed class ModelHttpTests {
 		});
 		using var http = server.Client(Guard, Guard);
 		using var stop = new CancellationTokenSource();
-		var model = Backend(provider, dir, server, http);
+		var model = Backend(provider, dir, server.Url, http);
 		var delta = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 		var completion = model.CompleteAsync(Request, _ => delta.TrySetResult(), stop.Token);
 		await (await Task.WhenAny(delta.Task, completion).WaitAsync(Guard));
@@ -128,9 +128,34 @@ public sealed class ModelHttpTests {
 			await Task.Delay(Timeout.InfiniteTimeSpan, ct);
 		});
 		using var http = server.Client(Guard, TimeSpan.FromMilliseconds(300));
-		var model = Backend(provider, dir, server, http);
+		var model = Backend(provider, dir, server.Url, http);
 		var error = await Assert.ThrowsAsync<TransientModelException>(() => model.CompleteAsync(Request, _ => { }, default).WaitAsync(Guard));
 		Assert.Contains("waiting for bytes", error.Message);
+	}
+
+	[Theory]
+	[InlineData("responses", HttpRequestError.NameResolutionError, true)]
+	[InlineData("anthropic", HttpRequestError.NameResolutionError, true)]
+	[InlineData("oauth", HttpRequestError.NameResolutionError, true)]
+	[InlineData("responses", HttpRequestError.ConnectionError, true)]
+	[InlineData("anthropic", HttpRequestError.ConnectionError, true)]
+	[InlineData("oauth", HttpRequestError.ConnectionError, true)]
+	[InlineData("responses", HttpRequestError.ResponseEnded, false)]
+	[InlineData("anthropic", HttpRequestError.ResponseEnded, false)]
+	[InlineData("oauth", HttpRequestError.ResponseEnded, false)]
+	[InlineData("responses", HttpRequestError.SecureConnectionError, false)]
+	public async Task OutageClassificationUsesTransportKindNotMessage(string provider, HttpRequestError kind, bool outage) {
+		using var dir = new TempDir();
+		using var handler = new FakeAuthHandler((_, _, _) => throw new HttpRequestException(kind,
+			outage ? "unrelated words" : "Could not reach the provider."));
+		using var http = provider == "oauth"
+			? new HttpClient(new ModelHttp.ConnectionHandler(handler, "ChatGPT authorization"))
+			: ModelHttp.CreateClient(handler, Guard, () => Guard);
+		Func<Task> call;
+		if(provider == "oauth") call = () => ExpiredAuth(dir, http).TokenAsync(false, default);
+		else call = () => Backend(provider, dir, "http://127.0.0.1", http).CompleteAsync(Request, _ => { }, default);
+		var error = await Record.ExceptionAsync(() => call().WaitAsync(Guard));
+		Assert.IsType(outage ? typeof(ProviderUnreachableException) : typeof(TransientModelException), error);
 	}
 
 	[Fact]
@@ -199,7 +224,7 @@ public sealed class ModelHttpTests {
 			send(Interlocked.Increment(ref attempts), request, ct);
 	}
 
-	static IModelBackend Backend(string provider, TempDir dir, Loopback server, HttpClient http) {
+	static IModelBackend Backend(string provider, TempDir dir, string url, HttpClient http) {
 		var home = new Home(dir.File("home"));
 		if(provider == "responses") {
 			JsonIO.Save(Path.Combine(home.Secrets, "openai.json"), new ChatGptAuth.Credentials {
@@ -207,7 +232,7 @@ public sealed class ModelHttpTests {
 			});
 			return new ResponsesBackend(new ChatGptAuth(home, http), http);
 		}
-		var settings = MessagesProvider.All.Single(p => p.Name == provider) with { BaseUrl = server.Url, EnvVar = null };
+		var settings = MessagesProvider.All.Single(p => p.Name == provider) with { BaseUrl = url, EnvVar = null };
 		var model = new MessagesBackend(settings, home, modelHttp: http);
 		model.SetKey("local-test-only");
 		return model;

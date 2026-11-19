@@ -7,6 +7,20 @@ namespace Marten.Tests;
 public class ResponsesTests {
 	static JsonObject Ev(string json) => (JsonObject) JsonNode.Parse(json)!;
 
+	[Theory]
+	[InlineData("""{"model":"server","reasoning":{"effort":"high"},"usage":{"output_tokens_details":{"reasoning_tokens":42}}}""", "server", "high", 42L)]
+	[InlineData("""{"usage":{"output_tokens_details":{"reasoning_tokens":0}}}""", null, null, 0L)]
+	[InlineData("""{"reasoning":{},"usage":{"output_tokens":12}}""", null, null, null)]
+	[InlineData("{}", null, null, null)]
+	public async Task ReadResponseReportsOnlyCompletedMetadata(string completed, string? model, string? effort, long? tokens) {
+		var sse = "data: {\"type\":\"response.created\",\"response\":{\"model\":\"early\"}}\n\n" +
+			$"data: {{\"type\":\"response.completed\",\"response\":{completed}}}\n\n";
+		using var response = new HttpResponseMessage { Content = new StringContent(sse) };
+		List<ResponseCompletedMetadata> reported = [];
+		await ResponsesBackend.ReadResponse(response, new("requested", "low", "", [], [], "key"), _ => { }, default, onCompleted: reported.Add);
+		Assert.Equal(new ResponseCompletedMetadata(model, effort, tokens), Assert.Single(reported));
+	}
+
 	[Fact]
 	public void CollectsItemsEvenWhenCompletedOutputIsEmpty() {
 		var s = new ResponsesBackend.ResponseStream();

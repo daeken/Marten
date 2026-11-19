@@ -5,7 +5,7 @@ namespace Marten.Agents;
 
 public enum AgentKind { Chat, Orchestrator, Task }
 
-public enum AgentStatus { Idle, Running, WaitingForQuota, Paused, Error, WaitingForSlot }
+public enum AgentStatus { Idle, Running, WaitingForQuota, Paused, Error, WaitingForSlot, WaitingForNetwork }
 
 /// <summary>Who an agent is. Written once at spawn; agent.json.</summary>
 public sealed record AgentInfo {
