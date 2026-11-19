@@ -173,6 +173,7 @@ code, pre { font: 12.5px/1.45 ui-monospace, "SF Mono", Menlo, monospace; }
 .tag.warn { color: var(--warn); border-color: var(--warn); }
 
 .tasks { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 24px; border-bottom: 1px solid var(--border); background: var(--panel); }
+.task-list { flex-shrink: 0; max-height: min(10rem, 22dvh); overflow-y: auto; overscroll-behavior-y: contain; align-content: flex-start; }
 .task { font-size: 12px; border: 1px solid var(--border); border-radius: 12px; padding: 1px 9px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .task-state { font-weight: 600; text-transform: uppercase; font-size: 10px; letter-spacing: .04em; margin-right: 2px; }
 .task.open .task-state { color: var(--accent); }
