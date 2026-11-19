@@ -483,10 +483,20 @@ public sealed partial class Agent : IPowerShellOwner {
 		}
 	}
 
+	ModelRequest AgentRequest(string model, IReadOnlyList<Entry> history) {
+		var agent = Info;
+		var global = manager.Config.Effort;
+		return new(model, agent.Effort ?? global, Instructions, history, RequestTools(), $"marten:{agent.Id}") {
+			EffortSource = agent.Effort != null ? "agent" : global != null ? "global" : "provider-default",
+		};
+	}
+
 	async Task<(ModelResult Result, List<Entry> View)> CallModel(TurnSlots slots, CancellationToken ct) {
 		var transientFailures = 0;
 		var quotaWait = TimeSpan.FromSeconds(30);
 		var recoveringOverflow = false;
+		int? lastOversizedReply = null;
+		var retainedSuffix = false;
 		var forceCompaction = false;
 		while(true) {
 			manager.Restart.ThrowIfStopping();
@@ -499,12 +509,11 @@ public sealed partial class Agent : IPowerShellOwner {
 					return await manager.DefaultModel(token);
 				}, ct);
 				if(forceCompaction) {
-					await Compact(model, slots, ct);
+					retainedSuffix = await Compact(model, slots, ct);
 					forceCompaction = false;
 				} else if(!recoveringOverflow) await ManageContext(model, slots, ct);
 				var view = View();
-				var request = new ModelRequest(model, Info.Effort ?? manager.Config.Effort, Instructions,
-					view, RequestTools(), CacheKey: $"marten:{Info.Id}");
+				var request = AgentRequest(model, view);
 				SetStatus(AgentStatus.Running);
 				var result = await slots.Complete(request, ModelCallKind.Reply,
 					delta => manager.Publish(new { type = "delta", agentId = Info.Id, text = delta }), null, ct);
@@ -515,7 +524,10 @@ public sealed partial class Agent : IPowerShellOwner {
 			} catch(Exception) when(ct.IsCancellationRequested || slots.TurnToken.IsCancellationRequested) {
 				slots.ThrowIfStopped(ct);
 				throw;
-			} catch(ContextFullException) when(!recoveringOverflow) {
+			} catch(ContextFullException e) when(!recoveringOverflow || (retainedSuffix && e.RequestBytes < lastOversizedReply)) {
+				// A partial summary may need another pass, but only if the exact reply bytes fell.
+				lastOversizedReply = e.RequestBytes;
+				retainedSuffix = false;
 				// Keep the forced compaction inside the retry loop, including its own quota/transient failures.
 				recoveringOverflow = forceCompaction = true;
 			} catch(RateLimitedException e) {

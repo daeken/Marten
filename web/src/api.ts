@@ -189,6 +189,9 @@ export function takeToken(): string | null {
   try { return localStorage.getItem(TOKEN_KEY); } catch { return null; }
 }
 
+export const transcriptPageSize = 80;
+export type TranscriptPage = { entries: Entry[]; hasOlder: boolean };
+
 export class Api {
   constructor(private token: string) {}
 
@@ -214,7 +217,15 @@ export class Api {
   setBackendKey = (provider: string, key: string | null) => this.call<Backend>('PUT', `/backends/${provider}/key`, { key });
   setConfig = (model: string | null, effort: string | null) => this.call<void>('PUT', '/config', { model, effort });
   createChat = (name: string) => this.call<AgentSummary>('POST', '/agents', { name });
-  transcript = (id: string) => this.call<Entry[]>('GET', `/agents/${id}/transcript`);
+  transcript = async (id: string, before?: number): Promise<TranscriptPage> => {
+    const page = await this.call<TranscriptPage | Entry[]>('GET',
+      `/agents/${id}/transcript?limit=${transcriptPageSize}${before === undefined ? '' : `&before=${before}`}`);
+    if (!Array.isArray(page)) return page;
+    // The static UI can update before the service restarts into a paging-capable build.
+    const end = before === undefined ? page.length : page.findIndex(e => e.seq >= before);
+    const stop = end < 0 ? page.length : end;
+    return { entries: page.slice(Math.max(0, stop - transcriptPageSize), stop), hasOlder: stop > transcriptPageSize };
+  };
   send = (id: string, text: string, mode: 'immediate' | 'queued') => this.call<void>('POST', `/agents/${id}/messages`, { text, mode });
   setAgentSettings = (id: string, model: string | null, effort: string | null) =>
     this.call<AgentSummary>('PUT', `/agents/${id}/settings`, { model, effort });

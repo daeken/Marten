@@ -56,6 +56,8 @@ public sealed record Entry {
 
 public sealed record ImageRef(string Path, string MimeType);
 
+public sealed record TranscriptPage(IReadOnlyList<Entry> Entries, bool HasOlder);
+
 /// <summary>
 /// Append-only JSONL log split into segments, so a long-lived agent never rewrites a big file.
 /// A torn last line from a crash is dropped on load.
@@ -87,6 +89,23 @@ public sealed class Transcript {
 
 	public IReadOnlyList<Entry> Entries {
 		get { lock(gate) return entries.ToList(); }
+	}
+
+	public TranscriptPage ReadPage(int limit, long? before = null) {
+		lock(gate) {
+			var end = entries.Count;
+			if(before is long cursor) {
+				// Find the first entry at or beyond the exclusive cursor.
+				var lo = 0;
+				while(lo < end) {
+					var mid = lo + (end - lo) / 2;
+					if(entries[mid].Seq < cursor) lo = mid + 1;
+					else end = mid;
+				}
+			}
+			var count = Math.Min(end, Math.Clamp(limit, 1, 100));
+			return new TranscriptPage(entries.GetRange(end - count, count), end > count);
+		}
 	}
 
 	public Entry? Last {

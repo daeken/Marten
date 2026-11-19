@@ -39,7 +39,53 @@ modelHttp.DefaultRequestHeaders.UserAgent.ParseAdd("Marten/0.1");
 var messagesBackends = MessagesProvider.All.Select(p => new MessagesBackend(p, home,
 	name => managerRef?.Config.Models.GetValueOrDefault(name) ?? [], modelHttp)).ToList();
 var ledger = new UsageLedger(home, () => managerRef?.Config ?? config);
-var backend = new BackendRouter(new ResponsesBackend(auth, modelHttp), messagesBackends.Select(b => ((IModelBackend) b, b.Settings.Prefixes)).ToList(), ledger);
+var routes = messagesBackends.Select(b => ((IModelBackend) b, b.Settings.Prefixes)).ToList();
+var awsRegion = Environment.GetEnvironmentVariable("AWS_REGION") ?? Environment.GetEnvironmentVariable("AWS_DEFAULT_REGION");
+if(awsRegion == null) {
+	var profiles = new Amazon.Runtime.CredentialManagement.CredentialProfileStoreChain();
+	if(profiles.TryGetProfile(Environment.GetEnvironmentVariable("AWS_PROFILE") ?? "default", out var profile))
+		awsRegion = profile.Region?.SystemName;
+}
+if(awsRegion != null && System.Text.RegularExpressions.Regex.IsMatch(awsRegion, @"\A[a-z0-9-]+\z")) {
+	var alternateMantleModels = (Environment.GetEnvironmentVariable("MARTEN_MANTLE_OPENAI_ROUTE_MODELS") ?? "")
+		.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToHashSet(StringComparer.Ordinal);
+	Action<string>? traceEffort = Environment.GetEnvironmentVariable("MARTEN_TRACE_BEDROCK_EFFORT") == "1" ? Console.Error.WriteLine : null;
+	foreach(var mantle in new[] { false, true }) {
+		var aws = new Amazon.BedrockRuntime.AmazonBedrockRuntimeConfig {
+			RegionEndpoint = Amazon.RegionEndpoint.GetBySystemName(awsRegion),
+			AuthenticationServiceName = mantle ? "bedrock-mantle" : "bedrock",
+		};
+		routes.Add((new BedrockResponsesBackend(modelHttp, aws, awsRegion, mantle,
+			name => (managerRef?.Config ?? config).Models.GetValueOrDefault(name) ?? [], alternateMantleModels, traceEffort), []));
+	}
+}
+var backend = new BackendRouter(new ResponsesBackend(auth, modelHttp), routes, ledger);
+if(args is ["bedrock-list-mantle"]) {
+	var mantle = backend.Backends.OfType<BedrockResponsesBackend>().SingleOrDefault(b => b.Provider == "mantle");
+	if(mantle == null) throw new ArgumentException("Configure an AWS region first.");
+	using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+	try {
+		foreach(var id in await mantle.DiscoverMantleModelsAsync(timeout.Token)) Console.WriteLine(id);
+	} catch(Exception e) when(e is NotConnectedException or InvalidOperationException or TransientModelException or RateLimitedException or OperationCanceledException) {
+		Console.Error.WriteLine(e.Message);
+		Environment.ExitCode = 1;
+	}
+	return;
+}
+if(args is ["bedrock-check", var model]) {
+	if(backend.Resolve(model).Backend is not BedrockResponsesBackend)
+		throw new ArgumentException("Use bedrock/<model-id> or mantle/<model-id> and configure an AWS region.");
+	using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+	try {
+		await backend.CompleteAsync(new(model, null, "Reply briefly.",
+			[new Entry { Kind = EntryKind.Message, Text = "Reply with OK." }], [], "bedrock-check"), Console.Write, timeout.Token);
+		Console.WriteLine();
+	} catch(Exception e) when(e is NotConnectedException or InvalidOperationException or TransientModelException or RateLimitedException or OperationCanceledException) {
+		Console.Error.WriteLine(e.Message);
+		Environment.ExitCode = 1;
+	}
+	return;
+}
 Func<AgentManager> getManager = () => managerRef!;
 var childWatcher = new ChildProcessWatcher();
 var restart = new RestartDrain();
@@ -260,8 +306,15 @@ api.MapPut("/config", (ConfigUpdate update) => {
 });
 api.MapGet("/agents", () => manager.Agents.Select(AgentSummary));
 api.MapPost("/agents", (CreateAgent req) => AgentSummary(manager.CreateChat(req.Name, Blank(req.WorkingDirectory))));
-api.MapGet("/agents/{id}/transcript", (string id) =>
-	manager.Get(id) is { } a ? Results.Ok(a.Transcript.Entries) : Results.NotFound());
+api.MapGet("/agents/{id}/transcript", (string id, int? limit, long? before) => {
+	if(manager.Get(id) is not { } a) return Results.NotFound();
+	if(limit is int size) {
+		var page = a.Transcript.ReadPage(size, before);
+		// Replay payloads (notably encrypted reasoning) can dwarf the text the UI displays.
+		return Results.Ok(new { Entries = page.Entries.Select(e => e with { Raw = null, Instructions = null }), page.HasOlder });
+	}
+	return Results.Ok(a.Transcript.Entries);
+});
 api.MapPost("/agents/{id}/messages", (string id, SendMessage req) => {
 	if(manager.Get(id) is not { } a) return Results.NotFound();
 	if(string.IsNullOrWhiteSpace(req.Text)) return Results.BadRequest();

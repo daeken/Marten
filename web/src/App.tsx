@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { AgentMessage, AgentSummary, Api, Backend, BackgroundProcess, BackupStatus, Entry, NotebookCell, OutsideClient, McpServer, Project, ProjectMemory, Schedule, ScriptToolInfo, SeraMessage, ServerEvent, Status_, TaskItem, takeToken } from './api';
+import { AgentMessage, AgentSummary, Api, Backend, BackgroundProcess, BackupStatus, Entry, NotebookCell, OutsideClient, McpServer, Project, ProjectMemory, Schedule, ScriptToolInfo, SeraMessage, ServerEvent, Status_, TaskItem, takeToken, TranscriptPage, transcriptPageSize } from './api';
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh'];
 
@@ -16,6 +16,8 @@ function mergeEntries(a: Entry[], b: Entry[]): Entry[] {
   for (const e of b) bySeq.set(e.seq, e);
   return [...bySeq.values()].sort((x, y) => x.seq - y.seq);
 }
+
+const isAgentId = (id: string) => !id.includes(':') && !['inbox', 'processes', 'messages', 'settings'].includes(id);
 
 type ModelCall = AgentSummary['modelCall'];
 const latestCall = (current: ModelCall, incoming: ModelCall): ModelCall =>
@@ -33,7 +35,11 @@ export function App() {
   const [selected, setSelected] = useState<string | null>(null);
   /** Phones show the sidebar as a drawer. */
   const [navOpen, setNavOpen] = useState(false);
-  const [transcripts, setTranscripts] = useState<Record<string, Entry[]>>({});
+  const [tail, setTail] = useState<(TranscriptPage & { id: string }) | null>(null);
+  const [tailError, setTailError] = useState<{ id: string; message: string } | null>(null);
+  const transcriptRequest = useRef(0);
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
   const [streaming, setStreaming] = useState<Record<string, string>>({});
   const [running, setRunning] = useState<Record<string, string>>({});
   const [models, setModels] = useState<string[]>([]);
@@ -42,7 +48,8 @@ export function App() {
   /** Changes whenever a backend connects or disconnects, so the model list refetches. */
   const connected = status ? [status.auth.connected, ...status.backends.map(b => b.connected)].map(Number).join('') : '';
   useEffect(() => {
-    if (api && connected.includes('1')) api.models().then(setModels).catch(() => setModels([]));
+    // Some backends (such as AWS profile-based providers) have no interactive connection card.
+    if (api && connected) api.models().then(setModels).catch(() => setModels([]));
   }, [api, connected]);
 
   const refreshGeneration = useRef(0);
@@ -64,24 +71,36 @@ export function App() {
   }, [api]);
 
   const loadTranscript = useCallback(async (id: string) => {
-    if (!api) return;
-    const entries = await api.transcript(id);
-    setTranscripts(t => ({ ...t, [id]: mergeEntries(t[id] ?? [], entries) }));
+    if (!api || !isAgentId(id)) return;
+    const request = ++transcriptRequest.current;
+    setTailError(null);
+    try {
+      const page = await api.transcript(id);
+      if (selectedRef.current !== id || request !== transcriptRequest.current) return;
+      setTail(t => {
+        // The socket can deliver entries newer than this HTTP snapshot while it is in flight.
+        const end = page.entries.at(-1)?.seq ?? 0;
+        const entries = mergeEntries(page.entries, t?.id === id ? t.entries.filter(e => e.seq > end) : []);
+        return { id, entries: entries.slice(-transcriptPageSize), hasOlder: page.hasOlder || entries.length > transcriptPageSize };
+      });
+    } catch (e) {
+      if (selectedRef.current === id && request === transcriptRequest.current) setTailError({ id, message: (e as Error).message });
+    }
   }, [api]);
 
   useEffect(() => { refresh(); }, [refresh]);
-  useEffect(() => { if (selected && !selected.includes(':') && selected !== 'inbox') loadTranscript(selected); }, [selected, loadTranscript]);
-
-  // Keep the latest selection visible to the socket handler without resubscribing.
-  const selectedRef = useRef(selected);
-  selectedRef.current = selected;
+  useEffect(() => { if (selected) loadTranscript(selected); }, [selected, loadTranscript]);
 
   useEffect(() => {
     if (!api) return;
     const onEvent = (e: ServerEvent) => {
       switch (e.type) {
         case 'entry':
-          setTranscripts(t => t[e.agentId] ? { ...t, [e.agentId]: mergeEntries(t[e.agentId], [e.entry]) } : t);
+          if (selectedRef.current === e.agentId) setTail(t => {
+            const prior = t?.id === e.agentId ? t : null;
+            const entries = mergeEntries(prior?.entries ?? [], [e.entry]);
+            return { id: e.agentId, entries: entries.slice(-transcriptPageSize), hasOlder: !!prior?.hasOlder || entries.length > transcriptPageSize };
+          });
           if (e.entry.kind === 'assistant' || e.entry.kind === 'tool_call' || e.entry.kind === 'idle' || e.entry.kind === 'error')
             setStreaming(s => ({ ...s, [e.agentId]: '' }));
           if (e.entry.kind === 'tool_result') setRunning(r => { const { [e.agentId]: _, ...rest } = r; return rest; });
@@ -142,7 +161,7 @@ export function App() {
   const project = agent ? status.projects.find(p => p.id === agent.projectId) : undefined;
   let main;
   if (agent)
-    main = <AgentView api={api} agent={agent} project={project} agents={status.agents} models={models} tick={tick} defaultModel={status.config.model ?? status.config.defaultModel ?? models[0]} defaultEffort={status.config.effort} onChange={refresh} onSelect={setSelected} entries={transcripts[agent.id]} streaming={streaming[agent.id] ?? ''} runningCall={running[agent.id]} />;
+    main = <><AgentView key={agent.id} api={api} agent={agent} project={project} agents={status.agents} models={models} tick={tick} defaultModel={status.config.model ?? status.config.defaultModel ?? models[0]} defaultEffort={status.config.effort} onChange={refresh} onSelect={setSelected} entries={tail?.id === agent.id ? tail.entries : undefined} hasOlder={tail?.id === agent.id && tail.hasOlder} streaming={streaming[agent.id] ?? ''} runningCall={running[agent.id]} />{tailError?.id === agent.id && <div role="alert" className="banner">Couldn’t load the transcript: {tailError.message} <button onClick={() => loadTranscript(agent.id)}>Retry</button></div>}</>;
   else if (selected === 'processes')
     main = <ProcessesView api={api} tick={tick} onSelect={setSelected} />;
   else if (selected === 'inbox')
@@ -339,12 +358,37 @@ function AgentRow({ agent: a, selected, onSelect, nested }: { agent: AgentSummar
 
 const emptyTranscript: Entry[] = [];
 
-function AgentView({ api, agent, project, agents, models, tick, defaultModel, defaultEffort, onChange, onSelect, entries: transcript, streaming, runningCall }: {
+type ArchivePage = {
+  entries: Entry[];
+  hasOlder: boolean;
+  // Only the current page's entries are retained. Each cursor can refetch its page.
+  cursors: number[];
+};
+
+function AgentView({ api, agent, project, agents, models, tick, defaultModel, defaultEffort, onChange, onSelect, entries: transcript, hasOlder, streaming, runningCall }: {
   api: Api; agent: AgentSummary; project?: Project; agents: AgentSummary[]; models: string[]; tick: number;
   defaultModel?: string; defaultEffort?: string; onChange: () => void; onSelect: (id: string) => void;
-  entries?: Entry[]; streaming: string; runningCall?: string;
+  entries?: Entry[]; hasOlder: boolean; streaming: string; runningCall?: string;
 }) {
-  const entries = transcript ?? emptyTranscript;
+  const [archive, setArchive] = useState<ArchivePage | null>(null);
+  const [loadingPage, setLoadingPage] = useState(false);
+  const [pageError, setPageError] = useState<string | null>(null);
+  const pageRequest = useRef(0);
+  const entries = archive?.entries ?? transcript ?? emptyTranscript;
+  const canGoOlder = entries.length > 0 && (archive?.hasOlder ?? hasOlder);
+  const loadPage = async (cursors: number[]) => {
+    const request = ++pageRequest.current;
+    setPageError(null);
+    setLoadingPage(true);
+    try {
+      const page = await api.transcript(agent.id, cursors.at(-1));
+      if (request === pageRequest.current) setArchive({ ...page, cursors });
+    } catch (e) {
+      if (request === pageRequest.current) setPageError(`Could not load transcript page: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      if (request === pageRequest.current) setLoadingPage(false);
+    }
+  };
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   useEffect(() => { api.tasks(agent.id).then(setTasks).catch(() => setTasks([])); }, [api, agent.id, tick]);
   const [questions, setQuestions] = useState<SeraMessage[]>([]);
@@ -373,34 +417,46 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
 
   const openedTranscript = useRef<string>();
   const followLatest = useRef(true);
+  const returnToLatest = () => {
+    ++pageRequest.current; // Ignore an archive fetch still in flight.
+    setLoadingPage(false);
+    setPageError(null);
+    followLatest.current = true;
+    setArchive(null);
+  };
+  useLayoutEffect(() => {
+    if (archive && scroller.current) scroller.current.scrollTop = 0;
+  }, [archive]);
   useLayoutEffect(() => {
     const el = scroller.current;
     if (!transcript) openedTranscript.current = undefined;
-    if (!el || !transcript || showNotebook) return;
+    if (!el || !transcript || showNotebook || archive) return;
     // On a cold open this is the first commit with history, not the empty view before fetch.
     if (openedTranscript.current !== agent.id) {
       openedTranscript.current = agent.id;
       followLatest.current = true;
     }
     if (followLatest.current) el.scrollTop = el.scrollHeight;
-  }, [agent.id, transcript, streaming, runningCall, showNotebook, questions]);
+  }, [agent.id, transcript, streaming, runningCall, showNotebook, questions, archive]);
 
   const trackLogScroll = (event: React.UIEvent<HTMLDivElement>) => {
     const el = event.currentTarget;
-    if (!showNotebook && openedTranscript.current === agent.id)
+    if (!showNotebook && !archive && openedTranscript.current === agent.id)
       followLatest.current = el.scrollHeight - el.scrollTop - el.clientHeight < 200;
   };
 
+  const imageUrl = useCallback((path: string) => api.imageUrl(agent.id, path), [api, agent.id]);
   const results = useMemo(() => new Map(entries.filter(e => e.kind === 'tool_result').map(e => [e.callId, e])), [entries]);
   const agentQuestions = questions.filter(q => q.from === agent.id);
   const delivered = new Set(entries.filter(e => e.kind === 'message' && e.from === 'Sera').map(e => e.text));
   // Keep showing the recorded answer until its ordinary inbound message appears. Approval
   // answers are handled by Guard and may never become ordinary inbound messages.
-  const answeredCards = agentQuestions.filter(q => q.answer && !delivered.has(`Sera answered your question "${q.text}":\n\n${q.answer}`))
+  const answeredCards = agentQuestions.filter(q => q.answer && (!hasOlder || !entries.length || Date.parse(q.answeredAt ?? q.at) >= Date.parse(entries[0].ts)) && (!archive || Date.parse(q.answeredAt ?? q.at) <= Date.parse(entries.at(-1)!.ts)) && !delivered.has(`Sera answered your question "${q.text}":\n\n${q.answer}`))
     .sort((a, b) => Date.parse(a.answeredAt ?? a.at) - Date.parse(b.answeredAt ?? b.at));
   const card = (q: SeraMessage) => <div key={`question-${q.id}`} className="inbox-item card-inline"><QuestionCard api={api} q={q} onAnswered={updateQuestion} /></div>;
   let nextCard = 0;
 
+  const callIds = useMemo(() => new Set(entries.filter(e => e.kind === 'tool_call' && e.callId).map(e => e.callId)), [entries]);
 
   const send = async () => {
     const t = text.trim();
@@ -494,21 +550,34 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
         </div>
       )}
       {showNotebook && <NotebookView api={api} agent={agent} tick={tick} />}
+      {!showNotebook && (canGoOlder || archive || loadingPage || pageError) && (
+        <nav className="tasks" aria-label="Transcript pages">
+          <button className="small" disabled={!canGoOlder || loadingPage} onClick={() => loadPage([...(archive?.cursors ?? []), entries[0].seq])}>Older</button>
+          {archive && <>
+            <button className="small" disabled={loadingPage} onClick={() => archive.cursors.length > 1 ? loadPage(archive.cursors.slice(0, -1)) : returnToLatest()}>Newer</button>
+            <button className="small" onClick={returnToLatest}>Return to latest</button>
+          </>}
+          <span className="muted small" role="status">{loadingPage ? 'Loading page…' : archive ? 'Archived page' : 'Latest entries'}</span>
+          {pageError && <span className="error small" role="alert">{pageError}</span>}
+        </nav>
+      )}
       <div className="log" ref={scroller} onScroll={trackLogScroll} style={showNotebook ? { display: 'none' } : undefined}>
+        {!archive && !transcript && <div className="muted small" role="status">Loading transcript…</div>}
         {entries.flatMap(e => {
           const before = [];
           while (nextCard < answeredCards.length && Date.parse(answeredCards[nextCard].answeredAt ?? answeredCards[nextCard].at) <= Date.parse(e.ts))
             before.push(card(answeredCards[nextCard++]));
-          return [...before, <EntryView key={e.seq} entry={e} result={e.kind === 'tool_call' ? results.get(e.callId) : undefined} running={e.callId === runningCall} imageUrl={p => api.imageUrl(agent.id, p)} />];
+          if (e.kind === 'tool_result' && callIds.has(e.callId)) return before;
+          return [...before, <EntryView key={e.seq} entry={e} result={e.kind === 'tool_call' ? results.get(e.callId) : undefined} running={!archive && !!runningCall && e.callId === runningCall} imageUrl={imageUrl} />];
         })}
         {answeredCards.slice(nextCard).map(card)}
-        {streaming && <div className="assistant streaming"><Md text={streaming} /></div>}
-        {agent.modelCall && !agent.modelCall.endedAt && !streaming && !runningCall &&
+        {!archive && streaming && <div className="assistant streaming"><Md text={streaming} /></div>}
+        {!archive && agent.modelCall && !agent.modelCall.endedAt && !streaming && !runningCall &&
           <Thinking label={agent.modelCall.kind === 'compaction' ? 'Compacting context' : 'Thinking'} />}
-        {agent.status === 'waiting_for_quota' && <Thinking label="Waiting for quota" />}
-        {agent.status === 'waiting_for_network' && <Thinking label="Waiting for network" />}
-        {agent.status === 'waiting_for_slot' && <Thinking label="Waiting for slot" />}
-        {agentQuestions.filter(q => !q.answer).map(card)}
+        {!archive && agent.status === 'waiting_for_quota' && <Thinking label="Waiting for quota" />}
+        {!archive && agent.status === 'waiting_for_network' && <Thinking label="Waiting for network" />}
+        {!archive && agent.status === 'waiting_for_slot' && <Thinking label="Waiting for slot" />}
+        {!archive && agentQuestions.filter(q => !q.answer).map(card)}
       </div>
       <footer className="composer">
         <div className="composer-row">
@@ -613,7 +682,7 @@ function usageTitle(e: Entry) {
   return parts.filter(Boolean).join(' · ') || undefined;
 }
 
-function EntryView({ entry: e, result, running, imageUrl }: { entry: Entry; result?: Entry; running: boolean; imageUrl: (path: string) => string }) {
+const EntryView = memo(function EntryView({ entry: e, result, running, imageUrl }: { entry: Entry; result?: Entry; running: boolean; imageUrl: (path: string) => string }) {
   switch (e.kind) {
     case 'message':
       return e.from === 'Sera'
@@ -627,6 +696,11 @@ function EntryView({ entry: e, result, running, imageUrl }: { entry: Entry; resu
       return e.text ? <details className="reasoning"><summary>Reasoning</summary><div><Md text={e.text} /></div></details> : null;
     case 'tool_call':
       return <ToolCall call={e} result={result} running={running} imageUrl={imageUrl} />;
+    case 'tool_result':
+      return <details className={`tool ${e.isError ? 'failed' : 'done'}`}>
+        <summary>Tool result{e.isError ? ' (error)' : ''} · call on another page</summary>
+        <ToolOutput result={e} imageUrl={imageUrl} />
+      </details>;
     case 'error':
       return <div className="error-entry">{e.text}</div>;
     case 'idle':
@@ -646,7 +720,7 @@ function EntryView({ entry: e, result, running, imageUrl }: { entry: Entry; resu
     default:
       return null;
   }
-}
+});
 
 function ToolCall({ call, result, running, imageUrl }: { call: Entry; result?: Entry; running: boolean; imageUrl: (path: string) => string }) {
   const args = useMemo(() => { try { return JSON.parse(call.arguments ?? '{}'); } catch { return call.arguments; } }, [call.arguments]);
@@ -660,14 +734,20 @@ function ToolCall({ call, result, running, imageUrl }: { call: Entry; result?: E
         <span className="tool-state">{state === 'running' ? 'running…' : state === 'failed' ? 'error' : ''}</span>
       </summary>
       <pre className="args">{typeof args === 'string' ? args : call.name === 'powershell' ? args.command : JSON.stringify(args, null, 2)}</pre>
-      {result && <pre className="output">{result.text}</pre>}
-      {result?.images?.map(img => <a key={img.path} href={imageUrl(img.path)} target="_blank" rel="noreferrer"><img className="tool-image" src={imageUrl(img.path)} alt={img.path} /></a>)}
+      {result && <ToolOutput result={result} imageUrl={imageUrl} />}
     </details>
   );
 }
 
+function ToolOutput({ result, imageUrl }: { result: Entry; imageUrl: (path: string) => string }) {
+  return <>
+    <pre className="output">{result.text}</pre>
+    {result.images?.map(img => <a key={img.path} href={imageUrl(img.path)} target="_blank" rel="noreferrer"><img className="tool-image" src={imageUrl(img.path)} alt={img.path} /></a>)}
+  </>;
+}
+
 /** Markdown without raw HTML: react-markdown escapes HTML unless a plugin allows it, so model output can't inject markup. */
-function Md({ text }: { text: string }) {
+const Md = memo(function Md({ text }: { text: string }) {
   return (
     <div className="md">
       <Markdown remarkPlugins={[remarkGfm]} components={{ a: ({ node: _, ...props }) => <a {...props} target="_blank" rel="noreferrer" /> }}>
@@ -675,7 +755,7 @@ function Md({ text }: { text: string }) {
       </Markdown>
     </div>
   );
-}
+});
 
 function Thinking({ label = 'Thinking' }: { label?: string }) {
   return (
