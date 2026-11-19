@@ -22,6 +22,8 @@ public static class EntryKind {
 	public const string Elide = "elide";
 	/// <summary>Everything up to UpTo is replaced in the model's view by Text, a summary. Instructions holds the rebuilt system prompt.</summary>
 	public const string Compaction = "compaction";
+	/// <summary>The system prompt was rebuilt because a hand-edited prompt changed. Instructions holds it; never sent to the model.</summary>
+	public const string Reload = "reload";
 }
 
 /// <summary>

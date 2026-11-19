@@ -29,6 +29,9 @@ public sealed record AgentInfo {
 	public bool Paused { get; init; }
 }
 
+/// <summary>The labeled, normalized prompt sources used for one system prompt. A null project means no project.</summary>
+public sealed record PromptSnapshot(string Marten, string KindFile, string Kind, string? Project);
+
 /// <summary>What an agent carries between turns besides its log; state.json.</summary>
 public sealed record AgentState {
 	public Dictionary<string, string> FileHashes { get; init; } = new();
@@ -36,6 +39,8 @@ public sealed record AgentState {
 	public List<AbandonedRunspace> AbandonedRunspaces { get; init; } = new();
 	/// <summary>Project memory as this agent last saw it, so each turn can tell it what changed.</summary>
 	public string? MemorySeen { get; init; }
+	/// <summary>The hand-edited prompts (marten.md, the kind prompt, the project prompt) as the system prompt last carried them.</summary>
+	public PromptSnapshot? PromptSeen { get; init; }
 	/// <summary>Topic paths last shown to the agent. Null in pre-topic state files.</summary>
 	public List<string>? MemoryTopicsSeen { get; init; }
 	/// <summary>Nudges sent in a row with no task changing state.</summary>

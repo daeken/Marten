@@ -20,10 +20,12 @@ State lives in `~/.marten` (override with `MARTEN_HOME`):
 | `config.json` | Model, effort, port, timeouts, truncation size |
 | `secrets/` | ChatGPT tokens and the UI token (mode 0600) |
 | `prompts/` | The Marten-wide prompt and one per agent kind; edit freely |
-| `agents/<id>/` | `agent.json`, `system.md` (fixed at spawn), `state.json`, `tasks.json`, `NOTES.md` (task agents), `transcript/*.jsonl`, `outputs/` |
+| `agents/<id>/` | `agent.json`, `system.md` (current generated system prompt), `state.json`, `tasks.json`, `NOTES.md` (task agents), `transcript/*.jsonl`, `outputs/` |
 | `projects/<id>/` | `project.json`, `prompt.md`, `MEMORY.md`, `memory/*.md`, `memory-log.jsonl`, `worktrees/` |
 | `inbox.jsonl` | Messages agents sent to Sera |
 | `prompts/*.md.default` | The shipped default each prompt came from; prompts you haven't edited are upgraded with Marten |
+
+Edit `prompts/marten.md`, `prompts/<kind>.md`, or `projects/<id>/prompt.md` to change an existing agent's instructions. Changes are picked up when the agent next wakes for a turn, or when its prompt is rebuilt during compaction; no restart is needed. Clearing or removing a source removes its rules from the rebuilt prompt. Startup restores missing bundled prompts, so leave a bundled file empty if you want to keep it disabled across restarts. Agents without a saved prompt baseline rebuild once on their next turn, even when no source text remains.
 
 Model API calls allow up to 30 seconds to connect and 120 seconds to receive response headers. Set `"modelIdleTimeoutSeconds": 300` in `config.json` to adjust how long a response can go without delivering bytes (300 seconds by default; nonpositive values use the default). A stream that keeps delivering bytes has no total time limit. ChatGPT OAuth uses a separate client with a 60-second total request limit; stopping a turn also cancels its token refresh.
 

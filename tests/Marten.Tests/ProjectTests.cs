@@ -184,7 +184,7 @@ public class ProjectTests {
 		Assert.Contains(pointer.Trim(), task.Instructions);
 		Assert.All(topics, t => Assert.Contains(t, task.Instructions));
 		Assert.DoesNotContain(body, task.Instructions);
-		var rebuilt = m.RebuildInstructions(orch, out _);
+		var rebuilt = m.RebuildInstructions(orch, m.ReadPromptSnapshot(orch.Info), out _);
 		Assert.All(topics, t => Assert.Contains(t, rebuilt));
 		Assert.DoesNotContain(body, rebuilt);
 		orch.Send(new Inbound("Sera", "check topics", SendMode.Queued));
@@ -202,9 +202,9 @@ public class ProjectTests {
 		using var dir = RepoDir();
 		var old = Manager(dir, new RoutedBackend());
 		var (project, orch) = old.CreateProject("p", [dir.File("repo")], null, false);
-		const string legacyPrompt = "An existing agent's prompt without linked memory";
-		File.WriteAllText(Path.Combine(orch.Directory, "system.md"), legacyPrompt);
-		JsonIO.Save(Path.Combine(orch.Directory, "state.json"), new AgentState { MemorySeen = "" });
+		// Isolate the linked-memory upgrade from the separate prompt-baseline migration.
+		var legacyPrompt = orch.Instructions;
+		JsonIO.Save(Path.Combine(orch.Directory, "state.json"), new AgentState { MemorySeen = "", PromptSeen = old.ReadPromptSnapshot(orch.Info) });
 		Directory.CreateDirectory(project.MemoryTopicsDirectory);
 		File.WriteAllText(Path.Combine(project.MemoryTopicsDirectory, "existing.md"), "Existing topic payload");
 		var backend = new RoutedBackend();
@@ -299,6 +299,116 @@ public class ProjectTests {
 		Assert.Contains("+ added: - NOTE: hello", note.Text);
 		// The system prompt didn't change, so the cached prefix is intact.
 		Assert.All(backend.Requests, r => Assert.Equal(orch.Instructions, r.Instructions));
+	}
+
+	[Fact]
+	public async Task EditedProjectPromptReloadsTheSystemPromptOnceAndSurvivesRestart() {
+		using var dir = RepoDir();
+		var backend = new RoutedBackend();
+		var m = Manager(dir, backend);
+		var (project, orch) = m.CreateProject("p", [dir.File("repo")], "Never merge to main.", false);
+		orch.Send(new Inbound("Sera", "hi", SendMode.Queued));
+		await Wait.Until(() => Idle(orch));
+		Assert.DoesNotContain(orch.Transcript.Entries, e => e.Kind == EntryKind.Reload);
+
+		File.WriteAllText(project.PromptPath, "You own merges end-to-end.\n");
+		orch.Send(new Inbound("Sera", "merge it", SendMode.Queued));
+		await Wait.Until(() => Idle(orch) && orch.Transcript.Entries.Count(e => e.Kind == EntryKind.Idle) == 2);
+		Assert.Single(orch.Transcript.Entries, e => e.Kind == EntryKind.Reload);
+		Assert.Contains("You own merges end-to-end.", orch.Instructions);
+		Assert.DoesNotContain("Never merge to main.", orch.Instructions);
+		var note = orch.Transcript.Entries.Single(e => e.From == Agent.NudgeSender && e.Text!.Contains("reloaded"));
+		Assert.Contains("- removed: Never merge to main.", note.Text);
+		Assert.Contains("+ added: You own merges end-to-end.", note.Text);
+		Assert.Equal(orch.Instructions, backend.Requests[^1].Instructions);
+		Assert.Contains("You own merges end-to-end.", File.ReadAllText(Path.Combine(orch.Directory, "system.md")));
+
+		// A restart keeps the reloaded prompt, and no further reload happens while nothing changes.
+		var m2 = Manager(dir, backend);
+		m2.LoadAll();
+		var again = m2.Get(orch.Info.Id)!;
+		Assert.Contains("You own merges end-to-end.", again.Instructions);
+		again.Send(new Inbound("Sera", "still there?", SendMode.Queued));
+		await Wait.Until(() => Idle(again) && again.Transcript.Entries.Count(e => e.Kind == EntryKind.Idle) >= 3);
+		Assert.Single(again.Transcript.Entries, e => e.Kind == EntryKind.Reload);
+	}
+
+	[Theory]
+	[InlineData(true, true)]
+	[InlineData(true, false)]
+	[InlineData(false, true)]
+	[InlineData(false, false)]
+	public async Task RemovedPromptRulesReloadOnceEvenWhenEverySourceIsEmpty(bool legacy, bool delete) {
+		using var dir = RepoDir();
+		var old = Manager(dir, new RoutedBackend());
+		var (project, orch) = old.CreateProject("p", [dir.File("repo")], "Obsolete project rule.", false);
+		if(legacy) JsonIO.Save(Path.Combine(orch.Directory, "state.json"), new AgentState());
+		File.WriteAllText(Path.Combine(old.Home.Prompts, "marten.md"), "");
+		File.WriteAllText(Path.Combine(old.Home.Prompts, "orchestrator.md"), "");
+		if(delete) File.Delete(project.PromptPath);
+		else File.WriteAllText(project.PromptPath, " \n");
+
+		var backend = new RoutedBackend();
+		var m = Manager(dir, backend);
+		m.LoadAll();
+		var loaded = m.Get(orch.Info.Id)!;
+		Assert.Contains("Obsolete project rule.", loaded.Instructions);
+		loaded.Send(new Inbound("Sera", "first", SendMode.Queued));
+		await Wait.Until(() => Idle(loaded));
+		loaded.Send(new Inbound("Sera", "second", SendMode.Queued));
+		await Wait.Until(() => Idle(loaded) && loaded.Transcript.Entries.Count(e => e.Kind == EntryKind.Idle) == 2);
+		Assert.Equal(2, backend.Requests.Count);
+		Assert.All(backend.Requests, r => Assert.DoesNotContain("Obsolete project rule.", r.Instructions));
+		Assert.Single(loaded.Transcript.Entries, e => e.Kind == EntryKind.Reload);
+		Assert.DoesNotContain("Obsolete project rule.", File.ReadAllText(Path.Combine(orch.Directory, "system.md")));
+	}
+
+	[Fact]
+	public async Task MovingIdenticalTextBetweenLabeledPromptSourcesReloads() {
+		using var dir = RepoDir();
+		var backend = new RoutedBackend();
+		var m = Manager(dir, backend);
+		var core = Path.Combine(m.Home.Prompts, "marten.md");
+		var kind = Path.Combine(m.Home.Prompts, "chat.md");
+		File.WriteAllText(core, "Moving rule.");
+		File.WriteAllText(kind, "");
+		var agent = m.CreateChat("Chat");
+		File.Delete(core);
+		File.WriteAllText(kind, "Moving rule.");
+		agent.Send(new Inbound("Sera", "hi", SendMode.Queued));
+		await Wait.Until(() => Idle(agent));
+		Assert.Single(agent.Transcript.Entries, e => e.Kind == EntryKind.Reload);
+		var note = Assert.Single(agent.Transcript.Entries, e => e.From == Agent.NudgeSender);
+		Assert.Contains("marten.md:\n- removed: Moving rule.", note.Text);
+		Assert.Contains("chat.md:\n+ added: Moving rule.", note.Text);
+	}
+
+	[Fact]
+	public async Task AnEditBetweenCompactionBuildAndCommitIsPickedUpNextTurn() {
+		using var dir = RepoDir();
+		var backend = new RoutedBackend();
+		var m = Manager(dir, backend);
+		var (project, orch) = m.CreateProject("p", [dir.File("repo")], "First rule.", false);
+		orch.Send(new Inbound("Sera", "hi", SendMode.Queued));
+		await Wait.Until(() => Idle(orch));
+		File.WriteAllText(project.PromptPath, "Compacted rule.");
+		var edited = false;
+		m.Events += _ => {
+			if(edited || orch.Transcript.Last?.Kind != EntryKind.Compaction) return;
+			edited = true;
+			File.WriteAllText(project.PromptPath, "Latest rule.");
+		};
+		backend.Add("orch", _ => FakeBackend.Say("Summary"));
+		await orch.Compact("fake-1", default);
+		Assert.True(edited);
+		Assert.Contains("Compacted rule.", orch.Instructions);
+		Assert.DoesNotContain("Latest rule.", orch.Instructions);
+		orch.Send(new Inbound("Sera", "next", SendMode.Queued));
+		await Wait.Until(() => Idle(orch));
+		var request = backend.Requests[^1];
+		Assert.Contains("Latest rule.", request.Instructions);
+		Assert.DoesNotContain("Compacted rule.", request.Instructions);
+		Assert.Single(orch.Transcript.Entries, e => e.Kind == EntryKind.Reload);
 	}
 
 	[Fact]

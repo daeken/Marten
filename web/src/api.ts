@@ -117,7 +117,7 @@ export interface AgentMessage {
 export interface Entry {
   seq: number;
   ts: string;
-  kind: 'wake' | 'message' | 'assistant' | 'reasoning' | 'tool_call' | 'tool_result' | 'error' | 'idle' | 'elide' | 'compaction';
+  kind: 'wake' | 'message' | 'assistant' | 'reasoning' | 'tool_call' | 'tool_result' | 'error' | 'idle' | 'elide' | 'compaction' | 'reload';
   seqs?: number[];
   upTo?: number;
   from?: string;

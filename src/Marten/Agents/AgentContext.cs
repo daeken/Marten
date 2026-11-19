@@ -28,7 +28,7 @@ public sealed partial class Agent {
 			});
 		foreach(var e in entries) {
 			if(compaction != null && e.Seq <= compaction.UpTo) continue;
-			if(e.Kind is EntryKind.Elide or EntryKind.Compaction) continue;
+			if(e.Kind is EntryKind.Elide or EntryKind.Compaction or EntryKind.Reload) continue;
 			view.Add(e.Kind == EntryKind.ToolResult && elided.Contains(e.Seq) ? e with { Text = ElidedNote(e), Images = null } : e);
 		}
 		return view;
@@ -52,7 +52,7 @@ public sealed partial class Agent {
 		long lastSeq;
 		long lastTokens;
 		lock(gate) (lastSeq, lastTokens) = (state.LastInputSeq, state.LastInputTokens);
-		var changedSince = Transcript.Entries.Any(e => e.Seq > lastSeq && e.Kind is EntryKind.Elide or EntryKind.Compaction);
+		var changedSince = Transcript.Entries.Any(e => e.Seq > lastSeq && e.Kind is EntryKind.Elide or EntryKind.Compaction or EntryKind.Reload);
 		if(lastTokens > 0 && !changedSince)
 			return lastTokens + view.Where(e => e.Seq > lastSeq).Sum(Chars) / CharsPerToken;
 		return baseTokens + view.Sum(Chars) / CharsPerToken;
@@ -171,12 +171,14 @@ public sealed partial class Agent {
 		var summary = string.Join("\n\n", result.Items.Where(i => i.Kind == EntryKind.Assistant && !string.IsNullOrWhiteSpace(i.Text)).Select(i => i.Text));
 		if(summary.Length == 0) throw new InvalidOperationException("Compaction produced no summary.");
 		var upTo = cut < view.Count ? view[cut].Seq - 1 : view[^1].Seq;
-		var instructions = manager.RebuildInstructions(this, out var memory);
+		var prompts = manager.ReadPromptSnapshot(Info);
+		var instructions = manager.RebuildInstructions(this, prompts, out var memory);
 		await CommitModelOutput(slots, ct, () => {
 			Append(new Entry { Kind = EntryKind.Compaction, Text = summary, UpTo = upTo, Instructions = instructions, Reason = whole ? "whole" : "rollover" });
 			Instructions = instructions;
 			AtomicFile.Write(Path.Combine(Directory, "system.md"), instructions);
 			if(memory is { } snapshot) SawMemory(snapshot.Index, snapshot.Topics);
+			MarkPromptSeen(prompts);
 			SnapshotDynamicTools();
 			state = state with { LastInputTokens = 0 };
 			SaveState();

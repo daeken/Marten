@@ -48,7 +48,7 @@ public sealed partial class Agent : IPowerShellOwner {
 		this.info = info;
 		Instructions = instructions;
 		Transcript = new Transcript(Path.Combine(directory, "transcript"));
-		if(Transcript.Entries.LastOrDefault(e => e.Kind == EntryKind.Compaction)?.Instructions is { } rebuilt) Instructions = rebuilt;
+		if(Transcript.Entries.LastOrDefault(e => e.Kind is EntryKind.Compaction or EntryKind.Reload)?.Instructions is { } rebuilt) Instructions = rebuilt;
 		state = JsonIO.Load(StatePath, () => new AgentState());
 		Files = new FileTracker(state.FileHashes);
 		Files.Changed += SaveState;
@@ -310,6 +310,7 @@ public sealed partial class Agent : IPowerShellOwner {
 				slots.ThrowIfStopped(modelCts.Token);
 				SetStatus(AgentStatus.Running);
 				Append(new Entry { Kind = EntryKind.Wake, Reason = reason });
+				ReloadChangedPrompt();
 				NoteMemoryChanges();
 				NoteToolChanges();
 				Deliver(Take(_ => true));
@@ -405,6 +406,47 @@ public sealed partial class Agent : IPowerShellOwner {
 		}
 		if(topicsChanged)
 			Append(new Entry { Kind = EntryKind.Message, From = NudgeSender, Text = AgentManager.DescribeMemoryTopics(project, topics) });
+	}
+
+	/// <summary>
+	/// The system prompt is fixed at spawn for caching, but a rule Sera edits into the project prompt (or
+	/// marten.md, or the kind prompt) has to take effect. When one of those changed since the prompt was
+	/// built, rebuild it now, once, and say so at the end of the context. Costs one cache miss.
+	/// </summary>
+	void ReloadChangedPrompt() {
+		var current = manager.ReadPromptSnapshot(Info);
+		PromptSnapshot? seen;
+		lock(gate) seen = state.PromptSeen;
+		// No baseline means we cannot tell whether old rules were removed. Rebuild once even if all sources are empty.
+		if(seen == current) return;
+		var instructions = manager.RebuildInstructions(this, current, out var memory);
+		Append(new Entry { Kind = EntryKind.Reload, Instructions = instructions });
+		Instructions = instructions;
+		AtomicFile.Write(Path.Combine(Directory, "system.md"), instructions);
+		if(memory is { } snapshot) SawMemory(snapshot.Index, snapshot.Topics);
+		var reason = seen == null ? "there was no saved prompt baseline" : "its source prompts changed";
+		var text = $"Your system prompt was just reloaded because {reason}. The new version replaces the old one: where it differs from instructions or rules you followed earlier in this conversation, the new system prompt wins.";
+		if(seen != null) {
+			text += DescribePromptChange("marten.md", seen.Marten, current.Marten);
+			text += DescribePromptChange(current.KindFile, seen.Kind, current.Kind);
+			text += DescribePromptChange("project prompt.md", seen.Project, current.Project);
+		}
+		Append(new Entry { Kind = EntryKind.Message, From = NudgeSender, Text = text });
+		MarkPromptSeen(current);
+		manager.Publish(new { type = "agents" });
+	}
+
+	static string DescribePromptChange(string label, string? before, string? after) {
+		if(before == after) return "";
+		var (added, removed) = LineDiff.Of(before ?? "", after ?? "");
+		var lines = removed.Select(l => $"- removed: {l}").Concat(added.Select(l => $"+ added: {l}"));
+		var diff = string.Join("\n", lines);
+		return diff.Length == 0 ? $"\n\n{label} changed." : $"\n\n{label}:\n{diff}";
+	}
+
+	internal void MarkPromptSeen(PromptSnapshot prompts) {
+		lock(gate) state = state with { PromptSeen = prompts };
+		SaveState();
 	}
 
 	/// <summary>Called after this agent edits memory itself, so its own edit isn't reported back to it.</summary>
