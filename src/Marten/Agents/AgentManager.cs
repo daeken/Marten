@@ -222,11 +222,12 @@ public sealed class AgentManager {
 		var dir = Home.AgentDir(info.Id);
 		Directory.CreateDirectory(dir);
 		if(info.Kind == AgentKind.Task) AtomicFile.Write(Path.Combine(dir, "NOTES.md"), "");
-		// The system prompt is fixed at spawn so the cached prefix stays stable; compaction rebuilds it.
-		var instructions = BuildInstructions(info, dir, out var memory);
+		var prompts = ReadPromptSnapshot(info);
+		var instructions = BuildInstructions(info, dir, prompts, out var memory);
 		AtomicFile.Write(Path.Combine(dir, "system.md"), instructions);
 		JsonIO.Save(Path.Combine(dir, "agent.json"), info);
 		var agent = new Agent(this, dir, info, instructions);
+		agent.MarkPromptSeen(prompts);
 		if(memory is { } snapshot) agent.SawMemory(snapshot.Index, snapshot.Topics);
 		agents[info.Id] = agent;
 		agent.Start();
@@ -234,21 +235,20 @@ public sealed class AgentManager {
 		return agent;
 	}
 
-	/// <summary>A fresh system prompt for compaction: current project prompt, AGENTS.md, memory and notes.</summary>
-	internal string RebuildInstructions(Agent agent, out (string Index, List<string> Topics)? memory) =>
-		BuildInstructions(agent.Info, agent.Directory, out memory);
+	/// <summary>Rebuild with the exact sources the caller will track, plus current AGENTS.md, memory and notes.</summary>
+	internal string RebuildInstructions(Agent agent, PromptSnapshot prompts, out (string Index, List<string> Topics)? memory) =>
+		BuildInstructions(agent.Info, agent.Directory, prompts, out memory);
 
-	/// <summary>The hand-edited prompts an agent's system prompt is built from, so a change can trigger a reload.</summary>
-	public List<string> PromptSources(AgentInfo info) {
-		var sources = new List<string> { ReadPrompt("marten.md"), ReadPrompt($"{info.Kind.ToString().ToLowerInvariant()}.md") };
-		if(GetProject(info.ProjectId) is { } project) sources.Add(project.Prompt);
-		return sources.Where(s => s.Length > 0).ToList();
+	internal PromptSnapshot ReadPromptSnapshot(AgentInfo info) {
+		var kindFile = $"{info.Kind.ToString().ToLowerInvariant()}.md";
+		return new(ReadPrompt(Path.Combine(Home.Prompts, "marten.md")), kindFile,
+			ReadPrompt(Path.Combine(Home.Prompts, kindFile)), GetProject(info.ProjectId) is { } project ? ReadPrompt(project.PromptPath) : null);
 	}
 
-	string BuildInstructions(AgentInfo info, string dir, out (string Index, List<string> Topics)? memory) {
+	string BuildInstructions(AgentInfo info, string dir, PromptSnapshot prompts, out (string Index, List<string> Topics)? memory) {
 		memory = null;
 		var kind = info.Kind.ToString().ToLowerInvariant();
-		var parts = new List<string> { ReadPrompt("marten.md"), ReadPrompt($"{kind}.md") };
+		var parts = new List<string> { prompts.Marten, prompts.Kind };
 		var project = GetProject(info.ProjectId);
 		if(project != null) {
 			var sb = new StringBuilder();
@@ -256,7 +256,7 @@ public sealed class AgentManager {
 			sb.AppendLine("Bound locations:");
 			foreach(var b in project.Info.Bindings) sb.AppendLine($"- {b}");
 			if(info.Worktree != null) sb.AppendLine($"You work in your own git worktree: {info.Worktree} (branch marten/{info.Id}).");
-			if(project.Prompt.Length > 0) sb.AppendLine().AppendLine(project.Prompt);
+			if(prompts.Project is { Length: > 0 } projectPrompt) sb.AppendLine().AppendLine(projectPrompt);
 			parts.Add(sb.ToString().TrimEnd());
 			foreach(var (path, text) in project.AgentsFiles())
 				if(text.Length > 0) parts.Add($"# {path}\n\n{text}");
@@ -286,9 +286,10 @@ public sealed class AgentManager {
 		(topics.Count == 0 ? "(none yet; use edit_file to create a file under memory/ and link it from the index)" :
 			string.Join("\n", topics.Select(t => $"- {JsonIO.Serialize(t)}")));
 
-	string ReadPrompt(string file) {
-		var path = Path.Combine(Home.Prompts, file);
-		return File.Exists(path) ? File.ReadAllText(path).Trim() : "";
+	static string ReadPrompt(string path) {
+		try { return File.ReadAllText(path).Trim(); }
+		catch(FileNotFoundException) { return ""; }
+		catch(DirectoryNotFoundException) { return ""; }
 	}
 
 	void WriteDefaultPrompts() {

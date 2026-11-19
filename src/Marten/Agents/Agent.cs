@@ -414,34 +414,38 @@ public sealed partial class Agent : IPowerShellOwner {
 	/// built, rebuild it now, once, and say so at the end of the context. Costs one cache miss.
 	/// </summary>
 	void ReloadChangedPrompt() {
-		var sources = manager.PromptSources(Info);
-		var current = string.Join("\n\n", sources);
-		string? seen;
+		var current = manager.ReadPromptSnapshot(Info);
+		PromptSnapshot? seen;
 		lock(gate) seen = state.PromptSeen;
+		// No baseline means we cannot tell whether old rules were removed. Rebuild once even if all sources are empty.
 		if(seen == current) return;
-		// Agents from before PromptSeen existed: stale only if some edited text is missing from the prompt they have.
-		if(seen == null && sources.All(s => Instructions.Contains(s))) {
-			MarkPromptSeen(current);
-			return;
-		}
-		var instructions = manager.RebuildInstructions(this, out var memory);
+		var instructions = manager.RebuildInstructions(this, current, out var memory);
 		Append(new Entry { Kind = EntryKind.Reload, Instructions = instructions });
 		Instructions = instructions;
 		AtomicFile.Write(Path.Combine(Directory, "system.md"), instructions);
-		MarkPromptSeen(current);
 		if(memory is { } snapshot) SawMemory(snapshot.Index, snapshot.Topics);
-		var text = "Your system prompt was just reloaded because the prompts it's built from (marten.md, your kind's prompt, the project prompt) were edited. The new version is in effect now and replaces the old one: where it differs from instructions or rules you followed earlier in this conversation, the new system prompt wins.";
+		var reason = seen == null ? "there was no saved prompt baseline" : "its source prompts changed";
+		var text = $"Your system prompt was just reloaded because {reason}. The new version replaces the old one: where it differs from instructions or rules you followed earlier in this conversation, the new system prompt wins.";
 		if(seen != null) {
-			var (added, removed) = LineDiff.Of(seen, current);
-			var lines = removed.Select(l => $"- removed: {l}").Concat(added.Select(l => $"+ added: {l}")).ToList();
-			if(lines.Count > 0) text += $"\n\nWhat changed:\n{string.Join("\n", lines)}";
+			text += DescribePromptChange("marten.md", seen.Marten, current.Marten);
+			text += DescribePromptChange(current.KindFile, seen.Kind, current.Kind);
+			text += DescribePromptChange("project prompt.md", seen.Project, current.Project);
 		}
 		Append(new Entry { Kind = EntryKind.Message, From = NudgeSender, Text = text });
+		MarkPromptSeen(current);
 		manager.Publish(new { type = "agents" });
 	}
 
-	internal void MarkPromptSeen(string sources) {
-		lock(gate) state = state with { PromptSeen = sources };
+	static string DescribePromptChange(string label, string? before, string? after) {
+		if(before == after) return "";
+		var (added, removed) = LineDiff.Of(before ?? "", after ?? "");
+		var lines = removed.Select(l => $"- removed: {l}").Concat(added.Select(l => $"+ added: {l}"));
+		var diff = string.Join("\n", lines);
+		return diff.Length == 0 ? $"\n\n{label} changed." : $"\n\n{label}:\n{diff}";
+	}
+
+	internal void MarkPromptSeen(PromptSnapshot prompts) {
+		lock(gate) state = state with { PromptSeen = prompts };
 		SaveState();
 	}
 
