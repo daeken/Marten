@@ -162,11 +162,13 @@ public sealed class Scheduler(AgentManager manager) {
 				started.Add(run);
 			}
 		}
+		manager.CheckIdleProjects();
 		return started;
 	}
 
 	async Task Run(Agent a, Schedule s, DateTimeOffset now, IDisposable lease) {
 		using var operation = lease;
+		using var command = a.TrackStandaloneCommand();
 		a.UpdateSchedule(s.Id, x => x with { LastRun = now, InProgress = true, Done = x.EverySeconds == null, NextRun = x.EverySeconds == null ? x.NextRun : Next(x, now) });
 		if(manager.Tools.Get("powershell") is not PowerShellTool ps) {
 			a.UpdateSchedule(s.Id, x => x with { InProgress = false, LastResult = "PowerShell unavailable" });

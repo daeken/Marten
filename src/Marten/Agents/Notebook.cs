@@ -34,6 +34,7 @@ public sealed partial class Agent {
 	/// <summary>Run a recorded cell again: same command, directory and $State going in, in a fresh runspace. The agent's own $State is untouched.</summary>
 	public async Task<(NotebookCell Run, bool SameOutput, bool SameState)> RerunCell(int id, CancellationToken ct) {
 		using var operation = manager.Restart.Enter() ?? throw new OperationCanceledException("Marten is stopping.");
+		using var command = TrackStandaloneCommand();
 		using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, manager.Restart.CancelTools);
 		var cell = Notebook().FirstOrDefault(c => c.Id == id) ?? throw new KeyNotFoundException($"No cell {id}.");
 		if(manager.Tools.Get("powershell") is not PowerShellTool ps) throw new InvalidOperationException("PowerShell isn't available.");

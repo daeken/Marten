@@ -48,6 +48,8 @@ public sealed record AgentState {
 	/// <summary>Nudges sent in a row with no task changing state.</summary>
 	public int NudgeStreak { get; init; }
 	public bool NudgesStopped { get; init; }
+	/// <summary>Aggregate child turn progress at the last delivered project-idle notice. Cleared on material waiting-list edits.</summary>
+	public long? ProjectIdleWorkSeen { get; init; }
 	/// <summary>Input tokens the backend reported for the last request, and the last log entry it included.</summary>
 	public long LastInputTokens { get; init; }
 	public long LastInputSeq { get; init; }

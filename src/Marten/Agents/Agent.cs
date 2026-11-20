@@ -49,6 +49,7 @@ public sealed partial class Agent : IPowerShellOwner {
 		Instructions = instructions;
 		Transcript = new Transcript(Path.Combine(directory, "transcript"));
 		var entries = Transcript.Entries;
+		lastWakeSeq = entries.LastOrDefault(e => e.Kind == EntryKind.Wake)?.Seq ?? 0;
 		if(entries.LastOrDefault(e => e.Kind is EntryKind.Compaction or EntryKind.Reload or EntryKind.ContextReset)?.Instructions is { } rebuilt)
 			Instructions = rebuilt;
 		state = JsonIO.Load(StatePath, () => new AgentState());
@@ -146,6 +147,11 @@ public sealed partial class Agent : IPowerShellOwner {
 			JsonIO.Save(TasksPath, updated);
 			tasks = updated;
 			if(wake != null) QueueDependencyWake(wake);
+			if((before.State == TaskState.Waiting || taskState == TaskState.Waiting) &&
+				(before.State != taskState || before.Reason != reason || before.WaitingOn != waitingOn)) {
+				state = state with { ProjectIdleWorkSeen = null };
+				pendingProjectIdleWork = null;
+			}
 			if(before.State != taskState) {
 				taskChanges++;
 				state = state with { NudgeStreak = 0, NudgesStopped = false };
@@ -223,7 +229,12 @@ public sealed partial class Agent : IPowerShellOwner {
 		AnswerDanglingCalls("Interrupted: Marten stopped while this was running. It was not re-run; check its effects before retrying.");
 		var entries = ContextEntries();
 		var lastWake = entries.LastOrDefault(e => e.Kind == EntryKind.Wake)?.Seq ?? 0;
-		var lastIdle = entries.LastOrDefault(e => e.Kind == EntryKind.Idle)?.Seq ?? 0;
+		var idle = entries.LastOrDefault(e => e.Kind == EntryKind.Idle);
+		var lastIdle = idle?.Seq ?? 0;
+		// Recovery doesn't resolve a terminal error. In particular, don't treat an errored
+		// project as newly idle just because the in-memory status was reconstructed.
+		if(lastIdle > lastWake && idle?.Reason == "turn_error")
+			SetStatus(AgentStatus.Error, entries.LastOrDefault(e => e.Kind == EntryKind.Error)?.Text);
 		var interruptedTurn = lastWake > lastIdle && Transcript.Last?.Kind != EntryKind.Assistant;
 		if(lastWake > lastIdle && !interruptedTurn) Append(new Entry { Kind = EntryKind.Idle });
 		var interruptedOperations = RecoverSchedules() + RecoverNotebookReplays();
@@ -341,12 +352,17 @@ public sealed partial class Agent : IPowerShellOwner {
 			lock(gate) {
 				slots.ThrowIfStopped(modelCts.Token);
 				SetStatus(AgentStatus.Running);
-				Append(new Entry { Kind = EntryKind.Wake, Reason = reason });
+				lastWakeSeq = Append(new Entry { Kind = EntryKind.Wake, Reason = reason }).Seq;
 				ReloadChangedPrompt();
 				NoteMemoryChanges();
 				NoteToolChanges();
 				var messages = Take(_ => true);
 				Deliver(messages);
+				if(pendingProjectIdleWork is long work && messages.Any(m => m.Reason == ProjectIdleWake)) {
+					state = state with { ProjectIdleWorkSeen = work };
+					pendingProjectIdleWork = null;
+					SaveState();
+				}
 				if(messages.Any(m => m.Reason == DependencyWake)) AcknowledgeDependencyWakes();
 			}
 			var changesAtStart = taskChanges;
@@ -375,7 +391,6 @@ public sealed partial class Agent : IPowerShellOwner {
 				slots.ThrowIfStopped(modelCts.Token);
 				Append(new Entry { Kind = EntryKind.Idle });
 				SetStatus(AgentStatus.Idle);
-				activeTurn = null;
 			}
 			MaybeNudge(changesAtStart);
 		} catch(OperationCanceledException) when(manager.Restart.IsStopping) {
