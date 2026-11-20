@@ -147,9 +147,55 @@ public class TaskDependencyTests : IAsyncLifetime {
 		var result = await Link(owner, mine, producer.Info.Name, target);
 		Success(result);
 		Assert.Equal($"Task #{mine} is open.", result.Text);
+		Assert.Equal(0, owner.PendingCount);
 		Assert.Equal(0, assigner.PendingCount);
 		Assert.Empty(manager.AgentMessages());
 		AssertTask(owner, mine, TaskState.Open);
+	}
+
+	[Fact]
+	public async Task DirectRegistrationOnDoneReturnsActualTransitionAndPersistsItWithoutAWake() {
+		var mine = Add(owner, "ship");
+		var first = Add(producer, "first");
+		var finished = Add(producer, "already finished");
+		var link = new TaskDependency(producer.Info.Id, first);
+		owner.UpdateTask(mine, TaskState.Waiting, "need first", link);
+		producer.UpdateTask(finished, TaskState.Done, "ready");
+		var (before, after) = owner.UpdateTask(mine, TaskState.Waiting, "retarget", new(producer.Info.Id, finished));
+		Assert.Equal(TaskState.Waiting, before.State);
+		Assert.Equal("need first", before.Reason);
+		Assert.Equal(link, before.WaitingOn);
+		Assert.Equal(TaskState.Open, after.State);
+		Assert.Null(after.Reason);
+		Assert.Null(after.WaitingOn);
+		Assert.Equal(0, owner.PendingCount);
+		await Reload();
+		AssertTask(owner, mine, TaskState.Open);
+		Assert.Null(owner.GetTask(mine)!.Reason);
+		Assert.Equal(0, owner.PendingCount);
+	}
+
+	[Fact]
+	public async Task ClosedOwnerReceivesContextualWakeOnlyAfterManualReopen() {
+		Add(producer, "unrelated"); // Distinct ids so a wake can't substitute one for the other.
+		var target = Add(producer, "prepare inputs");
+		var mine = Add(owner, "run analysis");
+		owner.UpdateTask(mine, TaskState.Waiting, "need inputs", new(producer.Info.Id, target));
+		owner.SetClosed(true);
+		manager.SetPausedAll(false);
+		producer.UpdateTask(target, TaskState.Done, "verified 12 samples");
+		AssertTask(owner, mine, TaskState.Open);
+		Assert.True(owner.Info.Closed);
+		Assert.Equal(1, owner.PendingCount);
+		Assert.All(manager.Agents.Where(a => a != owner), a => Assert.Equal(0, a.PendingCount));
+		Assert.DoesNotContain(owner.Transcript.Entries, e => e.Kind == EntryKind.Wake);
+		owner.SetClosed(false);
+		await Wait.Until(() => owner.Transcript.Entries.Any(e => e.Kind == EntryKind.Message && e.Text!.Contains("verified 12 samples")));
+		Assert.Contains(owner.Transcript.Entries, e => e.Kind == EntryKind.Wake && e.Reason == "task_dependency");
+		var notice = Assert.Single(owner.Transcript.Entries, e => e.Kind == EntryKind.Message && e.Text!.Contains("verified 12 samples"));
+		Assert.Equal("Marten", notice.From);
+		foreach(var context in new[] { $"#{mine}", "run analysis", $"#{target}", "prepare inputs", AgentManager.Label(producer) })
+			Assert.Contains(context, notice.Text!);
 	}
 
 	[Fact]
@@ -186,6 +232,28 @@ public class TaskDependencyTests : IAsyncLifetime {
 		AssertTask(owner, mine, TaskState.Open);
 		manager.SetPausedAll(false);
 		await Wait.Until(() => owner.Transcript.Entries.Any(e => e.Kind == EntryKind.Message && e.Text!.Contains("assemble")));
+	}
+
+	[Fact]
+	public async Task InterruptedAcknowledgementDoesNotLoseAnAlreadyAppendedNotice() {
+		var target = Add(producer, "assemble");
+		var mine = Add(owner, "ship");
+		owner.UpdateTask(mine, TaskState.Waiting, "need assembly", new(producer.Info.Id, target));
+		producer.UpdateTask(target, TaskState.Done, "assembly verified");
+		var tasksPath = Path.Combine(owner.Directory, "tasks.json");
+		var beforeAck = File.ReadAllText(tasksPath);
+		int Notices() => owner.Transcript.Entries.Count(e => e.Kind == EntryKind.Message && e.Text!.Contains("assembly verified"));
+		manager.SetPausedAll(false);
+		await Wait.Until(() => Notices() == 1);
+		// Keep the actual delivered transcript, but restore the last pre-ack tasks file.
+		// Replaying the message is allowed; re-creating a dependency edge is not.
+		await Reload(() => File.WriteAllText(tasksPath, beforeAck));
+		await Wait.Until(() => owner.PendingCount == 0 && owner.Transcript.Last?.Kind == EntryKind.Idle);
+		manager.SetPausedAll(true);
+		await Reload(); // A clean acknowledgement must not leave another wake queued forever.
+		Assert.Equal(0, owner.PendingCount);
+		Assert.True(Notices() >= 1);
+		AssertTask(owner, mine, TaskState.Open);
 	}
 
 	[Fact]
