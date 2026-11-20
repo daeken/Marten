@@ -37,6 +37,162 @@ public class ContextTests {
 		r with { Usage = JsonSerializer.SerializeToElement(new { input_tokens = inputTokens }) };
 
 	[Fact]
+	public async Task FreshContextIsAnAppendOnlyBoundaryAcrossRestart() {
+		using var dir = new TempDir();
+		Directory.CreateDirectory(dir.File("repo"));
+		var backend = new FakeBackend();
+		backend.Script.Enqueue(_ => FakeBackend.Say("old summary"));
+		backend.Script.Enqueue(_ => WithUsage(FakeBackend.Say("old reply"), 999_999));
+		var m = Manager(dir, backend);
+		var (project, agent) = m.CreateProject("p", [dir.File("repo")], "obsolete rule", false);
+		var child = m.SpawnTask(agent, "child", false, null, null);
+		var task = agent.AddTask("keep this", child.Info.Id);
+		var schedule = agent.AddSchedule("Write-Output later", null, DateTimeOffset.UtcNow.AddHours(1), null, null);
+		agent.UpdateTask(task.Id, TaskState.Waiting, "waiting intentionally");
+		Exchange(agent, "summarize this old question", "old answer");
+		await agent.Compact("fake-1", default);
+		agent.Send(new Inbound("Sera", "old question", SendMode.Queued));
+		await Wait.Until(() => Idle(agent) && agent.Transcript.Entries.Any(e => e.Text == "old reply"));
+		Assert.True(agent.EstimateTokens(agent.View()) >= 999_999);
+		for(var i = 0; i < 100; i++)
+			agent.Transcript.Append(new Entry { Kind = EntryKind.Message, Text = $"archive {i}" });
+		// Repair on restart must not bring a pre-boundary orphan into the new context.
+		agent.Transcript.Append(new Entry { Kind = EntryKind.ToolCall, CallId = "old orphan" });
+		var before = agent.Transcript.Last!.Seq;
+		File.WriteAllText(project.PromptPath, "current project rule");
+		File.WriteAllText(project.MemoryPath, "current project memory");
+		File.WriteAllText(dir.File("repo/AGENTS.md"), "current repo rule");
+		File.WriteAllText(Path.Combine(m.Home.Prompts, "orchestrator.md"), "current kind rule");
+		Assert.Null(agent.StartFreshContext());
+		var boundary = agent.Transcript.Last!;
+		Assert.Equal(before + 1, boundary.Seq);
+		Assert.Equal(EntryKind.ContextReset, boundary.Kind);
+		Assert.Empty(agent.View());
+		Assert.Equal(agent.Instructions, boundary.Instructions);
+		Assert.Equal(agent.Instructions, File.ReadAllText(Path.Combine(agent.Directory, "system.md")));
+		var state = JsonIO.Load(Path.Combine(agent.Directory, "state.json"), () => new AgentState());
+		Assert.Equal(0, state.LastInputTokens);
+		Assert.Equal(0, state.LastInputSeq);
+		Assert.Equal("current project rule", state.PromptSeen!.Project);
+		Assert.Equal("current project memory", state.MemorySeen);
+		Assert.Equal(2, backend.Requests.Count);
+		await m.Restart.DrainAsync(TimeSpan.Zero, TimeSpan.FromSeconds(5), () => {});
+
+		var restarted = new FakeBackend();
+		restarted.Script.Enqueue(_ => FakeBackend.Say("fresh reply"));
+		var loaded = Manager(dir, restarted);
+		loaded.LoadAll();
+		var same = loaded.Get(agent.Info.Id)!;
+		Assert.Equal(agent.Instructions, same.Instructions);
+		Assert.Equal(agent.Info, same.Info);
+		Assert.Equal(agent.Info.Id, loaded.Get(child.Info.Id)!.Info.ParentId);
+		Assert.Equal(agent.Tasks, same.Tasks);
+		Assert.Equal(schedule, Assert.Single(same.Schedules));
+		Assert.Empty(restarted.Requests);
+		Assert.Single(same.View(), e => e.Text!.StartsWith("Marten restarted."));
+		var page = same.Transcript.ReadPage(80);
+		Assert.Contains(boundary, page.Entries);
+		Assert.True(page.HasOlder);
+		Assert.Contains(same.Transcript.ReadPage(80, page.Entries[0].Seq).Entries, e => e.Text == "old summary");
+		same.Send(new Inbound("Sera", "fresh question", SendMode.Queued));
+		await Wait.Until(() => Idle(same));
+		var request = Assert.Single(restarted.Requests);
+		Assert.All(request.History, e => Assert.True(e.Seq > boundary.Seq));
+		Assert.DoesNotContain(request.History, e => e.Kind == EntryKind.ToolResult || e.Text?.Contains("reloaded") == true || e.Text?.Contains("memory changed") == true);
+		Assert.Contains(request.History, e => e.Text == "fresh question");
+		foreach(var included in new[] { "current project rule", "current project memory", "current repo rule", "current kind rule" })
+			Assert.Contains(included, same.Instructions);
+		Assert.DoesNotContain("obsolete rule", same.Instructions);
+	}
+
+	[Fact]
+	public async Task RestartWithStaleStateDoesNotReplayPreResetPromptOrMemoryDiffs() {
+		using var dir = new TempDir();
+		var m = Manager(dir, new FakeBackend());
+		var (project, agent) = m.CreateProject("p", [dir.Path], "pre-reset rule", false);
+		File.WriteAllText(project.MemoryPath, "pre-reset memory");
+		agent.SawMemory(project.Memory);
+		var path = Path.Combine(agent.Directory, "state.json");
+		var staleState = File.ReadAllText(path);
+		File.WriteAllText(project.PromptPath, "new rule");
+		File.WriteAllText(project.MemoryPath, "new memory");
+		Assert.Null(agent.StartFreshContext());
+		await m.Restart.DrainAsync(TimeSpan.Zero, TimeSpan.FromSeconds(5), () => {});
+		// Simulate a stop after the append reached disk but before either derived file was saved.
+		File.WriteAllText(path, staleState);
+		File.WriteAllText(Path.Combine(agent.Directory, "system.md"), "pre-reset system file");
+		var backend = new FakeBackend();
+		backend.Script.Enqueue(_ => FakeBackend.Say("ok"));
+		var restarted = Manager(dir, backend);
+		restarted.LoadAll();
+		var same = restarted.Get(agent.Info.Id)!;
+		Assert.Equal(agent.Instructions, same.Instructions);
+		same.Send(new Inbound("Sera", "new question", SendMode.Queued));
+		await Wait.Until(() => Idle(same));
+		var request = Assert.Single(backend.Requests);
+		Assert.Contains("new rule", request.Instructions);
+		Assert.Contains("new memory", request.Instructions);
+		Assert.DoesNotContain("pre-reset", request.Instructions);
+		Assert.DoesNotContain(request.History, e => e.Text?.Contains("pre-reset") == true);
+	}
+
+	[Fact]
+	public async Task ResetDuringAnIdleGapPreservesQueuedInputAndCanBeRepeated() {
+		using var dir = new TempDir();
+		var backend = new FakeBackend();
+		backend.Script.Enqueue(_ => FakeBackend.Say("fresh reply"));
+		var agent = Manager(dir, backend).CreateChat("t", dir.Path);
+		agent.SetClosed(true);
+		var waiting = new Inbound("peer", "queued input", SendMode.Queued);
+		agent.Send(waiting); // A peer cannot reopen the agent, so admission cannot consume this yet.
+		Assert.Null(agent.StartFreshContext());
+		agent.Transcript.Append(new Entry { Kind = EntryKind.Compaction, Text = "discard this second summary", UpTo = agent.Transcript.Last!.Seq });
+		Assert.Null(agent.StartFreshContext());
+		var latest = agent.Transcript.Last!.Seq;
+		Assert.Empty(agent.View());
+		Assert.True(agent.Holds(waiting));
+		Assert.True(agent.Info.Closed);
+		agent.Send(new Inbound("Sera", "reopen", SendMode.Queued));
+		await Wait.Until(() => Idle(agent));
+		var request = Assert.Single(backend.Requests);
+		Assert.All(request.History, e => Assert.True(e.Seq > latest));
+		Assert.Contains(request.History, e => e.Text == waiting.Text);
+	}
+
+	[Fact]
+	public async Task ResetRejectsEffectivePausesStandaloneCompactionAndShutdown() {
+		using var dir = new TempDir();
+		var backend = new FakeBackend { Gate = new(TaskCreationOptions.RunContinuationsAsynchronously) };
+		backend.Script.Enqueue(_ => FakeBackend.Say("summary"));
+		var m = Manager(dir, backend);
+		var (project, agent) = m.CreateProject("p", [dir.Path], null, false);
+		agent.SetPaused(true);
+		Assert.Contains("paused", agent.StartFreshContext());
+		agent.SetPaused(false);
+		m.SetProjectPaused(project, true);
+		Assert.Contains("paused", agent.StartFreshContext());
+		m.SetProjectPaused(project, false);
+		m.SetPausedAll(true);
+		Assert.Contains("paused", agent.StartFreshContext());
+		m.SetPausedAll(false);
+		Exchange(agent, "before", "answer");
+		var compact = agent.Compact("fake-1", default);
+		await Wait.Until(() => agent.ModelCall is { Kind: ModelCallKind.Compaction, EndedAt: null });
+		Assert.Contains("active", agent.StartFreshContext());
+		agent.SetPaused(true);
+		backend.Gate.SetResult();
+		await Wait.Until(() => agent.Status == AgentStatus.Paused);
+		Assert.Contains("active", agent.StartFreshContext());
+		agent.SetPaused(false);
+		await compact.WaitAsync(TimeSpan.FromSeconds(10));
+		Assert.Null(agent.StartFreshContext());
+		var boundary = agent.Transcript.Last;
+		await m.Restart.DrainAsync(TimeSpan.Zero, TimeSpan.FromSeconds(5), () => {});
+		Assert.Contains("stopping", agent.StartFreshContext());
+		Assert.Equal(boundary, agent.Transcript.Last);
+	}
+
+	[Fact]
 	public async Task ElideNowReplacesResultsInTheViewButKeepsTheLogAndTheFullText() {
 		using var dir = new TempDir();
 		var agent = Manager(dir, new FakeBackend()).CreateChat("t", dir.Path);

@@ -219,9 +219,11 @@ public class TurnLifecycleTests {
 		};
 		Tell(agent, "go");
 		await tool.Started.Task.WaitAsync(Timeout);
+		Assert.Contains("active", agent.StartFreshContext());
 		pause(true);
 		tool.Release.SetResult();
 		await Wait.Until(() => agent.Status == AgentStatus.Paused);
+		Assert.Contains("active", agent.StartFreshContext());
 		var first = Assert.Single(agent.Transcript.Entries, e => e.Kind == EntryKind.ToolResult);
 		Assert.Equal("first", first.CallId);
 		Assert.Equal("finished", first.Text);
@@ -252,6 +254,7 @@ public class TurnLifecycleTests {
 		var waiting = m.CreateChat("waiting", dir.Path);
 		Tell(waiting, "wait for the slot");
 		await Wait.Until(() => waiting.Status == AgentStatus.WaitingForSlot);
+		Assert.Contains("active", waiting.StartFreshContext());
 		waiting.SetClosed(true);
 		await Wait.Until(() => Idle(waiting));
 		Assert.Equal("interrupted", waiting.Transcript.Last!.Reason);

@@ -48,8 +48,13 @@ public sealed partial class Agent : IPowerShellOwner {
 		this.info = info;
 		Instructions = instructions;
 		Transcript = new Transcript(Path.Combine(directory, "transcript"));
-		if(Transcript.Entries.LastOrDefault(e => e.Kind is EntryKind.Compaction or EntryKind.Reload)?.Instructions is { } rebuilt) Instructions = rebuilt;
+		var entries = Transcript.Entries;
+		if(entries.LastOrDefault(e => e.Kind is EntryKind.Compaction or EntryKind.Reload or EntryKind.ContextReset)?.Instructions is { } rebuilt)
+			Instructions = rebuilt;
 		state = JsonIO.Load(StatePath, () => new AgentState());
+		if(entries.LastOrDefault(e => e.Kind == EntryKind.ContextReset) is { } reset && state.ContextResetSeq != reset.Seq)
+			// The marker is durable even if shutdown interrupted the derived state writes. Never diff against old baselines.
+			state = WithFreshContextBaselines(reset.Seq, null, null);
 		Files = new FileTracker(state.FileHashes);
 		Files.Changed += SaveState;
 	}
@@ -189,7 +194,7 @@ public sealed partial class Agent : IPowerShellOwner {
 	/// <summary>Repair the log after a restart and decide whether a turn was cut short.</summary>
 	public void Recover() {
 		AnswerDanglingCalls("Interrupted: Marten stopped while this was running. It was not re-run; check its effects before retrying.");
-		var entries = Transcript.Entries;
+		var entries = ContextEntries();
 		var lastWake = entries.LastOrDefault(e => e.Kind == EntryKind.Wake)?.Seq ?? 0;
 		var lastIdle = entries.LastOrDefault(e => e.Kind == EntryKind.Idle)?.Seq ?? 0;
 		var interruptedTurn = lastWake > lastIdle && Transcript.Last?.Kind != EntryKind.Assistant;
@@ -203,7 +208,7 @@ public sealed partial class Agent : IPowerShellOwner {
 
 	/// <summary>Every tool call needs a result before the next model call; give unanswered ones an error.</summary>
 	void AnswerDanglingCalls(string text) {
-		var entries = Transcript.Entries;
+		var entries = ContextEntries();
 		var answered = entries.Where(e => e.Kind == EntryKind.ToolResult).Select(e => e.CallId).ToHashSet();
 		foreach(var call in entries.Where(e => e.Kind == EntryKind.ToolCall && !answered.Contains(e.CallId)))
 			Append(new Entry {
@@ -279,7 +284,7 @@ public sealed partial class Agent : IPowerShellOwner {
 			string reason;
 			Turn turn;
 			lock(gate) {
-				if(Info.Closed || (resumeReason == null && inbox.Count == 0)) continue;
+				if(activeTurn != null || Info.Closed || (resumeReason == null && inbox.Count == 0)) continue;
 				var reasons = inbox.Select(m => m.Reason ?? (m.From == NudgeSender ? "nudge" : "message")).Distinct().ToList();
 				reason = resumeReason ?? (reasons.Count == 1 ? reasons[0] : "message");
 				resumeReason = null;

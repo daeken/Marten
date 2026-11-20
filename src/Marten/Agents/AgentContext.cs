@@ -16,8 +16,14 @@ public sealed partial class Agent {
 	string OutputPath(string callId) =>
 		Path.Combine(OutputsDir, $"{string.Concat(callId.Select(c => char.IsLetterOrDigit(c) || c is '-' or '_' ? c : '_'))}.txt");
 
-	public List<Entry> View() {
+	IEnumerable<Entry> ContextEntries() {
 		var entries = Transcript.Entries;
+		var reset = entries.LastOrDefault(e => e.Kind == EntryKind.ContextReset);
+		return reset == null ? entries : entries.SkipWhile(e => e.Seq <= reset.Seq);
+	}
+
+	public List<Entry> View() {
+		var entries = ContextEntries().ToList();
 		var compaction = entries.LastOrDefault(e => e.Kind == EntryKind.Compaction);
 		var elided = entries.Where(e => e.Kind == EntryKind.Elide).SelectMany(e => e.Seqs ?? []).ToHashSet();
 		var view = new List<Entry>();
@@ -33,6 +39,36 @@ public sealed partial class Agent {
 		}
 		return view;
 	}
+
+	/// <summary>Append a model-context boundary without waking the agent or consuming queued input.</summary>
+	internal string? StartFreshContext() {
+		using var operation = manager.Restart.Enter();
+		if(operation == null) return "Marten is stopping.";
+		lock(gate) {
+			if(manager.Restart.IsStopping) return "Marten is stopping.";
+			if(activeTurn != null) return "An agent turn is still active. Wait for it to finish or stop it first.";
+			if(IsPaused) return "The agent is paused. Resume it before starting fresh context.";
+
+			// Use the exact sources we build with as the baseline for subsequent diffs.
+			var prompts = manager.ReadPromptSnapshot(Info);
+			var instructions = manager.RebuildInstructions(this, prompts, out var memory);
+			// Project/global pause or shutdown can change while reading the prompt sources.
+			if(manager.Restart.IsStopping) return "Marten is stopping.";
+			if(IsPaused) return "The agent is paused. Resume it before starting fresh context.";
+			var reset = Transcript.Append(new Entry { Kind = EntryKind.ContextReset, Instructions = instructions });
+			Instructions = instructions;
+			state = WithFreshContextBaselines(reset.Seq, prompts, memory);
+			SaveState();
+			AtomicFile.Write(Path.Combine(Directory, "system.md"), instructions);
+			manager.Publish(new { type = "entry", agentId = Info.Id, entry = reset with { Instructions = null } });
+			return null;
+		}
+	}
+
+	AgentState WithFreshContextBaselines(long seq, PromptSnapshot? prompts, (string Index, List<string> Topics)? memory) => state with {
+		ContextResetSeq = seq, PromptSeen = prompts, MemorySeen = memory?.Index, MemoryTopicsSeen = memory?.Topics,
+		LastInputTokens = 0, LastInputSeq = 0, DynamicTools = null, ToolsNoted = null,
+	};
 
 	string ElidedNote(Entry e) {
 		var path = e.FullOutput != null ? Path.Combine(Directory, e.FullOutput) : OutputPath(e.CallId ?? e.Seq.ToString());
@@ -52,7 +88,7 @@ public sealed partial class Agent {
 		long lastSeq;
 		long lastTokens;
 		lock(gate) (lastSeq, lastTokens) = (state.LastInputSeq, state.LastInputTokens);
-		var changedSince = Transcript.Entries.Any(e => e.Seq > lastSeq && e.Kind is EntryKind.Elide or EntryKind.Compaction or EntryKind.Reload);
+		var changedSince = Transcript.Entries.Any(e => e.Seq > lastSeq && e.Kind is EntryKind.Elide or EntryKind.Compaction or EntryKind.Reload or EntryKind.ContextReset);
 		if(lastTokens > 0 && !changedSince)
 			return lastTokens + view.Where(e => e.Seq > lastSeq).Sum(Chars) / CharsPerToken;
 		return baseTokens + view.Sum(Chars) / CharsPerToken;
@@ -98,19 +134,40 @@ public sealed partial class Agent {
 
 	/// <summary>The elide-now tool: drop this agent's last N tool results from its view at once.</summary>
 	public int ElideLast(int count) {
-		var results = View().Where(e => e.Kind == EntryKind.ToolResult && !(e.Text ?? "").StartsWith("[Elided")).TakeLast(count).ToList();
-		if(results.Count > 0) Elide(results);
-		return results.Count;
+		// Scheduled commands and notebook replays can also invoke the tool. Do not select
+		// pre-reset results and append their elision after the boundary.
+		lock(gate) {
+			var results = View().Where(e => e.Kind == EntryKind.ToolResult && !(e.Text ?? "").StartsWith("[Elided")).TakeLast(count).ToList();
+			if(results.Count > 0) Elide(results);
+			return results.Count;
+		}
 	}
 
 	/// <summary>
 	/// Chat agents and orchestrators roll over: the older half is summarized and the rest stays verbatim.
 	/// Task agents compact everything. Either way the system prompt is rebuilt with current memory and notes.
 	/// </summary>
-	public async Task Compact(string model, CancellationToken ct) {
-		using var slots = new TurnSlots(this);
-		await slots.EnsureAgent(ct);
-		await Compact(model, slots, ct);
+	internal async Task Compact(string model, CancellationToken ct) {
+		// The standalone path (used by tests) needs the same exclusion as in-turn compaction.
+		using var operation = manager.Restart.Enter() ?? throw new OperationCanceledException("Marten is stopping.");
+		Turn turn;
+		lock(gate) {
+			if(activeTurn != null || Info.Closed) throw new InvalidOperationException("The agent cannot compact outside a turn right now.");
+			activeTurn = turn = new Turn();
+		}
+		try {
+			using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, turn.Cancellation.Token, manager.Restart.Stopping);
+			using var slots = new TurnSlots(this, turn.Cancellation.Token);
+			await Compact(model, slots, linked.Token);
+		} finally {
+			lock(gate) {
+				activeTurn = null;
+				SetStatus(AgentStatus.Idle);
+				if(inbox.Count > 0 || resumeReason != null) signal.Release();
+			}
+			await turn.Cancelled.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+			turn.Cancellation.Dispose();
+		}
 	}
 
 	// Returns true if a suffix remains that another compaction pass could reduce.

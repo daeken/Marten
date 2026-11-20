@@ -187,6 +187,11 @@ api.MapPost("/agents/{id}/close", (string id, CloseRequest req) => {
 	a.SetClosed(req.Closed);
 	return Results.Ok(AgentSummary(a));
 });
+// This mutation is under UI-token auth, not /api/ext or the outside read allowlist.
+api.MapPost("/agents/{id}/start-fresh-context", (string id) => {
+	if(manager.Get(id) is not { } a) return Results.NotFound();
+	return a.StartFreshContext() is { } conflict ? Results.Problem(conflict, statusCode: 409) : Results.NoContent();
+});
 api.MapPost("/agents/{id}/pause", (string id, PauseRequest req) => {
 	if(manager.Get(id) is not { } a) return Results.NotFound();
 	a.SetPaused(req.Paused);

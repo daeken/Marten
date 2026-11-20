@@ -48,6 +48,7 @@ public class NetworkRecoveryTests {
 		m.Events += e => statusEvents.Enqueue(JsonIO.Serialize(e));
 		Wake(worker);
 		await Wait.Until(() => worker.Status == AgentStatus.WaitingForNetwork);
+		Assert.Contains("active", worker.StartFreshContext());
 		Assert.Equal(clock.GetUtcNow() + FirstWait, worker.CurrentStatus.RetryAt);
 		Assert.Equal(Offline().Message, worker.StatusDetail);
 		Assert.Equal(ModelCallOutcome.Failed, worker.ModelCall!.Outcome);
