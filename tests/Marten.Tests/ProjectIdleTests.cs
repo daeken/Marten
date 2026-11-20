@@ -36,7 +36,9 @@ public class ProjectIdleTests {
 		Tick();
 		await Wait.Until(() => Notices(orch) == 1 && Idle(orch));
 		var note = Assert.Single(orch.Transcript.Entries, e => e.Kind == EntryKind.Message && e.From == Agent.NudgeSender && e.Text!.Contains(review.Title));
-		Assert.Contains(docs.Title, note.Text);
+		Assert.Contains($"#{review.Id} {review.Title}", note.Text);
+		Assert.Contains($"#{docs.Id} {docs.Title}", note.Text);
+		Assert.Contains(review.Reason!, note.Text);
 		Assert.Equal([review, docs], orch.Tasks);
 
 		Tick();
@@ -55,6 +57,40 @@ public class ProjectIdleTests {
 		Assert.Contains(orch.Transcript.Entries, e => e.Kind == EntryKind.Message && e.Text!.Contains(extra.Title));
 		Assert.Equal([review, docs, extra], orch.Tasks);
 		NoNotice(worker);
+	}
+
+	[Fact]
+	public async Task ReloadAndRosterChurnDoNotRepeatAnAcknowledgedNotice() {
+		using var dir = new TempDir();
+		var m = Manager(dir);
+		var (_, orch) = m.CreateProject("p", [dir.Path], null, false);
+		var worker = m.SpawnTask(orch, "builder", false, null, null);
+		worker.Send(new Inbound("Sera", "prepare artifacts", SendMode.Queued));
+		await Wait.Until(() => Idle(worker));
+		var review = Add(orch, "Review artifacts");
+		new Scheduler(m).Tick(DateTimeOffset.UtcNow);
+		await Wait.Until(() => Notices(orch) == 1 && Idle(orch));
+
+		var reloaded = Manager(dir);
+		reloaded.LoadAll();
+		var owner = reloaded.Get(orch.AgentId)!;
+		var scheduler = new Scheduler(reloaded);
+		void StillAcknowledged() {
+			scheduler.Tick(DateTimeOffset.UtcNow);
+			Assert.Equal(0, owner.PendingCount);
+			Assert.Equal(1, Notices(owner));
+		}
+		StillAcknowledged();
+		reloaded.Get(worker.AgentId)!.SetClosed(true);
+		StillAcknowledged();
+		reloaded.SpawnTask(owner, "replacement", false, null, null);
+		StillAcknowledged();
+		owner.UpdateTask(review.Id, TaskState.Waiting, review.Reason); // Updated timestamp alone isn't progress.
+		StillAcknowledged();
+		owner.UpdateTask(review.Id, TaskState.Waiting, "reviewer changed");
+		scheduler.Tick(DateTimeOffset.UtcNow);
+		await Wait.Until(() => Notices(owner) == 2 && Idle(owner));
+		Assert.Contains(owner.Transcript.Entries, e => e.Kind == EntryKind.Message && e.Text!.Contains("reviewer changed"));
 	}
 
 	[Theory]
