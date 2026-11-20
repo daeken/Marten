@@ -41,6 +41,8 @@ public sealed record AgentState {
 	public string? MemorySeen { get; init; }
 	/// <summary>The hand-edited prompts (marten.md, the kind prompt, the project prompt) as the system prompt last carried them.</summary>
 	public PromptSnapshot? PromptSeen { get; init; }
+	/// <summary>Reset whose rebuilt context baselines this state belongs to.</summary>
+	public long ContextResetSeq { get; init; }
 	/// <summary>Topic paths last shown to the agent. Null in pre-topic state files.</summary>
 	public List<string>? MemoryTopicsSeen { get; init; }
 	/// <summary>Nudges sent in a row with no task changing state.</summary>

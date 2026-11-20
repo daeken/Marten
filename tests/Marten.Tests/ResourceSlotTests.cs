@@ -80,6 +80,7 @@ public class ResourceSlotTests {
 		Wake(waiting);
 		(await backend.Next()).Result.SetException(new RateLimitedException("slow down", TimeSpan.FromMinutes(10)));
 		await Wait.Until(() => waiting.Status == AgentStatus.WaitingForQuota);
+		Assert.Contains("active", waiting.StartFreshContext());
 		try {
 			Wake(next);
 			var call = await backend.Next();

@@ -24,6 +24,8 @@ public static class EntryKind {
 	public const string Compaction = "compaction";
 	/// <summary>The system prompt was rebuilt because a hand-edited prompt changed. Instructions holds it; never sent to the model.</summary>
 	public const string Reload = "reload";
+	/// <summary>Start a new model context after this entry; Instructions holds its rebuilt system prompt.</summary>
+	public const string ContextReset = "context_reset";
 }
 
 /// <summary>

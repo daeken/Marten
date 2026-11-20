@@ -101,7 +101,7 @@ export function App() {
             const entries = mergeEntries(prior?.entries ?? [], [e.entry]);
             return { id: e.agentId, entries: entries.slice(-transcriptPageSize), hasOlder: !!prior?.hasOlder || entries.length > transcriptPageSize };
           });
-          if (e.entry.kind === 'assistant' || e.entry.kind === 'tool_call' || e.entry.kind === 'idle' || e.entry.kind === 'error')
+          if (e.entry.kind === 'assistant' || e.entry.kind === 'tool_call' || e.entry.kind === 'idle' || e.entry.kind === 'error' || e.entry.kind === 'context_reset')
             setStreaming(s => ({ ...s, [e.agentId]: '' }));
           if (e.entry.kind === 'tool_result') setRunning(r => { const { [e.agentId]: _, ...rest } = r; return rest; });
           break;
@@ -412,6 +412,8 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
   const [text, setText] = useState('');
   const [mode, setMode] = useState<'queued' | 'immediate'>('queued');
   const [showNotebook, setShowNotebook] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [resetError, setResetError] = useState<string | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const busy = agent.status === 'running' || agent.status === 'waiting_for_quota' || agent.status === 'waiting_for_network' || agent.status === 'waiting_for_slot';
 
@@ -458,6 +460,20 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
 
   const callIds = useMemo(() => new Set(entries.filter(e => e.kind === 'tool_call' && e.callId).map(e => e.callId)), [entries]);
 
+  const startFreshContext = async () => {
+    if (!window.confirm(`Start fresh context for ${agent.name}? The agent will no longer see earlier messages, tool results, or compaction summaries. The transcript stays browsable, and current instructions, memory, and queued input are kept.`)) return;
+    setResetting(true);
+    setResetError(null);
+    try {
+      await api.startFreshContext(agent.id);
+    } catch (e) {
+      setResetError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setResetting(false);
+      onChange();
+    }
+  };
+
   const send = async () => {
     const t = text.trim();
     if (!t) return;
@@ -492,6 +508,8 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
             </select>
           </div>
           <div className="head-actions">
+            <button className="small" disabled={resetting || busy || agent.pausedEffective || agent.status === 'paused'}
+              title="Start a new model context without deleting the transcript" onClick={startFreshContext}>Start fresh context</button>
             <button className={`small ${showNotebook ? 'on' : ''}`} onClick={() => setShowNotebook(v => !v)}
               title="Every PowerShell run with its $State in and out; re-run or export as a Jupyter notebook">{showNotebook ? 'Transcript' : 'Notebook'}</button>
             <button className="small" onClick={() => api.closeAgent(agent.id, !agent.closed).then(onChange)}
@@ -506,6 +524,7 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
           </div>}
         </div>
       </header>
+      {resetError && <div className="banner" role="alert">Could not start fresh context: {resetError}</div>}
       {tasks.length > 0 && (
         <div className="tasks task-list" role="region" aria-label="Agent tasks" tabIndex={0}>
           {tasks.map(t => (
@@ -710,6 +729,8 @@ const EntryView = memo(function EntryView({ entry: e, result, running, imageUrl 
         : e.reason === 'nudge' ? <div className="divider">Nudged: open tasks</div> : null;
     case 'elide':
       return <div className="divider">Elided {e.seqs?.length ?? 0} old tool result{e.seqs?.length === 1 ? '' : 's'} from context</div>;
+    case 'context_reset':
+      return <div className="divider">Fresh context started</div>;
     case 'reload':
       return <div className="divider">System prompt reloaded</div>;
     case 'compaction':

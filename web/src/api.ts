@@ -117,7 +117,7 @@ export interface AgentMessage {
 export interface Entry {
   seq: number;
   ts: string;
-  kind: 'wake' | 'message' | 'assistant' | 'reasoning' | 'tool_call' | 'tool_result' | 'error' | 'idle' | 'elide' | 'compaction' | 'reload';
+  kind: 'wake' | 'message' | 'assistant' | 'reasoning' | 'tool_call' | 'tool_result' | 'error' | 'idle' | 'elide' | 'compaction' | 'reload' | 'context_reset';
   seqs?: number[];
   upTo?: number;
   from?: string;
@@ -210,6 +210,7 @@ export class Api {
     return (text ? JSON.parse(text) : undefined) as T;
   }
 
+  startFreshContext = (id: string) => this.call<void>('POST', `/agents/${id}/start-fresh-context`);
   status = () => this.call<Status_>('GET', '/status');
   login = () => this.call<{ url: string }>('POST', '/auth/login');
   logout = () => this.call<void>('POST', '/auth/logout');
