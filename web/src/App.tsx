@@ -727,6 +727,7 @@ const EntryView = memo(function EntryView({ entry: e, result, running, imageUrl 
       return e.reason === 'interrupted' ? <div className="divider">Interrupted</div> : null;
     case 'wake':
       return e.reason === 'restart' ? <div className="divider">Resumed after restart</div>
+        : e.reason === 'project_idle' ? <div className="divider">Project idle with waiting tasks</div>
         : e.reason === 'nudge' ? <div className="divider">Nudged: open tasks</div> : null;
     case 'elide':
       return <div className="divider">Elided {e.seqs?.length ?? 0} old tool result{e.seqs?.length === 1 ? '' : 's'} from context</div>;

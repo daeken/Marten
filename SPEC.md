@@ -152,10 +152,11 @@ Besides messages, two things can wake an agent: an unfinished task and a schedul
 - Each agent has a task list that lives outside its context, so it survives compaction.
 - An orchestrator can add tasks to its task agents' lists.
 - A task is open, waiting, blocked or done. Waiting and blocked carry a reason.
-  - **Waiting** is on another agent or a schedule. It is not nudged and does not reach Sera.
+  - **Waiting** is on another agent or a schedule. It does not trigger open-task nudges or reach Sera.
   - **Blocked** is on Sera.
 - An agent that goes idle with an open task is nudged awake. To stop on purpose, it marks the task waiting, blocked or done.
 - After three nudges in a row with no task changing state, nudging stops and the agent is flagged in the UI.
+- If the orchestrator still has waiting tasks when it and all its non-closed workers are idle, it gets a project-idle notice listing those tasks. This is a heads-up, not a state change or a claim that a prerequisite is done. Going idle again after reading the notice does not by itself trigger another.
 - When a task turns done, waiting or blocked, the agent that assigned it is woken.
 - **Task dependencies.** `task_wait_for(id, agent, task_id)` puts the caller's task `id` on hold until task `task_id` on `agent`'s list is done. Choose yourself or another agent in your project by id or unambiguous name. Use `$Marten.Agents()` to find agent ids and `$Marten.Tasks('name-or-id')` to inspect that owner's task ids, states and `WaitingOn` references; `$Marten.Tasks()` still lists your own. A dependency uses ordinary waiting notifications, not a blocked alert. Completion reopens the dependent task rather than marking it done. An already-done prerequisite leaves the dependent task open immediately. Use plain `task_update` waiting with a reason for waits that aren't tied to a task.
 - **Completion contracts.** Whoever assigns a task may attach a check: a bash command run in the owner's working directory (timeout `checkTimeoutSeconds`, 900). Marking the task done runs it; unless it exits 0 the task stays as it was and the agent gets the output. The UI shows each check and its last result. Only the assigner sets the check.
