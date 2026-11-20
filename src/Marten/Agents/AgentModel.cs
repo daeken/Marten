@@ -59,6 +59,8 @@ public sealed record AgentState {
 
 public enum TaskState { Open, Waiting, Blocked, Done }
 
+public sealed record TaskDependency(string AgentId, int TaskId);
+
 /// <summary>One entry in an agent's task list. Lives outside the context, so it survives compaction.</summary>
 public sealed record TaskItem {
 	public required int Id { get; init; }
@@ -66,6 +68,11 @@ public sealed record TaskItem {
 	public TaskState State { get; init; } = TaskState.Open;
 	/// <summary>Why it is waiting or blocked, or a closing note when done.</summary>
 	public string? Reason { get; init; }
+	public TaskDependency? WaitingOn { get; init; }
+	// Outbox: commit the wake in the same atomic write that removes WaitingOn. Cleared only
+	// after delivery to the durable transcript; older tasks.json files have neither field.
+	[System.Text.Json.Serialization.JsonInclude]
+	internal string[]? PendingDependencyWakes { get; init; }
 	/// <summary>The agent that added it; woken when the task turns done, waiting or blocked.</summary>
 	public required string AssignedBy { get; init; }
 	public DateTimeOffset Updated { get; init; }

@@ -96,6 +96,7 @@ export interface TaskItem {
   id: number;
   title: string;
   state: 'open' | 'waiting' | 'blocked' | 'done';
+  waitingOn?: { agentId: string; taskId: number } | null;
   reason?: string;
   assignedBy: string;
   updated: string;

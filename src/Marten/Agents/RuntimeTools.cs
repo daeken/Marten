@@ -43,9 +43,13 @@ static class AgentTools {
 	public static Agent Self(IToolContext ctx) => ctx as Agent ?? throw new ToolException("This tool needs an agent.");
 
 	/// <summary>Find an agent by id, or by name among those the caller can see (its project first).</summary>
-	public static Agent Resolve(AgentManager m, Agent from, string who) {
-		if(m.Get(who) is { } byId) return byId;
-		var named = m.Agents.Where(a => string.Equals(a.Info.Name, who, StringComparison.OrdinalIgnoreCase)).ToList();
+	public static Agent Resolve(AgentManager m, Agent from, string who, bool projectOnly = false) {
+		bool InScope(Agent a) => !projectOnly || a == from || (from.Info.ProjectId != null && a.Info.ProjectId == from.Info.ProjectId);
+		if(m.Get(who) is { } byId) {
+			if(!InScope(byId)) throw new ToolException("Choose yourself or an agent in your project.");
+			return byId;
+		}
+		var named = m.Agents.Where(InScope).Where(a => string.Equals(a.Info.Name, who, StringComparison.OrdinalIgnoreCase)).ToList();
 		var local = named.Where(a => a.Info.ProjectId == from.Info.ProjectId).ToList();
 		var pick = local.Count > 0 ? local : named;
 		return pick.Count switch {
@@ -206,6 +210,29 @@ public sealed class TaskAddTool(Func<AgentManager> manager) : ITool {
 	}
 }
 
+public sealed class TaskWaitForTool(Func<AgentManager> manager) : ITool {
+	public string Name => "task_wait_for";
+	public string Description =>
+		"Wait on a prerequisite task. Your task reopens when the prerequisite is done (immediately if already done). " +
+		"Use $Marten.Tasks(agent) in PowerShell to find task numbers.";
+	public JsonObject Parameters => Schema.Object(
+		("id", Schema.Int("Task number on your own list.")),
+		("agent", Schema.Str("Prerequisite owner's id or unambiguous name: yourself or an agent in your project.")),
+		("task_id", Schema.Int("Prerequisite task number on that agent's list.")));
+
+	public Task<ToolOutput> InvokeAsync(IToolContext ctx, JsonObject args, CancellationToken ct) {
+		var m = manager();
+		var self = AgentTools.Self(ctx);
+		var id = args.OptInt("id") ?? throw new ToolException("Missing required argument: id");
+		var taskId = args.OptInt("task_id") ?? throw new ToolException("Missing required argument: task_id");
+		var target = AgentTools.Resolve(m, self, args.ReqString("agent"), projectOnly: true);
+		var reason = $"Waiting for {target.Info.Name}'s task #{taskId}.";
+		var (before, after) = self.UpdateTask(id, TaskState.Waiting, reason, new TaskDependency(target.Info.Id, taskId));
+		TaskUpdateTool.NotifyAssigner(m, self, before, after);
+		return Task.FromResult(new ToolOutput($"Task #{id} is {after.State.ToString().ToLowerInvariant()}."));
+	}
+}
+
 public sealed class TaskUpdateTool(Func<AgentManager> manager) : ITool {
 	public string Name => "task_update";
 	public string Description =>
@@ -237,11 +264,15 @@ public sealed class TaskUpdateTool(Func<AgentManager> manager) : ITool {
 		if(checkNote.Length > 0) reason = string.IsNullOrWhiteSpace(reason) ? checkNote.Trim() : reason + checkNote;
 		var (before, after) = self.UpdateTask(id, newState, reason);
 		var stateWord = newState.ToString().ToLowerInvariant();
-		if(before.State != newState && newState != TaskState.Open && after.AssignedBy != self.Info.Id && m.Get(after.AssignedBy) is { } assigner)
-			assigner.Send(Inbound.FromAgent(self, $"Task #{after.Id} \"{after.Title}\" is now {stateWord}{(reason != null ? $": {reason}" : "")}", SendMode.Queued));
+		NotifyAssigner(m, self, before, after);
 		if(newState == TaskState.Blocked && before.State != TaskState.Blocked && self.Info.Kind == AgentKind.Orchestrator)
 			m.MessageSera(self, $"Blocked on you: {after.Title}\n\n{reason}");
 		return new ToolOutput($"Task #{id} is {stateWord}{checkNote}.");
+	}
+
+	internal static void NotifyAssigner(AgentManager m, Agent self, TaskItem before, TaskItem after) {
+		if(before.State != after.State && after.State != TaskState.Open && after.AssignedBy != self.Info.Id && m.Get(after.AssignedBy) is { } assigner)
+			assigner.Send(Inbound.FromAgent(self, $"Task #{after.Id} \"{after.Title}\" is now {after.State.ToString().ToLowerInvariant()}{(after.Reason != null ? $": {after.Reason}" : "")}", SendMode.Queued));
 	}
 }
 

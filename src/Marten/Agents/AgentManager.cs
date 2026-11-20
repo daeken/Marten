@@ -27,7 +27,7 @@ public sealed record SeraMessage(string Id, DateTimeOffset At, string From, stri
 /// <summary>A message one agent sent another, logged so the UI can show every exchange.</summary>
 public sealed record AgentMessage(DateTimeOffset At, string FromId, string FromName, string ToId, string ToName, string? ProjectId, SendMode Mode, string Text, string? Reason);
 
-public sealed class AgentManager {
+public sealed partial class AgentManager {
 	public Home Home { get; }
 	public Config Config { get; private set; }
 	public IModelBackend Backend { get; }
@@ -154,6 +154,7 @@ public sealed class AgentManager {
 			agents[info.Id] = agent;
 		}
 		foreach(var agent in agents.Values) agent.Recover();
+		ReconcileTaskDependencies();
 		foreach(var agent in agents.Values) agent.Start();
 	}
 

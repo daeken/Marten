@@ -18,7 +18,9 @@ public sealed class MartenApi(Agent agent, AgentManager manager, CancellationTok
 	public string[] Tools => manager.Tools.For(agent).Select(t => t.Name).ToArray();
 	public string? ProjectId => agent.Info.ProjectId;
 	public string? ProjectMemoryPath => manager.ProjectOf(agent)?.MemoryPath;
-	public object[] Tasks() => agent.Tasks.Select(t => new { t.Id, t.Title, State = t.State.ToString(), t.Reason }).ToArray<object>();
+	public object[] Tasks() => TaskRows(agent);
+	public object[] Tasks(string who) => TaskRows(AgentTools.Resolve(manager, agent, who, projectOnly: true));
+	static object[] TaskRows(Agent owner) => owner.Tasks.Select(t => new { t.Id, t.Title, State = t.State.ToString(), t.Reason, t.WaitingOn }).ToArray<object>();
 
 	public object[] Agents() => manager.Agents.Select(a => {
 		var (status, statusDetail, retryAt) = a.CurrentStatus;

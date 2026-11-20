@@ -157,6 +157,7 @@ Besides messages, two things can wake an agent: an unfinished task and a schedul
 - An agent that goes idle with an open task is nudged awake. To stop on purpose, it marks the task waiting, blocked or done.
 - After three nudges in a row with no task changing state, nudging stops and the agent is flagged in the UI.
 - When a task turns done, waiting or blocked, the agent that assigned it is woken.
+- **Task dependencies.** `task_wait_for(id, agent, task_id)` puts the caller's task `id` on hold until task `task_id` on `agent`'s list is done. Choose yourself or another agent in your project by id or unambiguous name. Use `$Marten.Agents()` to find agent ids and `$Marten.Tasks('name-or-id')` to inspect that owner's task ids, states and `WaitingOn` references; `$Marten.Tasks()` still lists your own. A dependency uses ordinary waiting notifications, not a blocked alert. Completion reopens the dependent task rather than marking it done. An already-done prerequisite leaves the dependent task open immediately. Use plain `task_update` waiting with a reason for waits that aren't tied to a task.
 - **Completion contracts.** Whoever assigns a task may attach a check: a bash command run in the owner's working directory (timeout `checkTimeoutSeconds`, 900). Marking the task done runs it; unless it exits 0 the task stays as it was and the agent gets the output. The UI shows each check and its last result. Only the assigner sets the check.
 - An orchestrator with a blocked task tells Sera by sending her a message.
 

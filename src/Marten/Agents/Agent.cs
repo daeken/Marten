@@ -127,23 +127,48 @@ public sealed partial class Agent : IPowerShellOwner {
 		manager.Publish(new { type = "tasks", agentId = Info.Id });
 	}
 
-	public (TaskItem Before, TaskItem After) UpdateTask(int id, TaskState taskState, string? reason) {
+	public (TaskItem Before, TaskItem After) UpdateTask(int id, TaskState taskState, string? reason, TaskDependency? waitingOn = null) =>
+		manager.UpdateTask(this, id, taskState, reason, waitingOn);
+
+	// State transitions go through the manager's graph lock. RecordCheck and delivery may
+	// independently update other fields, so always copy the latest item under gate.
+	internal (TaskItem Before, TaskItem After) SetTaskState(int id, TaskState taskState, string? reason, TaskDependency? waitingOn, string? wake = null) {
 		TaskItem before, after;
 		lock(gate) {
 			tasks ??= JsonIO.Load(TasksPath, () => new List<TaskItem>());
 			var i = tasks.FindIndex(t => t.Id == id);
 			if(i < 0) throw new ToolException($"{Info.Name} has no task {id}.");
 			before = tasks[i];
-			after = tasks[i] = before with { State = taskState, Reason = reason, Updated = DateTimeOffset.UtcNow };
-			JsonIO.Save(TasksPath, tasks);
+			after = before with { State = taskState, Reason = reason, WaitingOn = waitingOn, Updated = DateTimeOffset.UtcNow,
+				PendingDependencyWakes = wake == null ? before.PendingDependencyWakes : [.. before.PendingDependencyWakes ?? [], wake] };
+			var updated = tasks.ToList();
+			updated[i] = after;
+			JsonIO.Save(TasksPath, updated);
+			tasks = updated;
+			if(wake != null) QueueDependencyWake(wake);
 			if(before.State != taskState) {
 				taskChanges++;
 				state = state with { NudgeStreak = 0, NudgesStopped = false };
 			}
 		}
 		SaveState();
-		manager.Publish(new { type = "tasks", agentId = Info.Id });
 		return (before, after);
+	}
+
+	const string DependencyWake = "task_dependency";
+
+	// Called under gate (or during single-threaded recovery). The regular queued-inbox
+	// lifecycle holds these for paused/closed agents without reopening them.
+	void QueueDependencyWake(string text) {
+		inbox.Add(new Inbound(NudgeSender, text, SendMode.Queued, DependencyWake));
+		signal.Release();
+	}
+
+	void AcknowledgeDependencyWakes() {
+		if(tasks == null) return;
+		var updated = tasks.Select(t => t.PendingDependencyWakes == null ? t : t with { PendingDependencyWakes = null }).ToList();
+		JsonIO.Save(TasksPath, updated);
+		tasks = updated;
 	}
 
 	// ---- Lifecycle ----
@@ -193,6 +218,8 @@ public sealed partial class Agent : IPowerShellOwner {
 
 	/// <summary>Repair the log after a restart and decide whether a turn was cut short.</summary>
 	public void Recover() {
+		foreach(var item in Tasks)
+			foreach(var text in item.PendingDependencyWakes ?? []) QueueDependencyWake(text);
 		AnswerDanglingCalls("Interrupted: Marten stopped while this was running. It was not re-run; check its effects before retrying.");
 		var entries = ContextEntries();
 		var lastWake = entries.LastOrDefault(e => e.Kind == EntryKind.Wake)?.Seq ?? 0;
@@ -318,7 +345,9 @@ public sealed partial class Agent : IPowerShellOwner {
 				ReloadChangedPrompt();
 				NoteMemoryChanges();
 				NoteToolChanges();
-				Deliver(Take(_ => true));
+				var messages = Take(_ => true);
+				Deliver(messages);
+				if(messages.Any(m => m.Reason == DependencyWake)) AcknowledgeDependencyWakes();
 			}
 			var changesAtStart = taskChanges;
 			while(true) {
