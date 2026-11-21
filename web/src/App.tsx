@@ -230,6 +230,20 @@ function Sidebar({ api, status, selected, onSelect, onChange }: {
   };
 
   const [showClosed, setShowClosed] = useState(false);
+  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() => {
+    try {
+      const stored: unknown = JSON.parse(localStorage.getItem('marten.collapsedProjects') ?? '[]');
+      return new Set(Array.isArray(stored) ? stored.filter(id => typeof id === 'string') : []);
+    } catch { return new Set(); }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('marten.collapsedProjects', JSON.stringify([...collapsedProjects])); } catch { /* storage unavailable */ }
+  }, [collapsedProjects]);
+  const toggleProject = (id: string) => setCollapsedProjects(previous => {
+    const next = new Set(previous);
+    if (!next.delete(id)) next.add(id);
+    return next;
+  });
   const newChat = async () => {
     const name = prompt('Name this chat', 'Chat');
     if (name === null) return;
@@ -242,27 +256,30 @@ function Sidebar({ api, status, selected, onSelect, onChange }: {
     <aside className="sidebar">
       <header className="brand">
         <span>Marten</span>
-        <button className={`link small ${status.paused ? 'on' : ''}`} title="Pause or resume every agent, nudge and schedule"
-          onClick={() => api.pauseAll(!status.paused).then(onChange)}>{status.paused ? '▶ Resume all' : '⏸ Pause all'}</button>
       </header>
       {status.paused && <div className="banner small">Everything is paused. Agents finish their current step and hold; nudges and schedules stop.</div>}
-      <section className="auth">
-        {status.auth.connected ? (
-          <>
-            <div className="muted small">ChatGPT · {status.auth.email ?? 'connected'}</div>
-            <button className="link" onClick={() => api.logout().then(onChange)}>Sign out</button>
-          </>
-        ) : (
-          <>
-            <button className="primary" onClick={connect}>
-              {status.auth.signingIn ? 'Waiting for sign-in… (click to restart)' : 'Connect ChatGPT'}
-            </button>
-            {status.auth.lastError && <div className="error small">{status.auth.lastError}</div>}
-          </>
-        )}
-        {status.backends.map(b => <BackendRow key={b.provider} api={api} backend={b} onChange={onChange} />)}
-      </section>
       <nav className="agents">
+        <details className="sidebar-settings">
+          <summary>Settings</summary>
+          <section className="auth">
+            <button className={`link small ${status.paused ? 'on' : ''}`} title="Pause or resume every agent, nudge and schedule"
+              onClick={() => api.pauseAll(!status.paused).then(onChange)}>{status.paused ? '▶ Resume all' : '⏸ Pause all'}</button>
+            {status.auth.connected ? (
+              <>
+                <div className="muted small">ChatGPT · {status.auth.email ?? 'connected'}</div>
+                <button className="link" onClick={() => api.logout().then(onChange)}>Sign out</button>
+              </>
+            ) : (
+              <>
+                <button className="primary" onClick={connect}>
+                  {status.auth.signingIn ? 'Waiting for sign-in… (click to restart)' : 'Connect ChatGPT'}
+                </button>
+                {status.auth.lastError && <div className="error small">{status.auth.lastError}</div>}
+              </>
+            )}
+            {status.backends.map(b => <BackendRow key={b.provider} api={api} backend={b} onChange={onChange} />)}
+          </section>
+        </details>
         <button className={`agent inbox ${selected === 'inbox' ? 'active' : ''}`} onClick={() => onSelect('inbox')}>
           <span className="name">Inbox</span>
           {status.openQuestions > 0
@@ -283,15 +300,24 @@ function Sidebar({ api, status, selected, onSelect, onChange }: {
           const members = status.agents.filter(a => a.projectId === p.id);
           const orch = members.filter(a => a.kind === 'orchestrator');
           const tasks = members.filter(a => a.kind === 'task');
+          const collapsed = collapsedProjects.has(p.id);
+          const containsSelection = members.some(a => a.id === selected);
           return (
             <div key={p.id} className="project">
               <div className="project-head">
-                <span className="project-name" title={p.bindings.join('\n')}>{p.name}{p.paused && <span className="tag">paused</span>}</span>
+                <button className={`project-toggle ${collapsed && containsSelection ? 'contains-selection' : ''}`} aria-expanded={!collapsed}
+                  aria-controls={`project-members-${p.id}`} title={p.bindings.join('\n')} onClick={() => toggleProject(p.id)}>
+                  <span aria-hidden="true">{collapsed ? '▸' : '▾'}</span>
+                  <span className="project-name">{p.name}</span>
+                  {p.paused && <span className="tag">paused</span>}
+                </button>
                 <button className="link small" title={p.paused ? 'Resume this project' : 'Pause every agent in this project'}
                   onClick={() => api.pauseProject(p.id, !p.paused).then(onChange)}>{p.paused ? 'Resume' : 'Pause'}</button>
                 <button className={`link small ${selected === `memory:${p.id}` ? 'on' : ''}`} onClick={() => onSelect(`memory:${p.id}`)}>Memory</button>
               </div>
-              {[...orch, ...tasks].map(a => <AgentRow key={a.id} agent={a} selected={selected} onSelect={onSelect} nested={a.kind === 'task'} />)}
+              <div className="project-members" id={`project-members-${p.id}`} hidden={collapsed}>
+                {!collapsed && [...orch, ...tasks].map(a => <AgentRow key={a.id} agent={a} selected={selected} onSelect={onSelect} nested={a.kind === 'task'} />)}
+              </div>
             </div>
           );
         })}

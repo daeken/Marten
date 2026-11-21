@@ -208,6 +208,7 @@ The UI is how Sera watches and steers the system, so it has to show everything t
 - An abandoned runspace, and an agent whose nudges have stopped.
 - Background processes, and which agent owns each.
 - Each project's memory, with its history and who changed each line.
+- A sidebar with individually collapsible project rosters; collapsing does not change the open conversation. The browser remembers the collapsed projects. Provider sign-in and global pause controls are under a normally closed Settings disclosure.
 
 **Lets Sera**
 
