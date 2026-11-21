@@ -53,6 +53,9 @@ code, pre { font: 12.5px/1.45 ui-monospace, "SF Mono", Menlo, monospace; }
 .brand { font-weight: 650; letter-spacing: .02em; padding: 16px 16px 8px; }
 .auth { display: flex; flex-direction: column; gap: 6px; padding: 8px 16px 14px; border-bottom: 1px solid var(--border); }
 .auth .link { align-self: flex-start; font-size: 12px; }
+.sidebar-settings { border-bottom: 1px solid var(--border); margin-bottom: 6px; }
+.sidebar-settings summary { cursor: pointer; color: var(--muted); padding: 5px 8px; }
+.sidebar-settings .auth { border-bottom: none; padding: 4px 8px 10px; }
 .backend .row { display: flex; align-items: center; gap: 8px; }
 .backend .row > span:first-child { flex: 1; }
 .backend .spend { font-variant-numeric: tabular-nums; }
@@ -207,8 +210,11 @@ code, pre { font: 12.5px/1.45 ui-monospace, "SF Mono", Menlo, monospace; }
 .sidebar > .banner { margin: 0 12px 8px; }
 .head-actions { display: flex; justify-content: flex-end; }
 button.small { padding: 2px 8px; font-size: 12px; }
-.project-head .project-name { flex: 1; }
 .project-head { gap: 8px; }
+.project-toggle { display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0; padding: 2px 0; border: none; background: none; text-align: left; }
+.project-toggle:hover .project-name, .project-toggle.contains-selection .project-name { color: var(--accent); }
+.project-toggle .tag { margin-left: 0; }
+.project-members:not([hidden]) { display: flex; flex-direction: column; gap: 2px; }
 .schedule .link { margin-left: 4px; padding: 0 2px; }
 .proc.running .task-state { color: var(--ok); }
 .proc.exited .task-state { color: var(--bad); }
