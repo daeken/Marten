@@ -29,8 +29,17 @@ public static partial class ProcessTable {
 		return result;
 	}
 
+	/// <summary>This process and every ancestor, which no cleanup should ever kill.</summary>
+	public static HashSet<int> SelfAndAncestors(Dictionary<int, int> map) {
+		var result = new HashSet<int>();
+		for(var pid = Self; pid > 1 && result.Add(pid) && map.TryGetValue(pid, out var parent);) pid = parent;
+		return result;
+	}
+
 	public static void KillTree(int root) {
-		foreach(var pid in Tree(root, ParentMap()))
+		var map = ParentMap();
+		var keep = SelfAndAncestors(map);
+		foreach(var pid in Tree(root, map).Where(p => !keep.Contains(p)))
 			try { Process.GetProcessById(pid).Kill(); } catch { }
 	}
 

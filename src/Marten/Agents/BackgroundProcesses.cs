@@ -23,6 +23,12 @@ public static partial class Posix {
 	[LibraryImport("libc", EntryPoint = "kill", SetLastError = true)]
 	private static partial int Kill(int pid, int sig);
 
+	[LibraryImport("libc", EntryPoint = "getpgid", SetLastError = true)]
+	private static partial int GetPgidNative(int pid);
+
+	/// <summary>The process group of <paramref name="pid"/>, or -1 if it can't be read.</summary>
+	public static int GetPgid(int pid) => pid > 0 ? GetPgidNative(pid) : -1;
+
 	const int SIGKILL = 9, SIGTERM = 15, EPERM = 1;
 
 	public static bool Alive(int pid) => pid > 0 && (Kill(pid, 0) == 0 || Marshal.GetLastPInvokeError() == EPERM);
@@ -58,13 +64,30 @@ public sealed class ProcessLauncher {
 	}
 
 	/// <summary>SIGTERM the group, wait out the grace period, then SIGKILL whatever is left.</summary>
-	public static async Task StopAsync(int pid, TimeSpan grace) {
-		var tree = ProcessTable.Tree(pid, ProcessTable.ParentMap());
-		Posix.Terminate(pid, group: true);
+	/// <remarks>
+	/// Never signals Marten itself or its ancestors. A job's group can outlive the job: a deploy script that
+	/// relaunches Marten in the background leaves the new Marten in the old job's process group, so a plain
+	/// group kill of that long-finished job would take Marten down. When Marten shares the group, the
+	/// other members are signalled one by one instead.
+	/// </remarks>
+	public static Task StopAsync(int pid, TimeSpan grace) => StopAsync(pid, grace, extraProtected: null);
+
+	internal static async Task StopAsync(int pid, TimeSpan grace, IEnumerable<int>? extraProtected) {
+		var map = ProcessTable.ParentMap();
+		var protectedPids = ProcessTable.SelfAndAncestors(map);
+		if(extraProtected != null) protectedPids.UnionWith(extraProtected);
+		var groupIsSafe = !protectedPids.Any(p => Posix.GetPgid(p) == pid);
+		List<int> Targets() {
+			var targets = ProcessTable.Tree(pid, map).Where(p => !protectedPids.Contains(p)).ToHashSet();
+			if(!groupIsSafe) targets.UnionWith(map.Keys.Where(p => !protectedPids.Contains(p) && Posix.GetPgid(p) == pid));
+			return targets.ToList();
+		}
+		var tree = Targets();
+		if(groupIsSafe) Posix.Terminate(pid, group: true);
 		foreach(var p in tree) Posix.Terminate(p, group: false);
 		var deadline = DateTime.UtcNow + grace;
 		while(DateTime.UtcNow < deadline && tree.Any(Posix.Alive)) await Task.Delay(100);
-		Posix.ForceKill(pid, group: true);
+		if(groupIsSafe) Posix.ForceKill(pid, group: true);
 		foreach(var p in tree.Where(Posix.Alive)) Posix.ForceKill(p, group: false);
 	}
 }
