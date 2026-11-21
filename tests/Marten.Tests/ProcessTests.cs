@@ -64,6 +64,30 @@ public class BackgroundProcessTests {
 	}
 
 	[Fact]
+	public async Task StoppingAFinishedJobSparesAProtectedProcessLeftInItsGroup() {
+		// A deploy job relaunches Marten in the background and exits; the new Marten stays in the job's
+		// process group. Stopping that finished job later must not signal the group and kill Marten.
+		using var dir = new TempDir();
+		var pidFile = dir.File("survivor.pid");
+		var pid = new ProcessLauncher().Start($"sleep 301 & echo $! > '{pidFile}'; sleep 302", dir.Path, dir.File("job.log"));
+		await Wait.Until(() => File.Exists(pidFile) && File.ReadAllText(pidFile).Trim().Length > 0);
+		var survivor = int.Parse(File.ReadAllText(pidFile).Trim());
+		try {
+			Assert.Equal(pid, Posix.GetPgid(survivor));
+			var others = ProcessTable.Tree(pid, ProcessTable.ParentMap()).Where(p => p != survivor).ToList();
+			Assert.NotEmpty(others);
+
+			await ProcessLauncher.StopAsync(pid, TimeSpan.FromSeconds(1), extraProtected: [survivor]);
+
+			await Wait.Until(() => !others.Any(Posix.Alive));
+			Assert.True(Posix.Alive(survivor));
+		} finally {
+			Posix.ForceKill(survivor, group: false);
+			await ProcessLauncher.StopAsync(pid, TimeSpan.FromSeconds(1));
+		}
+	}
+
+	[Fact]
 	public async Task AMissingWorkingDirectoryIsAToolError() {
 		using var dir = new TempDir();
 		var agent = Manager(dir).CreateChat("t", dir.Path);
