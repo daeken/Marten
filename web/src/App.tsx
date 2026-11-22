@@ -574,7 +574,7 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
         </div>
       )}
       {schedules.length > 0 && (
-        <div className="tasks schedules">
+        <div className="tasks schedules task-list" role="region" aria-label="Scheduled tasks" tabIndex={0}>
           {schedules.map(s => (
             <span key={s.id} className="task schedule" title={`${s.command}${s.lastResult ? `\n\nLast run: ${s.lastResult}` : ''}`}>
               <span className="task-state">{s.everySeconds ? `every ${formatEvery(s.everySeconds)}` : 'once'}</span> #{s.id} {s.description ?? s.command.split('\n')[0].slice(0, 60)}
