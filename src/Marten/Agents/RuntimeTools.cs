@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using Marten.Projects;
 using Marten.Tools;
@@ -66,7 +67,8 @@ public sealed class SendMessageTool(Func<AgentManager> manager) : ITool {
 		"Send a message to another agent, to Sera with to \"sera\" (orchestrators only), or to an agent outside Marten with to \"client:NAME\" (answer outside agents this way). Immediate lands at the recipient's " +
 		"next tool boundary, as steering; queued waits until it is idle, and wakes it if it already is. " +
 		"Chat agents may message orchestrators; orchestrators their own task agents (either mode), other orchestrators and " +
-		"chat agents (queued); task agents anyone in their own project (queued).";
+		"chat agents (queued); task agents anyone in their own project (queued). If an internal exchange needs a loop check, " +
+		"the send is withheld and must not be retried until respond_message_loop grants continuation.";
 	public JsonObject Parameters => Schema.Object(
 		("to", Schema.Str("Agent id or name, or \"sera\".")),
 		("text", Schema.Str("The message.")),
@@ -93,18 +95,50 @@ public sealed class SendMessageTool(Func<AgentManager> manager) : ITool {
 		}
 		var target = AgentTools.Resolve(m, from, to);
 		if(MessagingRules.Check(from, target, mode) is { } why) throw new ToolException(why);
-		if(m.Loops.Record(from.Info.Id, target.Info.Id, DateTimeOffset.UtcNow) is { } count) {
-			from.SetPaused(true);
-			target.SetPaused(true);
-			var minutes = m.Config.LoopWindowMinutes;
-			m.MessageSera(from, $"Loop breaker: {from.Info.Name} and {target.Info.Name} exchanged {count} messages within {minutes:0.#} minutes without you, " +
-				"so both are paused. Their messages are under Messages; resume either agent when you've looked.");
-			throw new ToolException($"Not sent. You and {target.Info.Name} have exchanged {count} messages within {minutes:0.#} minutes, which looks like a loop, " +
-				"so you're both paused and Sera has been told. Wait for her.");
-		}
+		if(m.Loops.Admit(from.Info.Id, target.Info.Id) is { } hold)
+			return Task.FromResult(RespondMessageLoopTool.Output(hold, target.Info.Id));
 		var wasClosed = target.Info.Closed;
 		target.Send(Inbound.FromAgent(from, text, mode));
 		return Task.FromResult(new ToolOutput($"{(mode == SendMode.Immediate ? "Delivered" : "Queued")} to {AgentManager.Label(target)}{(wasClosed ? ", which was closed and is now awake" : "")}."));
+	}
+}
+
+public sealed class RespondMessageLoopTool(Func<AgentManager> manager) : ITool {
+	internal const string ToolName = "respond_message_loop";
+	public string Name => ToolName;
+	public string Description => "Answer a send_message loop check addressed to you. Continue only if another exchange is necessary for a concrete goal; otherwise chill. Neither choice sends anything.";
+	public JsonObject Parameters => Schema.Object(
+		("peer_id", Schema.Str("Peer agent ID from the loop check.")),
+		("challenge_id", Schema.Str("Challenge ID from the loop check.")),
+		("decision", Schema.Enum("Continue the exchange or stop it.", "continue", "chill")),
+		("reason", Schema.Str("Concrete reason continued exchange is necessary, or null for chill.", nullable: true)));
+	public bool AvailableTo(IToolContext ctx) => ctx is Agent;
+
+	public Task<ToolOutput> InvokeAsync(IToolContext ctx, JsonObject args, CancellationToken ct) {
+		var self = AgentTools.Self(ctx);
+		var peer = args.ReqString("peer_id");
+		if(!Guid.TryParse(args.ReqString("challenge_id"), out var id)) throw new ToolException("Use the challenge_id from your loop check.");
+		var decision = args.ReqString("decision");
+		if(decision is not ("continue" or "chill")) throw new ToolException("Choose continue or chill.");
+		if(decision == "continue" && string.IsNullOrWhiteSpace(args.OptString("reason")))
+			throw new ToolException("Give a concrete reason why continued exchange is necessary, or choose chill.");
+		return Task.FromResult(Output(manager().Loops.Respond(self.Info.Id, peer, id, decision == "continue"), peer));
+	}
+
+	internal static ToolOutput Output(LoopBreaker.Result result, string peer) {
+		var (status, challengeId, until, budget) = result;
+		var (code, instruction) = status switch {
+			LoopBreaker.Status.Challenge => ("loop_check", $"Not sent. Is continued exchange necessary? Call {ToolName} using peer_id and challenge_id below, with decision continue and a concrete reason, or chill with reason null. Do not retry the send until continuation is granted."),
+			LoopBreaker.Status.Pending when challengeId != null => ("loop_pending", $"Not sent. Your loop check is still pending; answer it with {ToolName} using peer_id and challenge_id below instead of retrying the send."),
+			LoopBreaker.Status.Pending => ("loop_pending", "Not sent. Your peer must answer a pending loop check. Do other work or go idle; do not retry now."),
+			LoopBreaker.Status.Chill or LoopBreaker.Status.Cooling => ("chill", "Chill / stop this exchange; do other work or go idle. Nothing was sent or saved for replay. Do not retry during cooldown."),
+			LoopBreaker.Status.Continued => ("continued", "Continuation granted for a limited number of messages shared by this pair. Nothing was sent automatically; manually retry the withheld send if still needed."),
+			_ => ("loop_check_unavailable", "No matching pending loop check addressed to you. Nothing was sent and no continuation was granted."),
+		};
+		return new ToolOutput(JsonSerializer.Serialize(new {
+			status = code, peer_id = peer, challenge_id = challengeId, until, message_budget = budget,
+			response_tool = challengeId != null ? ToolName : null, instruction,
+		}), IsError: status is not (LoopBreaker.Status.Chill or LoopBreaker.Status.Continued));
 	}
 }
 

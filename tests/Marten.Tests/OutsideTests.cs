@@ -7,12 +7,12 @@ using Microsoft.AspNetCore.Http;
 namespace Marten.Tests;
 
 public class OutsideTests {
-	static (AgentManager M, Agent Orch) Setup(TempDir dir) {
+	static (AgentManager M, Agent Orch) Setup(TempDir dir, Config? config = null) {
 		Directory.CreateDirectory(dir.File("repo"));
 		AgentManager? m = null;
 		Func<AgentManager> get = () => m!;
 		var tools = new ToolRegistry().Add(new SendMessageTool(get));
-		m = new AgentManager(new Home(dir.File("home")), new Config(), new RoutedBackend(), tools);
+		m = new AgentManager(new Home(dir.File("home")), config ?? new Config(), new RoutedBackend(), tools);
 		var (_, orch) = m.CreateProject("Open Thedas", [dir.File("repo")], null, false);
 		return (m, orch);
 	}
@@ -60,6 +60,26 @@ public class OutsideTests {
 
 		var unknown = await m.Tools.InvokeAsync(orch, "send_message", JsonSerializer.Serialize(new { to = "client:nope", text = "hi", mode = "queued" }), CancellationToken.None);
 		Assert.True(unknown.IsError);
+	}
+
+	[Theory]
+	[InlineData(true)]
+	[InlineData(false)]
+	public void OutsideLoopsStillPauseTheMartenAgentAndNotifySera(bool outsideTriggers) {
+		using var dir = new TempDir();
+		var (m, orch) = Setup(dir, new Config { LoopMessages = 2 });
+		m.Outside.Register("cc");
+		void Inbound() => m.Outside.Deliver("cc", orch.Info.Id, "ping", SendMode.Queued);
+		void Outbound() => m.Outside.Write(orch, "cc", "pong");
+		Action first = outsideTriggers ? Outbound : Inbound;
+		Action second = outsideTriggers ? Inbound : Outbound;
+		first();
+		Assert.False(orch.IsPaused);
+		var error = Assert.Throws<ToolException>(second);
+		Assert.Contains("paused and Sera has been told", error.Message);
+		Assert.True(orch.IsPaused);
+		Assert.Contains(m.SeraInbox(), s => s.Text.Contains("Loop breaker"));
+		Assert.Single(m.AgentMessages());
 	}
 
 	[Theory]

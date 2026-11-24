@@ -31,6 +31,8 @@ Model API calls allow up to 30 seconds to connect and 120 seconds to receive res
 
 Agents outside Marten (e.g. Claude Code sessions) can create projects and message agents with a client token: see [docs/outside-agents.md](docs/outside-agents.md) and `scripts/marten-ext`.
 
+When internal agent messages look like a loop, `send_message` withholds the next send and asks the sender whether another exchange is necessary. Neither agent is paused. Only the challenged sender can answer with `respond_message_loop`: `continue` with a concrete reason allows a limited number of new sends and a manual retry, while `chill` tells the sender to stop and blocks sends in both directions for a minute. An unanswered check also goes into cooldown after one minute. Nothing withheld is replayed, other pairs can keep working, and a message from Sera to either agent clears the restriction. Outside-client exchanges still use the pause-and-notify-Sera breaker.
+
 The agent header and status APIs (`/api/status`, `/api/ext/status`, and `$Marten.Agents()`) show the start and end of the latest model attempt, including compaction. If a turn fails outright (for example, its model is unavailable or retries run out), Marten wakes the parent and agent assigners of unfinished tasks with a queued error message. It does not change task states.
 
 ## Resource limits

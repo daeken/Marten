@@ -114,12 +114,13 @@ public class TurnLifecycleTests {
 	}
 
 	[Fact]
-	public async Task LoopBreakerCanSelfPauseDuringAnAdmittedSendWithoutDeadlock() {
+	public async Task LoopCheckDoesNotPauseAgentsOrParkTheRemainingToolBatch() {
 		using var dir = new TempDir();
 		var tool = new HeldTool();
 		var backend = new FakeBackend { Gate = Signal() };
 		var (m, _, parent, agent) = Create(dir, backend, tool, new Config { Model = "fake-1", LoopMessages = 4 });
 		m.Tools.Add(new SendMessageTool(() => m));
+		m.Tools.Add(new RespondMessageLoopTool(() => m));
 		var send = System.Text.Json.JsonSerializer.Serialize(new { to = parent.Info.Id, text = "trip the loop breaker" });
 		backend.Script.Enqueue(_ => new([.. FakeBackend.Call("message", "send_message", send).Items, .. Batch.Items], null));
 		backend.Script.Enqueue(_ => FakeBackend.Say("finished"));
@@ -127,18 +128,18 @@ public class TurnLifecycleTests {
 		await Wait.Until(() => backend.Requests.Count == 1);
 		for(var i = 0; i < 3; i++) {
 			var (from, to) = i % 2 == 0 ? (parent, agent) : (agent, parent);
-			Assert.Null(m.Loops.Record(from.Info.Id, to.Info.Id, DateTimeOffset.UtcNow));
+			Assert.Null(m.Loops.Admit(from.Info.Id, to.Info.Id));
 		}
-		backend.Gate.SetResult();
-		await Wait.Until(() => agent.Status == AgentStatus.Paused);
-		var result = Assert.Single(agent.Transcript.Entries, e => e.Kind == EntryKind.ToolResult);
-		Assert.Contains("loop", result.Text);
-		Assert.True(parent.IsPaused);
-		Assert.Equal(0, tool.Calls);
 		tool.Release.SetResult();
-		agent.SetPaused(false);
+		backend.Gate.SetResult();
 		await Wait.Until(() => Idle(agent));
+		var result = Assert.Single(agent.Transcript.Entries, e => e.Kind == EntryKind.ToolResult && e.CallId == "message");
+		Assert.Contains("loop_check", result.Text);
+		Assert.False(parent.IsPaused || agent.IsPaused);
 		Assert.Equal(2, tool.Calls);
+		Assert.Empty(m.AgentMessages());
+		Assert.DoesNotContain(parent.Transcript.Entries, e => e.Kind == EntryKind.Wake);
+		Assert.All(backend.Requests, request => Assert.Contains(request.Tools, spec => spec.Name == "respond_message_loop"));
 	}
 
 	[Fact]

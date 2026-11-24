@@ -114,7 +114,7 @@ public sealed class Outside(AgentManager manager) {
 		if(Get(client) == null) throw new ToolException($"No client {client}.");
 		if(string.IsNullOrWhiteSpace(text)) throw new ToolException("The message is empty.");
 		var target = Resolve(to);
-		if(manager.Loops.Record(Prefix + client, target.Info.Id, DateTimeOffset.UtcNow) is { } count) {
+		if(manager.Loops.RecordOutside(Prefix + client, target.Info.Id, DateTimeOffset.UtcNow) is { } count) {
 			target.SetPaused(true);
 			manager.MessageSera(target, $"Loop breaker: {Label(client)} and {target.Info.Name} exchanged {count} messages within " +
 				$"{manager.Config.LoopWindowMinutes:0.#} minutes without you, so {target.Info.Name} is paused. Resume it when you've looked.");
@@ -133,7 +133,7 @@ public sealed class Outside(AgentManager manager) {
 	/// <summary>Queue an agent's message for a client to read through the API.</summary>
 	public MailMessage Write(Agent from, string client, string text) {
 		if(Get(client) == null) throw new ToolException($"No outside client {client}. Known: {string.Join(", ", Clients.Select(c => c.Name)) switch { "" => "none", var s => s }}.");
-		if(manager.Loops.Record(from.Info.Id, Prefix + client, DateTimeOffset.UtcNow) is { } count) {
+		if(manager.Loops.RecordOutside(from.Info.Id, Prefix + client, DateTimeOffset.UtcNow) is { } count) {
 			from.SetPaused(true);
 			manager.MessageSera(from, $"Loop breaker: {from.Info.Name} and {Label(client)} exchanged {count} messages within " +
 				$"{manager.Config.LoopWindowMinutes:0.#} minutes without you, so {from.Info.Name} is paused. Resume it when you've looked.");
