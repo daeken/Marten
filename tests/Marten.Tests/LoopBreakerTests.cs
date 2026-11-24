@@ -96,6 +96,9 @@ public class LoopBreakerTests {
 		Assert.Equal(isError, output.IsError);
 		using var doc = JsonDocument.Parse(output.Text);
 		Assert.Equal(status, doc.RootElement.GetProperty("status").GetString());
+		Assert.False(doc.RootElement.GetProperty("message_delivered").GetBoolean());
+		Assert.False(doc.RootElement.GetProperty("message_queued").GetBoolean());
+		Assert.Contains("No message was delivered or queued", doc.RootElement.GetProperty("instruction").GetString());
 		return doc.RootElement.Clone();
 	}
 
@@ -114,6 +117,7 @@ public class LoopBreakerTests {
 		Assert.Equal(id, Check(await Send(m, b, a), "loop_pending", isError: true).GetProperty("challenge_id").GetString());
 		var grant = Check(await Decide(m, b, a, id, "continue", "Need the exact failing test path to investigate", delegated: true), "continued");
 		Assert.Equal(4, grant.GetProperty("message_budget").GetInt32());
+		Assert.Equal("retry_manually_if_needed", grant.GetProperty("next_action").GetString());
 		Assert.Equal(3, m.AgentMessages().Count); // No replay or held attempt counted as delivered.
 		Assert.False((await Send(m, b, a, "need the test path", delegated: true)).IsError);
 		for(var i = 0; i < 3; i++) Assert.False((await Send(m, a, b)).IsError);
@@ -149,13 +153,31 @@ public class LoopBreakerTests {
 		await Prime(m, a, b);
 		var hold = Check(await Send(m, b, a), "loop_check", isError: true);
 		var id = hold.GetProperty("challenge_id").GetString()!;
-		var pending = Check(await Send(m, a, b), "loop_pending", isError: true);
-		Assert.Equal(JsonValueKind.Null, pending.GetProperty("challenge_id").ValueKind);
+		for(var i = 0; i < 3; i++) {
+			var owner = Check(await Send(m, b, a), "loop_pending", isError: true);
+			Assert.Equal("respond_to_loop_check", owner.GetProperty("next_action").GetString());
+			Assert.Equal(id, owner.GetProperty("challenge_id").GetString());
+			Assert.Equal(hold.GetProperty("until").GetString(), owner.GetProperty("until").GetString());
+			var peer = Check(await Send(m, a, b), "loop_pending", isError: true);
+			Assert.Equal(JsonValueKind.Null, peer.GetProperty("challenge_id").ValueKind);
+			Assert.Equal(JsonValueKind.Null, peer.GetProperty("response_tool").ValueKind);
+			Assert.Equal("do_other_work_or_go_idle", peer.GetProperty("next_action").GetString());
+		}
+		Assert.Equal(3, m.AgentMessages().Count);
+		Assert.Empty(m.SeraInbox());
 		Assert.False((await Send(m, b, c)).IsError);
 		var chill = Check(await Decide(m, b, a, id, "chill"), "chill");
 		Assert.Contains("do other work or go idle", chill.GetProperty("instruction").GetString());
-		Check(await Send(m, b, a), "chill", isError: true);
-		Check(await Send(m, a, b), "chill", isError: true);
+		Assert.Equal("do_other_work_or_go_idle", chill.GetProperty("next_action").GetString());
+		for(var i = 0; i < 3; i++) {
+			foreach(var (from, to) in new[] { (b, a), (a, b) }) {
+				var cooling = Check(await Send(m, from, to), "chill", isError: true);
+				Assert.Equal(chill.GetProperty("until").GetString(), cooling.GetProperty("until").GetString());
+				Assert.Equal("do_other_work_or_go_idle", cooling.GetProperty("next_action").GetString());
+			}
+		}
+		Assert.Equal(4, m.AgentMessages().Count);
+		Assert.Empty(m.SeraInbox());
 		Assert.False((await Send(m, c, b)).IsError);
 		Assert.Equal(5, m.AgentMessages().Count);
 		Assert.False(a.IsPaused || b.IsPaused || c.IsPaused);

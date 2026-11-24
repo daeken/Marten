@@ -127,17 +127,19 @@ public sealed class RespondMessageLoopTool(Func<AgentManager> manager) : ITool {
 
 	internal static ToolOutput Output(LoopBreaker.Result result, string peer) {
 		var (status, challengeId, until, budget) = result;
-		var (code, instruction) = status switch {
-			LoopBreaker.Status.Challenge => ("loop_check", $"Not sent. Is continued exchange necessary? Call {ToolName} using peer_id and challenge_id below, with decision continue and a concrete reason, or chill with reason null. Do not retry the send until continuation is granted."),
-			LoopBreaker.Status.Pending when challengeId != null => ("loop_pending", $"Not sent. Your loop check is still pending; answer it with {ToolName} using peer_id and challenge_id below instead of retrying the send."),
-			LoopBreaker.Status.Pending => ("loop_pending", "Not sent. Your peer must answer a pending loop check. Do other work or go idle; do not retry now."),
-			LoopBreaker.Status.Chill or LoopBreaker.Status.Cooling => ("chill", "Chill / stop this exchange; do other work or go idle. Nothing was sent or saved for replay. Do not retry during cooldown."),
-			LoopBreaker.Status.Continued => ("continued", "Continuation granted for a limited number of messages shared by this pair. Nothing was sent automatically; manually retry the withheld send if still needed."),
-			_ => ("loop_check_unavailable", "No matching pending loop check addressed to you. Nothing was sent and no continuation was granted."),
+		var (code, nextAction, instruction) = status switch {
+			LoopBreaker.Status.Challenge => ("loop_check", "respond_to_loop_check", $"Is continued exchange necessary? Before the deadline (until), call {ToolName} with the peer_id and challenge_id below. Choose continue with a concrete reason, or chill with reason null. Do not retry unless continuation is granted."),
+			LoopBreaker.Status.Pending when challengeId != null => ("loop_pending", "respond_to_loop_check", $"Your loop check is still pending. Do not retry the send. Before the deadline (until), call {ToolName} with the peer_id and challenge_id below, choosing continue with a concrete reason or chill with reason null."),
+			LoopBreaker.Status.Pending => ("loop_pending", "do_other_work_or_go_idle", "Only the peer who received the loop check can answer it. Do not retry while the decision is pending. Do other work or go idle."),
+			LoopBreaker.Status.Chill or LoopBreaker.Status.Cooling => ("chill", "do_other_work_or_go_idle", "Chill / stop this exchange; do other work or go idle. Do not send to this peer during the cooldown (until). After it ends, send only if still needed."),
+			LoopBreaker.Status.Continued => ("continued", "retry_manually_if_needed", "Continuation granted for a limited number of messages shared by this pair. Manually retry the withheld send if still needed."),
+			_ => ("loop_check_unavailable", "do_not_retry_this_response", "No matching pending loop check addressed to you. No continuation was granted. Do not retry this response."),
 		};
 		return new ToolOutput(JsonSerializer.Serialize(new {
-			status = code, peer_id = peer, challenge_id = challengeId, until, message_budget = budget,
-			response_tool = challengeId != null ? ToolName : null, instruction,
+			status = code, message_delivered = false, message_queued = false, next_action = nextAction,
+			peer_id = peer, challenge_id = challengeId, until, message_budget = budget,
+			response_tool = challengeId != null ? ToolName : null,
+			instruction = $"No message was delivered or queued by this call. {instruction}",
 		}), IsError: status is not (LoopBreaker.Status.Chill or LoopBreaker.Status.Continued));
 	}
 }
