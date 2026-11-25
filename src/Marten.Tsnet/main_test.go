@@ -125,9 +125,6 @@ func TestProxyKeepsRequestAuthAndDropsSpoofedIdentity(t *testing.T) {
 		host, path string
 		status     int
 	}{
-		{testHost, "/", 404},
-		{testHost, "/sw.js", 404},
-		{testHost, "/assets/index.js", 404},
 		{"localhost:7450", "/api/status", 403},
 		{testHost + ":443", "/api/status", 403},
 		{testHost, "/api/agents/123/notebook.ipynb?keep=1", 200},

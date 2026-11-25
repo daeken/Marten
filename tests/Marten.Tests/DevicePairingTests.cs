@@ -57,7 +57,7 @@ public class DevicePairingTests {
 		app.Use(sec.Middleware);
 		app.UseWebSockets();
 		var api = app.MapGroup("/api");
-		api.MapPairing(pairing, origin);
+		api.MapPairing(pairing, sec);
 		api.MapGet("/status", () => Results.Ok()).AllowPaired();
 		api.MapPost("/clients", () => Results.Ok()).AllowPaired();
 		api.MapPut("/backends/{provider}/key", () => Results.Ok()).AllowPaired();
@@ -98,10 +98,11 @@ public class DevicePairingTests {
 		using var created = await Send(HttpMethod.Post, create, local, sec.Token, browserOrigin: "http://" + local);
 		Assert.Equal(HttpStatusCode.OK, created.StatusCode);
 		Assert.True(created.Headers.CacheControl?.NoStore);
-		var qr = (await created.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("uri").GetString()!;
-		const string prefix = "marten://pair?v=1&server=https%3A%2F%2Fmarten.example&code=";
-		Assert.StartsWith(prefix, qr);
-		var code = qr[prefix.Length..];
+		using var qr = JsonDocument.Parse((await created.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("payload").GetString()!);
+		Assert.Equal(2, qr.RootElement.GetProperty("v").GetInt32());
+		Assert.Equal("https://marten.example", qr.RootElement.GetProperty("server").GetString());
+		Assert.False(qr.RootElement.TryGetProperty("tsAuthKey", out _));
+		var code = qr.RootElement.GetProperty("code").GetString()!;
 		Assert.Equal(43, code.Length);
 		var body = new { code, deviceName = "Phone" };
 		await Expect(HttpStatusCode.Forbidden, HttpMethod.Post, redeem, remote, "outside", body);
@@ -131,8 +132,8 @@ public class DevicePairingTests {
 		await Expect(HttpStatusCode.OK, HttpMethod.Get, list, remote, token);
 		using var nextInvitation = await Send(HttpMethod.Post, "/api/PAIR/create/", remote, token);
 		Assert.Equal(HttpStatusCode.OK, nextInvitation.StatusCode);
-		var nextUri = (await nextInvitation.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("uri").GetString()!;
-		using var nextRedeemed = await Send(HttpMethod.Post, redeem, remote, body: new { code = nextUri[prefix.Length..], deviceName = "Tablet" });
+		using var nextQr = JsonDocument.Parse((await nextInvitation.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("payload").GetString()!);
+		using var nextRedeemed = await Send(HttpMethod.Post, redeem, remote, body: new { code = nextQr.RootElement.GetProperty("code").GetString(), deviceName = "Tablet" });
 		Assert.Equal(HttpStatusCode.OK, nextRedeemed.StatusCode);
 		var otherToken = (await nextRedeemed.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("token").GetString()!;
 		Assert.NotEqual(token, otherToken);

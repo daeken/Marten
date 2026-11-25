@@ -5,25 +5,18 @@ using Marten.Storage;
 
 namespace Marten.Web;
 
-/// <summary>Explicit opt-in for native tailnet routing. Security still authenticates and authorizes the request.</summary>
-public sealed class TailnetApi;
+public sealed class TailnetTransport(Config config) {
+	public string? Host { get; } = config.Tailnet?.CanonicalHost();
+	volatile bool ready;
+	public bool IsReady => ready;
 
-public static class TailnetTransport {
-	public static RequestDelegate RequireNativeEndpoint(string host, RequestDelegate next) => ctx => {
-		if(ctx.Request.Host.Value == host && ctx.GetEndpoint()?.Metadata.GetMetadata<TailnetApi>() == null) {
-			ctx.Response.StatusCode = StatusCodes.Status404NotFound;
-			return Task.CompletedTask;
-		}
-		return next(ctx);
-	};
-
-	public static async Task RunAsync(Home home, Config config, Action<string> log, CancellationToken stopping) {
+	public async Task RunAsync(Home home, Action<string> log, CancellationToken stopping) {
 		if(config.Tailnet == null || stopping.IsCancellationRequested) return;
 		if(!OperatingSystem.IsMacOS() && !OperatingSystem.IsLinux()) {
 			log("Tailnet transport requires macOS or Linux.");
 			return;
 		}
-		if(config.Tailnet.CanonicalHost() is not { } host) {
+		if(Host is not { } host) {
 			log("Tailnet transport requires an exact lowercase device.tailnet.ts.net host.");
 			return;
 		}
@@ -46,8 +39,10 @@ public static class TailnetTransport {
 			try {
 				await process.WaitForExitAsync(stopping);
 				await Task.WhenAll(output, errors);
+				ready = false;
 				if(!stopping.IsCancellationRequested) log($"Tailnet transport stopped: {Failure(process.ExitCode)} Local Marten is still available.");
 			} catch(OperationCanceledException) when(stopping.IsCancellationRequested) {
+				ready = false;
 				// EOF is the helper's lifetime lease; it also fires if Marten crashes.
 				process.StandardInput.Close();
 				using var grace = new CancellationTokenSource(TimeSpan.FromSeconds(3));
@@ -63,13 +58,17 @@ public static class TailnetTransport {
 		} catch(Exception e) when(e is Win32Exception or IOException or UnauthorizedAccessException or InvalidOperationException) {
 			log("Tailnet helper could not run. Check the executable at MARTEN_HOME/bin/marten-tsnet and its permissions.");
 		}
+		finally { ready = false; }
 	}
 
-	static async Task DrainOutputAsync(Stream stream, string host, Action<string> log, CancellationToken stopping) {
+	async Task DrainOutputAsync(Stream stream, string host, Action<string> log, CancellationToken stopping) {
 		// Protocol is one fixed-size marker, never echo text from the child.
-		var ready = new byte[6];
-		if(await stream.ReadAtLeastAsync(ready, ready.Length, false, stopping) == ready.Length
-			&& ready.AsSpan().SequenceEqual("READY\n"u8)) log($"Native tailnet transport ready: https://{host}");
+		var marker = new byte[6];
+		if(await stream.ReadAtLeastAsync(marker, marker.Length, false, stopping) == marker.Length
+			&& marker.AsSpan().SequenceEqual("READY\n"u8) && !stopping.IsCancellationRequested) {
+			ready = true;
+			log($"Native tailnet transport ready: https://{host}");
+		}
 		await stream.CopyToAsync(Stream.Null, stopping);
 	}
 

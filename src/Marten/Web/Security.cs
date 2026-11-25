@@ -14,11 +14,16 @@ public sealed class Security {
 	public string Token { get; }
 	readonly HashSet<string> localHosts;
 	public DevicePairing? Pairing { get; init; }
-	public Uri? PairingOrigin { get; }
+	public Uri? ConfiguredPairingOrigin { get; }
+	public bool EmbeddedTailnet { get; }
+	readonly TailnetTransport? tailnet;
+	public Uri? PairingOrigin => !EmbeddedTailnet || tailnet?.IsReady == true ? ConfiguredPairingOrigin : null;
 	readonly HashSet<string> hosts;
 	readonly HashSet<string> origins;
 
-	public Security(Home home, Config config) {
+	public Security(Home home, Config config, TailnetTransport? tailnet = null) {
+		this.tailnet = tailnet;
+		EmbeddedTailnet = config.Tailnet != null;
 		var path = Path.Combine(home.Secrets, "ui-token");
 		if(!File.Exists(path)) {
 			AtomicFile.Write(path, System.Buffers.Text.Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(32)));
@@ -34,12 +39,12 @@ public sealed class Security {
 			hosts.Add(bare);
 			origins.Add($"https://{bare}");
 		}
-		if(config.PairingOrigin != null) {
-			PairingOrigin = ParsePairingOrigin(config.PairingOrigin);
-			if(PairingOrigin != null) {
-				hosts.Add(PairingOrigin.Authority);
-				origins.Add(PairingOrigin.GetLeftPart(UriPartial.Authority));
-			}
+		ConfiguredPairingOrigin = EmbeddedTailnet
+			? (config.Tailnet?.CanonicalHost() is { } host ? new Uri($"https://{host}") : null)
+			: (config.PairingOrigin is { } direct ? ParsePairingOrigin(direct) : null);
+		if(ConfiguredPairingOrigin is { } origin) {
+			hosts.Add(origin.Authority);
+			origins.Add(origin.GetLeftPart(UriPartial.Authority));
 		}
 		if(config.DevOrigin != null) origins.Add(config.DevOrigin.TrimEnd('/'));
 	}
@@ -99,34 +104,38 @@ public sealed class Security {
 			ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
 			return;
 		}
-		var atPairingOrigin = PairingOrigin is { } origin &&
-			string.Equals(ctx.Request.Host.Value, origin.Authority, StringComparison.OrdinalIgnoreCase);
-		if(atPairingOrigin && !PairingEndpoints.IsPairedUiEndpoint(ctx)) {
+		var authority = ConfiguredPairingOrigin;
+		var atPairingOrigin = authority != null && string.Equals(ctx.Request.Host.Host.Trim('[', ']').TrimEnd('.'),
+			authority.IdnHost.Trim('[', ']').TrimEnd('.'), StringComparison.OrdinalIgnoreCase) &&
+			(EmbeddedTailnet || (ctx.Request.Host.Port ?? 443) == authority.Port);
+		var policy = ctx.GetEndpoint()?.Metadata.GetMetadata<OperatorRoute>();
+		var requestOrigin = ctx.Request.Headers.Origin.ToString();
+		if(atPairingOrigin && (policy == null || PairingOrigin == null ||
+			!string.Equals(ctx.Request.Host.Value, authority!.Authority, EmbeddedTailnet ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase) ||
+			(requestOrigin.Length > 0 && requestOrigin != authority.GetLeftPart(UriPartial.Authority)))) {
 			ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
 			return;
 		}
-		var metadata = ctx.GetEndpoint()?.Metadata;
 		var bearer = Bearer(ctx);
-		if(metadata?.GetMetadata<PairingEndpoints.Management>() != null) {
+		if(policy == OperatorRoute.Management) {
 			ctx.Response.Headers.CacheControl = "no-store";
 			// The original operator has to bootstrap locally. Already-paired devices have full UI authority.
-			if(Pairing?.Authenticate(bearer) is null && (!LocalOperatorOrigin(ctx) || !IsOperator(bearer))) {
+			if(Pairing?.Authenticate(bearer) is null && (atPairingOrigin || !LocalOperatorOrigin(ctx) || !IsOperator(bearer))) {
 				ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
 				return;
 			}
-		} else if(metadata?.GetMetadata<PairingEndpoints.Redemption>() != null) {
+		} else if(policy == OperatorRoute.Redemption) {
 			ctx.Response.Headers.CacheControl = "no-store";
 			// The only credential for redemption is the code in the JSON body.
 			if(!atPairingOrigin ||
-				(ctx.Request.Headers.Origin.ToString() is { Length: > 0 } requestOrigin && requestOrigin != PairingOrigin!.GetLeftPart(UriPartial.Authority)) ||
 				ctx.Request.Headers.ContainsKey("Authorization") || ctx.Request.QueryString.HasValue) {
 				ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
 				return;
 			}
-		} else if(ctx.Request.Path.StartsWithSegments("/api") && (atPairingOrigin || !TokenValid(ctx))) {
+		} else if(atPairingOrigin || (ctx.Request.Path.StartsWithSegments("/api") && !TokenValid(ctx))) {
 			if(Pairing?.Authenticate(bearer) is { } revoked) {
 				ctx.Response.Headers.CacheControl = "no-store";
-				if(metadata?.GetMetadata<PairingEndpoints.PairedAction>() == null) {
+				if(policy != OperatorRoute.Action) {
 					ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
 					return;
 				}

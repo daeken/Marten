@@ -1,5 +1,6 @@
 using System.Buffers.Text;
 using System.Security.Cryptography;
+using System.Globalization;
 using System.Text;
 using Marten.Storage;
 
@@ -60,7 +61,7 @@ public sealed class DevicePairing(Home home, TimeProvider? time = null) {
 	}
 
 	public string? Redeem(string? code, string? deviceName) {
-		if(!ValidSecret(code) || deviceName?.Trim() is not { Length: > 0 and <= 80 } name || name.Any(char.IsControl)) return null;
+		if(!ValidSecret(code) || deviceName?.Trim() is not { Length: > 0 and <= 80 } name || name.EnumerateRunes().Any(r => Rune.GetUnicodeCategory(r) is UnicodeCategory.Control or UnicodeCategory.Format or UnicodeCategory.LineSeparator or UnicodeCategory.ParagraphSeparator)) return null;
 		lock(gate) {
 			if(!pending.Remove(Hash(code!), out var at) || clock.GetElapsedTime(at) >= CodeLifetime || devices.Count >= MaxDevices) return null;
 			var token = Secret();

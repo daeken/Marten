@@ -179,12 +179,7 @@ func tailnetProxy(host string, upstream *url.URL) http.Handler {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
-		// Never serve the browser shell, PWA, or static assets here. ASP.NET
-		// independently requires selected endpoints to opt in to native access.
-		if !strings.HasPrefix(r.URL.Path, "/api/") {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
+		// The upstream routes once, then applies the native endpoint/credential policy.
 		proxy.ServeHTTP(w, r)
 	})
 }

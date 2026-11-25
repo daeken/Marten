@@ -191,8 +191,8 @@ export function takeToken(): string | null {
 }
 
 export interface Device { id: string; name: string; createdAt: string }
-export interface PairStatus { enabled: boolean; devices: Device[] }
-export interface PairInvitation { uri: string; expiresAt: string }
+export interface PairStatus { enabled: boolean; requiresTailscaleEnrollment: boolean; devices: Device[] }
+export interface PairInvitation { payload: string; expiresAt: string }
 
 export const transcriptPageSize = 80;
 export type TranscriptPage = { entries: Entry[]; hasOlder: boolean };
@@ -218,7 +218,7 @@ export class Api {
   startFreshContext = (id: string) => this.call<void>('POST', `/agents/${id}/start-fresh-context`);
   status = () => this.call<Status_>('GET', '/status');
   pairStatus = () => this.call<PairStatus>('GET', '/pair/devices');
-  createPairCode = () => this.call<PairInvitation>('POST', '/pair/create');
+  createPairCode = (tsAuthKey?: string) => this.call<PairInvitation>('POST', '/pair/create', tsAuthKey ? { tsAuthKey } : undefined);
   revokeDevice = (id: string) => this.call<void>('DELETE', `/pair/devices/${id}`);
   login = () => this.call<{ url: string }>('POST', '/auth/login');
   logout = () => this.call<void>('POST', '/auth/logout');

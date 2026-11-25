@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Json;
@@ -9,45 +10,122 @@ using Marten.Web;
 namespace Marten.Tests;
 
 public class PairedUiParityTests {
-	[Fact]
-	public async Task ActualUiRoutesHavePairedAuthorityWithoutExposingOutsideApi() {
+	[Theory]
+	[InlineData(false)]
+	[InlineData(true)]
+	public async Task ActualUiRoutesHavePairedAuthorityWithoutExposingOutsideApi(bool embedded) {
+		if(embedded && !OperatingSystem.IsMacOS() && !OperatingSystem.IsLinux()) return;
 		using var dir = new TempDir();
 		var home = new Home(dir.File("home"));
-		const string host = "pairing-test.example";
+		var host = embedded ? "marten.scratch.ts.net" : "pairing-test.example";
+		const string ignored = "ignored.example";
 		using var port = new TcpListener(IPAddress.Loopback, 0);
 		port.Start();
 		var listenPort = ((IPEndPoint) port.LocalEndpoint).Port;
 		port.Stop();
-		var config = new Config { Port = listenPort, PairingOrigin = $"https://{host}", Backup = new() { IntervalMinutes = 0 } };
+		var config = new Config { Port = listenPort, PairingOrigin = $"https://{(embedded ? ignored : host)}",
+			Tailnet = embedded ? new() { Host = host } : null, RemoteHosts = new() { $"{host}:443", $"{host}." },
+			Backup = new() { IntervalMinutes = 0 } };
 		config.Save(home);
+		var webRoot = dir.File("dist");
+		Directory.CreateDirectory(webRoot);
+		await File.WriteAllTextAsync(Path.Combine(webRoot, "index.html"), "scratch UI");
+		await File.WriteAllTextAsync(Path.Combine(webRoot, "sw.js"), "// scratch service worker");
+		if(embedded) {
+			var bin = Path.Combine(home.Root, "bin");
+			Directory.CreateDirectory(bin);
+			var helper = Path.Combine(bin, "marten-tsnet");
+			await File.WriteAllTextAsync(helper, "#!/bin/sh\nprintf 'READY\\n'\nread unused\n");
+			if(!OperatingSystem.IsWindows()) File.SetUnixFileMode(helper, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+		}
 		var pairing = new DevicePairing(home);
 		var token = pairing.Redeem(pairing.Create()!.Code, "Parity test")!;
 		var start = new ProcessStartInfo(Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet") {
 			WorkingDirectory = dir.File("home"), UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
 		};
 		start.ArgumentList.Add(typeof(Security).Assembly.Location);
-		foreach(var key in start.Environment.Keys.Where(k => k.StartsWith("MARTEN_") || k.StartsWith("AWS_") ||
-			k.StartsWith("ASPNETCORE_") || k.EndsWith("_API_KEY")).ToArray()) start.Environment.Remove(key);
+		foreach(var envName in start.Environment.Keys.Where(k => k.StartsWith("MARTEN_") || k.StartsWith("AWS_") ||
+			k.StartsWith("ASPNETCORE_") || k.EndsWith("_API_KEY")).ToArray()) start.Environment.Remove(envName);
 		start.Environment["MARTEN_HOME"] = home.Root;
+		start.Environment["MARTEN_WEB_ROOT"] = webRoot;
 		start.Environment["AWS_CONFIG_FILE"] = dir.File("aws-config");
 		start.Environment["AWS_SHARED_CREDENTIALS_FILE"] = dir.File("aws-credentials");
 		using var process = Process.Start(start)!;
-		process.OutputDataReceived += (_, _) => { };
-		process.ErrorDataReceived += (_, _) => { };
+		var logs = new ConcurrentQueue<string>();
+		process.OutputDataReceived += (_, e) => { if(e.Data != null) logs.Enqueue(e.Data); };
+		process.ErrorDataReceived += (_, e) => { if(e.Data != null) logs.Enqueue(e.Data); };
 		process.BeginOutputReadLine();
 		process.BeginErrorReadLine();
 		using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
 		using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{listenPort}") };
 		http.DefaultRequestHeaders.Host = host;
 		http.DefaultRequestHeaders.Authorization = new("Bearer", token);
+		const string key = "tskey-auth-scratch_not-a-provider-key";
+		string? code = null;
 		try {
 			while(true) {
-				Assert.False(process.HasExited, "Scratch Marten exited before listening.");
+				Assert.False(process.HasExited, $"Scratch Marten exited before listening: {string.Join(Environment.NewLine, logs)}");
 				try {
 					using var response = await http.GetAsync("/api/status", timeout.Token);
+					if(embedded && response.StatusCode == HttpStatusCode.Forbidden) { await Task.Delay(50, timeout.Token); continue; }
 					Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 					break;
 				} catch(HttpRequestException) { await Task.Delay(50, timeout.Token); }
+			}
+
+			await Check(HttpMethod.Get, "/", [HttpStatusCode.Forbidden]);
+			await Check(HttpMethod.Get, "/sw.js", [HttpStatusCode.Forbidden]);
+			var local = $"127.0.0.1:{listenPort}";
+			using var shell = new HttpRequestMessage(HttpMethod.Get, "/");
+			shell.Headers.Host = local;
+			using var localResponse = await http.SendAsync(shell, timeout.Token);
+			Assert.Equal("scratch UI", await localResponse.Content.ReadAsStringAsync(timeout.Token));
+			if(embedded) {
+				var op = await File.ReadAllTextAsync(Path.Combine(home.Secrets, "ui-token"), timeout.Token);
+				async Task<HttpResponseMessage> Pair(HttpMethod method, string path, string authority, string? bearer = null, object? body = null) {
+					using var req = new HttpRequestMessage(method, path);
+					req.Headers.Host = authority;
+					if(bearer != null) req.Headers.Authorization = new("Bearer", bearer);
+					if(body != null) req.Content = JsonContent.Create(body);
+					using var isolated = new HttpClient { BaseAddress = http.BaseAddress };
+					return await isolated.SendAsync(req, timeout.Token);
+				}
+				using var missing = await Pair(HttpMethod.Post, "/api/pair/create", local, op);
+				Assert.Equal(HttpStatusCode.BadRequest, missing.StatusCode);
+				using var wrongKey = await Pair(HttpMethod.Post, "/api/pair/create", local, op, new { tsAuthKey = "tskey-api-fake" });
+				Assert.Equal(HttpStatusCode.BadRequest, wrongKey.StatusCode);
+				using var invited = await Pair(HttpMethod.Post, "/api/pair/create", local, op, new { tsAuthKey = key });
+				Assert.Equal(HttpStatusCode.OK, invited.StatusCode);
+				Assert.True(invited.Headers.CacheControl?.NoStore);
+				var offer = await invited.Content.ReadFromJsonAsync<JsonElement>(timeout.Token);
+				using var qr = JsonDocument.Parse(offer.GetProperty("payload").GetString()!);
+				Assert.Equal(2, qr.RootElement.GetProperty("v").GetInt32());
+				Assert.Equal($"https://{host}", qr.RootElement.GetProperty("server").GetString());
+				Assert.True(qr.RootElement.GetProperty("tsAuthKey").GetString() == key);
+				var deadline = qr.RootElement.GetProperty("expiresAt").GetString();
+				Assert.Matches(@"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$", deadline!);
+				Assert.Equal(deadline, offer.GetProperty("expiresAt").GetString());
+				code = qr.RootElement.GetProperty("code").GetString();
+				using var rejected = await Pair(HttpMethod.Post, "/api/pair/redeem", host, body: new { code, deviceName = "Phone\u202E" });
+				Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+				using var redeemed = await Pair(HttpMethod.Post, "/api/pair/redeem", host, body: new { code, deviceName = "Scratch phone" });
+				Assert.Equal(HttpStatusCode.OK, redeemed.StatusCode);
+				var credential = (await redeemed.Content.ReadFromJsonAsync<JsonElement>(timeout.Token)).GetProperty("token").GetString()!;
+				Assert.True(credential != op && credential != key && credential != code);
+				http.DefaultRequestHeaders.Authorization = new("Bearer", credential);
+				using var used = await Pair(HttpMethod.Post, "/api/pair/redeem", host, body: new { code, deviceName = "Try again" });
+				Assert.Equal(HttpStatusCode.BadRequest, used.StatusCode);
+				using var legacy = await Pair(HttpMethod.Get, "/api/status", host, op);
+				Assert.Equal(HttpStatusCode.Unauthorized, legacy.StatusCode);
+				using var query = await Pair(HttpMethod.Get, "/api/status?token=" + op, host);
+				Assert.Equal(HttpStatusCode.Unauthorized, query.StatusCode);
+
+				foreach(var alias in new[] { ignored, host + ":443", host + ".", host.ToUpperInvariant() }) {
+					using var req = new HttpRequestMessage(HttpMethod.Get, "/api/status");
+					req.Headers.Host = alias;
+					using var res = await http.SendAsync(req, timeout.Token);
+					Assert.Equal(HttpStatusCode.Forbidden, res.StatusCode);
+				}
 			}
 
 			using var create = await http.PostAsJsonAsync("/api/agents", new { name = "Parity" }, timeout.Token);
@@ -95,6 +173,8 @@ public class PairedUiParityTests {
 		} finally {
 			if(!process.HasExited) process.Kill(entireProcessTree: true);
 			await process.WaitForExitAsync();
+			process.WaitForExit();
+			Assert.False(logs.Any(l => l.Contains(key) || (code != null && l.Contains(code))), "Pairing material appeared in server logs.");
 		}
 
 		async Task Check(HttpMethod method, string path, HttpStatusCode[] allowed, object? json = null) {
