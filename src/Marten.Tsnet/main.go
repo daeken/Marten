@@ -179,7 +179,12 @@ func tailnetProxy(host string, upstream *url.URL) http.Handler {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
-		// The upstream routes once, then applies the native endpoint/credential policy.
+		// Defense in depth only: the upstream selects the route and owns the
+		// authoritative endpoint/credential policy (including denials within /api/).
+		if !strings.HasPrefix(r.URL.Path, "/api/") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		proxy.ServeHTTP(w, r)
 	})
 }

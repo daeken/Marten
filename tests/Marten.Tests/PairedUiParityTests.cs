@@ -120,6 +120,23 @@ public class PairedUiParityTests {
 				using var query = await Pair(HttpMethod.Get, "/api/status?token=" + op, host);
 				Assert.Equal(HttpStatusCode.Unauthorized, query.StatusCode);
 
+				using var forbidden = await Pair(HttpMethod.Post, "/api/pair/create", host, op, new { tsAuthKey = key });
+				Assert.Equal(HttpStatusCode.Forbidden, forbidden.StatusCode);
+				using var unauth = await Pair(HttpMethod.Post, "/api/pair/create", host, body: new { tsAuthKey = key });
+				Assert.Equal(HttpStatusCode.Forbidden, unauth.StatusCode);
+				using var delegated = await Pair(HttpMethod.Post, "/api/pair/create", host, credential, new { tsAuthKey = "tskey-auth-second_synthetic_key" });
+				Assert.Equal(HttpStatusCode.OK, delegated.StatusCode);
+				using var next = JsonDocument.Parse((await delegated.Content.ReadFromJsonAsync<JsonElement>(timeout.Token)).GetProperty("payload").GetString()!);
+				Assert.True(code != next.RootElement.GetProperty("code").GetString());
+				var original = Assert.Single((await ReadList()).EnumerateArray(), d => d.GetProperty("name").GetString() == "Parity test");
+				using var revoked = await Pair(HttpMethod.Delete, "/api/pair/devices/" + original.GetProperty("id").GetString(), host, credential);
+				Assert.Equal(HttpStatusCode.NoContent, revoked.StatusCode);
+				async Task<JsonElement> ReadList() {
+					using var listed = await Pair(HttpMethod.Get, "/api/pair/devices", host, credential);
+					Assert.Equal(HttpStatusCode.OK, listed.StatusCode);
+					return (await listed.Content.ReadFromJsonAsync<JsonElement>(timeout.Token)).GetProperty("devices");
+				}
+
 				foreach(var alias in new[] { ignored, host + ":443", host + ".", host.ToUpperInvariant() }) {
 					using var req = new HttpRequestMessage(HttpMethod.Get, "/api/status");
 					req.Headers.Host = alias;
