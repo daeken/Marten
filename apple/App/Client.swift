@@ -6,16 +6,22 @@ struct Endpoint: Hashable, Sendable {
 
     // Validate the original wire spelling, before Foundation can normalize it.
     init(_ origin: String) throws {
-        let prefix = "https://marten."
+        let prefix = "https://"
         let suffix = ".ts.net"
-        guard origin.hasPrefix(prefix), origin.hasSuffix(suffix), origin.utf8.count > prefix.count + suffix.count,
-              origin.utf8.count <= prefix.count + suffix.count + 63 else { throw ClientError.origin }
-        let label = origin.dropFirst(prefix.count).dropLast(suffix.count).utf8
-        guard let first = label.first, let last = label.last,
-              Self.isLabelAlphanumeric(first), Self.isLabelAlphanumeric(last),
-              label.allSatisfy({ Self.isLabelAlphanumeric($0) || $0 == 45 }),
+        guard origin.hasPrefix(prefix), origin.hasSuffix(suffix),
+              origin.utf8.count <= prefix.count + 63 + 1 + 63 + suffix.count else { throw ClientError.origin }
+        let labels = origin.dropFirst(prefix.count).dropLast(suffix.count)
+            .split(separator: ".", omittingEmptySubsequences: false)
+        guard labels.count == 2, labels.allSatisfy(Self.isDNSLabel),
               let url = URL(string: origin), url.absoluteString == origin else { throw ClientError.origin }
         self.url = url
+    }
+
+    private static func isDNSLabel(_ label: Substring) -> Bool {
+        let bytes = label.utf8
+        guard bytes.count <= 63, let first = bytes.first, let last = bytes.last,
+              Self.isLabelAlphanumeric(first), Self.isLabelAlphanumeric(last) else { return false }
+        return bytes.allSatisfy { Self.isLabelAlphanumeric($0) || $0 == 45 }
     }
 
     private static func isLabelAlphanumeric(_ byte: UInt8) -> Bool {
@@ -59,7 +65,7 @@ enum ClientError: LocalizedError, Equatable {
 
     var errorDescription: String? {
         switch self {
-        case .origin: "Use the exact https://marten.<tailnet>.ts.net origin, without a port or path. Manual development connections must use loopback."
+        case .origin: "Use the exact https://<device>.<tailnet>.ts.net origin, without a port or path. Manual development connections must use loopback."
         case .unauthorized: "The server rejected the Marten credential."
         case .response(let status): "The server returned HTTP \(status). Redirects are not followed."
         case .malformed: "The server returned an unexpected response."

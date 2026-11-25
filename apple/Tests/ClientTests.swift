@@ -7,6 +7,11 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
         let origin = "https://marten.tail-test1.ts.net"
         XCTAssertEqual(try Endpoint(origin).origin, origin)
         XCTAssertEqual(Endpoint.saved(origin)?.origin, origin)
+        let enrolledOrigin = "https://marten-mac-2.tail-test1.ts.net"
+        XCTAssertEqual(try Endpoint(enrolledOrigin).origin, enrolledOrigin)
+        XCTAssertEqual(Endpoint.saved(enrolledOrigin)?.origin, enrolledOrigin)
+        let maxLabel = String(repeating: "x", count: 63)
+        XCTAssertNoThrow(try Endpoint("https://\(maxLabel).\(maxLabel).ts.net"))
         for invalid in [
             "http://marten.tail-test1.ts.net", "HTTPS://marten.tail-test1.ts.net", "https://Marten.tail-test1.ts.net",
             "https://marten.Tail-test1.ts.net", "https://marten.tail-test1.ts.net:443", "https://marten.tail-test1.ts.net:8443",
@@ -14,6 +19,8 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
             "https://user@marten.tail-test1.ts.net", "https://%6darten.tail-test1.ts.net", "https://marten.t%61il.ts.net",
             "https://marten.-bad.ts.net", "https://marten.bad-.ts.net", "https://marten.bad_.ts.net",
             "https://marten..ts.net", "https://marten.extra.label.ts.net", "https://marten.täil.ts.net",
+            "https://.tail-test1.ts.net", "https://tail-test1.ts.net", "https://-node.tail-test1.ts.net",
+            "https://node-.tail-test1.ts.net", "https://node_.tail-test1.ts.net", "https://\(maxLabel)x.tail-test1.ts.net",
             "https://marten.\(String(repeating: "a", count: 64)).ts.net", "https://marten.example", "https://localhost",
             "https://127.0.0.1", "https://marten.tail-test1.ts.net.attacker.invalid", "http://127.0.0.1:17450",
             "marten://pair?v=1&server=https%3A%2F%2Fmarten.tail-test1.ts.net&code=synthetic-fixture",
@@ -71,7 +78,7 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
             {"projects":[{"id":"p","name":"Project"}],"agents":[{"id":"task-42","name":"Test","status":"idle","kind":"task","projectId":"p","paused":false,"pausedEffective":false}]}
             """), .init(200, #"{"entries":[{"seq":44,"kind":"assistant","text":"Hi"}],"hasOlder":true}"#),
             .init(202), .init(200), .init(200)])
-        let api = API(endpoint: try Endpoint("https://marten.tail-test1.ts.net"), token: "fixture-token", transport: transport)
+        let api = API(endpoint: try Endpoint("https://test-node.tail-test1.ts.net"), token: "fixture-token", transport: transport)
         let status = try await api.status()
         let page = try await api.transcript("task-42", before: 80)
         try await api.send("task-42", text: "Test", mode: .immediate)
@@ -86,6 +93,9 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
                                                               "/api/agents/task-42/messages", "/api/agents/task-42/pause",
                                                               "/api/agents/task-42/interrupt"])
         XCTAssertEqual(requests[1].url?.query, "limit=80&before=80")
+        XCTAssertTrue(requests.allSatisfy {
+            $0.url?.scheme == "https" && $0.url?.host == "test-node.tail-test1.ts.net" && $0.url?.port == nil
+        })
         XCTAssertEqual(try Self.body(requests[2]), ["text": "Test", "mode": "immediate"])
         XCTAssertEqual(requests[3].httpBody, Data(#"{"paused":true}"#.utf8))
         XCTAssertTrue(requests.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-token" })
