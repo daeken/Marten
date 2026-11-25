@@ -1083,6 +1083,125 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
         })
     }
 
+    private static let lifecycleAgent = #"{"id":"agent-1","name":"Fixture Chat","kind":"chat","status":"idle","closed":false,"paused":false,"pausedEffective":false,"workingDirectory":"/fixture"}"#
+    private static let lifecycleProject = #"{"id":"project-1","name":"Fixture Project","bindings":["/fixture/a","/fixture/b"],"worktreesByDefault":true,"orchestratorId":"agent-2","paused":false}"#
+    private static let lifecycleStatus = #"{"agents":[\#(lifecycleAgent)],"projects":[\#(lifecycleProject)],"paused":false}"#
+
+    func testProjectMemoryAndCreationOperatorContract() async throws {
+        let endpoint = try Endpoint(Self.fixtureOrigin)
+        let memory = ##"{"path":"/fixture/MEMORY.md","text":"# Notes","prompt":"Fixture prompt","log":[{"at":"2026-01-01T10:00:00Z","agentId":"agent-1","reason":"Initial","added":["one"],"removed":[]},{"at":"2026-01-02T10:00:00Z","agentId":"unknown","path":"memory/topic.md","added":["two"],"removed":["one"]}]}"##
+        let fixture = StubTransport([.init(200, memory), .init(200, Self.lifecycleProject), .init(200, Self.lifecycleAgent), .init(403)])
+        let transport = try TailnetTransport(endpoint: endpoint, transport: fixture)
+        let api = API(endpoint: endpoint, token: "fixture-bearer", transport: transport)
+        let doc = try await api.projectMemory("project-1")
+        XCTAssertEqual(doc.path, "/fixture/MEMORY.md")
+        XCTAssertEqual(doc.text, "# Notes")
+        XCTAssertEqual(doc.prompt, "Fixture prompt")
+        XCTAssertEqual(doc.log.first?.agentId, "agent-1")
+        XCTAssertEqual(doc.log.first?.reason, "Initial")
+        XCTAssertNil(doc.log.first?.path)
+        XCTAssertEqual(doc.log.last?.path, "memory/topic.md")
+        XCTAssertEqual(doc.log.last?.removed, ["one"])
+        XCTAssertEqual(doc.log.last?.added, ["two"])
+        let draft = ProjectCreation(name: " Fixture Project ", folders: " /fixture/a \r\n\n /fixture/b ", prompt: "   ", worktrees: true, brief: " Start with fixture.\n")
+        XCTAssertTrue(draft.isValid)
+        XCTAssertFalse(ProjectCreation(name: "Fixture", folders: " \n", prompt: "", worktrees: false, brief: "").isValid)
+        let project = try await api.createProject(draft)
+        XCTAssertEqual(project.orchestratorId, "agent-2")
+        XCTAssertEqual(project.bindings, ["/fixture/a", "/fixture/b"])
+        let chat = try await api.createChat("Fixture Chat")
+        XCTAssertEqual(chat.id, "agent-1")
+        do { _ = try await api.projectMemory("project-1"); XCTFail("Accepted 403") }
+        catch { XCTAssertEqual(error as? ClientError, .unauthorized) }
+        do { _ = try await api.projectMemory("../other"); XCTFail("Accepted unsafe project ID") }
+        catch { XCTAssertEqual(error as? ClientError, .malformed) }
+        let guest = API(endpoint: endpoint, transport: transport)
+        do { _ = try await guest.createProject(draft); XCTFail("Created without Bearer") }
+        catch { XCTAssertEqual(error as? ClientError, .unauthorized) }
+        do { _ = try await guest.createChat("Fixture Chat"); XCTFail("Created without Bearer") }
+        catch { XCTAssertEqual(error as? ClientError, .unauthorized) }
+        let requests = await fixture.requests
+        XCTAssertEqual(requests.map(\.httpMethod), ["GET", "POST", "POST", "GET"])
+        XCTAssertEqual(requests.compactMap { $0.url?.absoluteString }, ["/api/projects/project-1/memory", "/api/projects", "/api/agents", "/api/projects/project-1/memory"].map { endpoint.origin + $0 })
+        XCTAssertTrue(requests.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-bearer" })
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(requests[1].httpBody)) as? [String: Any])
+        XCTAssertEqual(payload["name"] as? String, "Fixture Project")
+        XCTAssertEqual(payload["bindings"] as? [String], ["/fixture/a", "/fixture/b"])
+        XCTAssertTrue(payload["prompt"] is NSNull)
+        XCTAssertEqual(payload["worktreesByDefault"] as? Bool, true)
+        XCTAssertEqual(payload["brief"] as? String, "Start with fixture.")
+        XCTAssertEqual(try Self.body(requests[2]), ["name": "Fixture Chat"])
+    }
+
+    func testLifecycleWireRoutesAndAuthorization() async throws {
+        let endpoint = try Endpoint(Self.fixtureOrigin)
+        let fixture = StubTransport(Array(repeating: .init(200), count: 5) + [.init(204)])
+        let transport = try TailnetTransport(endpoint: endpoint, transport: fixture)
+        let api = API(endpoint: endpoint, token: "fixture-bearer", transport: transport)
+        let actions: [LifecycleAction] = [.pauseAll(true), .pauseProject("project-1", false), .pauseAgent("agent-1", true),
+                                          .close("agent-1", true), .close("agent-1", false), .freshContext("agent-1")]
+        for action in actions { try await api.applyLifecycle(action) }
+        do { try await API(endpoint: endpoint, transport: transport).applyLifecycle(.freshContext("agent-1")); XCTFail("Accepted missing auth") }
+        catch { XCTAssertEqual(error as? ClientError, .unauthorized) }
+        do { try await api.applyLifecycle(.pauseProject("?id=none", true)); XCTFail("Accepted unsafe project ID") }
+        catch { XCTAssertEqual(error as? ClientError, .malformed) }
+        let requests = await fixture.requests
+        XCTAssertEqual(requests.compactMap { $0.url?.absoluteString }, [
+            "/api/pause", "/api/projects/project-1/pause", "/api/agents/agent-1/pause", "/api/agents/agent-1/close",
+            "/api/agents/agent-1/close", "/api/agents/agent-1/start-fresh-context"
+        ].map { endpoint.origin + $0 })
+        XCTAssertTrue(requests.allSatisfy { $0.httpMethod == "POST" && $0.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-bearer" })
+        for (request, expected) in zip(requests, [["paused": true], ["paused": false], ["paused": true], ["closed": true], ["closed": false]]) {
+            XCTAssertEqual(try JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Bool], expected)
+        }
+        XCTAssertNil(requests.last?.httpBody)
+    }
+
+    @MainActor func testLifecycleConfirmationConflictAndReadOnlyReconnect() async throws {
+        let endpoint = try Endpoint(Self.fixtureOrigin)
+        let first = StubTransport([.init(200, Self.lifecycleStatus), .init(409, "internal detail"), .init(503)])
+        let next = StubTransport([.init(200, Self.lifecycleStatus), .init(200), .init(200, Self.lifecycleStatus)])
+        let api = API(endpoint: endpoint, token: "fixture-bearer", transport: first)
+        let replacement = API(endpoint: endpoint, token: "fixture-bearer", transport: next)
+        let route = UUID()
+        let target = WorkspaceControls.Target(route: route, page: .agent("agent-1"))
+        let controls = WorkspaceControls()
+        await controls.refresh(using: api, route: route)
+        let fresh = LifecycleAction.freshContext("agent-1")
+        let close = LifecycleAction.close("agent-1", true)
+        XCTAssertNil(controls.apply(fresh, target: target, using: api))
+        controls.stage(close, name: "Fixture Chat", target: target)
+        let cancelled = try XCTUnwrap(controls.pending?.id)
+        controls.cancel()
+        XCTAssertNil(controls.apply(close, confirmation: cancelled, target: target, using: api))
+        controls.stage(fresh, name: "Fixture Chat", target: target)
+        let moved = WorkspaceControls.Target(route: route, page: nil)
+        XCTAssertNil(controls.apply(fresh, confirmation: controls.pending?.id, target: moved, using: api))
+        controls.stage(fresh, name: "Fixture Chat", target: target)
+        let confirmation = try XCTUnwrap(controls.pending?.id)
+        let run = try XCTUnwrap(controls.apply(fresh, confirmation: confirmation, target: target, using: api))
+        XCTAssertNil(controls.apply(fresh, confirmation: confirmation, target: target, using: api))
+        await run.value
+        XCTAssertTrue(controls.notice?.contains("active turn") == true)
+        XCTAssertFalse(controls.notice?.contains("internal detail") == true)
+        XCTAssertFalse(controls.ready(route))
+        XCTAssertEqual(controls.status?.agents.first?.id, "agent-1")
+        XCTAssertNil(controls.apply(.pauseAll(true), target: target, using: api))
+        let newRoute = UUID()
+        await controls.refresh(using: replacement, route: newRoute)
+        XCTAssertTrue(controls.ready(newRoute))
+        XCTAssertFalse(controls.ready(route))
+        let reconnectReads = await next.requests
+        XCTAssertEqual(reconnectReads.map(\.httpMethod), ["GET"])
+        let newTarget = WorkspaceControls.Target(route: newRoute, page: .agent("agent-1"))
+        controls.stage(close, name: "Fixture Chat", target: newTarget)
+        await controls.apply(close, confirmation: controls.pending?.id, target: newTarget, using: replacement)?.value
+        let initialRequests = await first.requests
+        let finalRequests = await next.requests
+        XCTAssertEqual(initialRequests.map(\.httpMethod), ["GET", "POST", "GET"])
+        XCTAssertEqual(finalRequests.map(\.httpMethod), ["GET", "POST", "GET"])
+    }
+
     private static func body(_ request: URLRequest) throws -> [String: String] {
         let body = try XCTUnwrap(request.httpBody)
         return try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])

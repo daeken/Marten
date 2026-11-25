@@ -5,9 +5,9 @@ struct WorkspaceView: View {
     let showServers: () -> Void
     let routeID: UUID
     let networkActive: Bool
-    @State private var status: ServerStatus?
-    @State private var statusError: String?
-    @State private var checking = false
+    @State private var controls = WorkspaceControls()
+    @State private var showClosedChats = false
+    @State private var confirmLifecycle = false
     @State private var scope: AgentScope = .all
     @State private var eventHint = UUID()
     @State private var activity: [String: LiveActivity] = [:]
@@ -15,6 +15,11 @@ struct WorkspaceView: View {
     @State private var path: [WorkspaceDestination] = []
     @State private var inbox = InboxState()
     @State private var messages = MessagesState()
+
+    private var status: ServerStatus? { controls.status }
+    private var statusError: String? { controls.statusError }
+    private var controlsReady: Bool { networkActive && controls.ready(routeID) }
+    private var target: WorkspaceControls.Target { .init(route: routeID, page: path.last) }
 
     private var showsMessages: Bool { path.last == .messages }
     private var showsInboxData: Bool {
@@ -26,7 +31,7 @@ struct WorkspaceView: View {
 
     private var agents: [Agent] {
         (status?.agents ?? []).filter { agent in
-            guard agent.closed != true else { return false }
+            if agent.closed == true, agent.kind == "chat", !showClosedChats, !path.contains(.agent(agent.id)) { return false }
             switch scope {
             case .all: return true
             case .standalone: return agent.projectId == nil
@@ -55,6 +60,17 @@ struct WorkspaceView: View {
                         Button("Retry") { Task { await refresh() } }
                     }
                 }
+                if let paused = status?.paused {
+                    Section {
+                        Button(paused ? "Resume All" : "Pause All", systemImage: paused ? "play" : "pause") {
+                            lifecycle(.pauseAll(!paused))
+                        }.disabled(!controlsReady)
+                        if paused {
+                            Text("Everything is paused. Agents finish their current step and hold; nudges and schedules stop.")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                }
                 NavigationLink(value: WorkspaceDestination.inbox) {
                     HStack {
                         Label("Inbox", systemImage: "tray")
@@ -71,6 +87,20 @@ struct WorkspaceView: View {
                 }
                 NavigationLink(value: WorkspaceDestination.processes(nil)) {
                     Label("Background Processes", systemImage: "terminal")
+                }
+                Section("Projects") {
+                    NavigationLink(value: WorkspaceDestination.createProject) { Label("New Project", systemImage: "folder.badge.plus") }
+                    ForEach(status?.projects ?? []) { project in
+                        NavigationLink(value: WorkspaceDestination.memory(project.id)) {
+                            Label("\(project.name) · Memory\(project.paused == true ? " · Paused" : "")", systemImage: "doc.text")
+                        }
+                    }
+                }
+                Section("Chats") {
+                    NavigationLink(value: WorkspaceDestination.createChat) { Label("New Chat", systemImage: "plus.bubble") }
+                    if status?.agents.contains(where: { $0.kind == "chat" && $0.closed == true }) == true {
+                        Toggle("Show Closed Chats", isOn: $showClosedChats)
+                    }
                 }
                 Section("Agents") {
                     if status == nil && statusError == nil { ProgressView("Loading agents…") }
@@ -102,6 +132,23 @@ struct WorkspaceView: View {
                 case .messages:
                     MessagesView(state: messages, projects: status?.projects ?? [], agents: status?.agents ?? [],
                                  active: networkActive, refresh: refreshMessages)
+                case .memory(let id):
+                    if let project = status?.projects.first(where: { $0.id == id }) {
+                        ProjectMemoryView(api: api, project: project, agents: status?.agents ?? [], route: routeID,
+                                          active: networkActive && path.last == destination, hint: eventHint,
+                                          controlsReady: controlsReady) {
+                            if let paused = project.paused, path.last == destination { lifecycle(.pauseProject(id, !paused)) }
+                        }.id(routeID)
+                    } else { ContentUnavailableView("Project Unavailable", systemImage: "folder") }
+                case .createChat, .createProject:
+                    CreationView(project: destination == .createProject, ready: controlsReady && path.last == destination, busy: controls.busy,
+                                 statusError: statusError, submitChat: { name in
+                        guard controlsReady, path.last == destination else { return }
+                        controls.createChat(name, using: api, route: routeID) { finishCreation($0, from: destination) }
+                    }, submitProject: { draft in
+                        guard controlsReady, path.last == destination else { return }
+                        controls.create(draft, using: api, route: routeID) { finishCreation($0, from: destination) }
+                    })
                 case .notebook(let id):
                     if let agent = status?.agents.first(where: { $0.id == id }) {
                         NotebookView(api: api, agent: agent, route: routeID, active: networkActive && path.last == destination, hint: eventHint)
@@ -124,7 +171,11 @@ struct WorkspaceView: View {
                         ConversationView(api: api, agent: agent, refreshStatus: refresh, routeID: routeID,
                                          networkActive: networkActive && path.last == destination, eventHint: eventHint,
                                          inbox: inbox, answer: submitAnswer,
-                                         activity: networkActive ? activity[id] : nil).id(id)
+                                         activity: networkActive ? activity[id] : nil,
+                                         controlsReady: controlsReady, lifecycle: { action in
+                            guard path.last == destination else { return }
+                            lifecycle(action, name: agent.name)
+                        }).id(id)
                     } else {
                         ContentUnavailableView("Agent Unavailable", systemImage: "bubble.left")
                     }
@@ -163,8 +214,30 @@ struct WorkspaceView: View {
                 try? await Task.sleep(for: .seconds(8))
             }
         }
+        .alert(controls.pending?.action.title ?? "Confirm Action", isPresented: $confirmLifecycle, presenting: controls.pending) { confirmation in
+            Button(confirmation.action.title, role: .destructive) {
+                guard controlsReady else { controls.cancel(); return }
+                controls.apply(confirmation.action, confirmation: confirmation.id, target: target, using: api)
+            }
+            Button("Cancel", role: .cancel) { controls.cancel() }
+        } message: { confirmation in
+            Text(confirmation.action.confirmation(for: confirmation.name))
+        }
+        .safeAreaInset(edge: .bottom) {
+            if let notice = controls.notice {
+                HStack {
+                    Label(notice, systemImage: "exclamationmark.circle").font(.footnote)
+                    Spacer()
+                    Button("Dismiss", systemImage: "xmark", action: controls.dismissNotice).labelStyle(.iconOnly)
+                }.padding(8).background(.regularMaterial)
+            }
+        }
+        .onChange(of: target) { cancelLifecycle() }
+        .onChange(of: networkActive) { if !networkActive { cancelLifecycle() } }
+        .onDisappear { cancelLifecycle() }
         .onChange(of: status?.projects.map(\.id)) { _, ids in
             if let ids, let project = messages.projectID, !ids.contains(project) { messages.select(nil) }
+            if let ids, case .project(let id) = scope, !ids.contains(id) { scope = .all }
         }
     }
 
@@ -226,24 +299,38 @@ struct WorkspaceView: View {
     }
 
     @MainActor private func refresh() async {
-        guard networkActive, !Task.isCancelled, !checking else { return }
-        checking = true
-        defer { checking = false }
-        do {
-            let result = try await api.status()
-            try Task.checkCancellation()
-            status = result
-            statusError = nil
-            if case .project(let id) = scope, !result.projects.contains(where: { $0.id == id }) { scope = .all }
-        } catch is CancellationError {
-        } catch {
-            statusError = safeMessage(error)
+        guard networkActive else { return }
+        await controls.refresh(using: api, route: routeID)
+    }
+
+    private func lifecycle(_ action: LifecycleAction, name: String = "") {
+        guard controlsReady else { return }
+        if action.destructive {
+            controls.stage(action, name: name, target: target)
+            confirmLifecycle = controls.pending != nil
+        } else { controls.apply(action, target: target, using: api) }
+    }
+
+    private func cancelLifecycle() {
+        confirmLifecycle = false
+        controls.cancel()
+    }
+
+    private func finishCreation(_ id: String?, from destination: WorkspaceDestination) {
+        guard path.last == destination, controls.loadedRoute == routeID else { return }
+        scope = .all
+        if let id, status?.agents.contains(where: { $0.id == id }) == true {
+            path = [.agent(id)]
+        } else {
+            path = []
+            controls.showNotice("Created successfully. Refresh the agent list to open the new conversation.")
         }
     }
 }
 
 enum WorkspaceDestination: Hashable {
     case inbox, messages, agent(String)
+    case createChat, createProject, memory(String)
     case notebook(String), operations(String, task: Int?), processes(String?), processLog(AgentProcess.Key)
 }
 
@@ -263,7 +350,8 @@ private enum AgentScope: Hashable {
 }
 
 private func agentStatus(_ agent: Agent) -> String {
-    agent.pausedEffective ? "Paused" : agent.status.replacingOccurrences(of: "_", with: " ").capitalized
+    if agent.closed == true { return "Closed" }
+    return agent.pausedEffective ? "Paused" : agent.status.replacingOccurrences(of: "_", with: " ").capitalized
 }
 
 private struct ConversationView: View {
@@ -277,6 +365,8 @@ private struct ConversationView: View {
     let inbox: InboxState
     let answer: (String, Int?) -> Void
     let activity: LiveActivity?
+    let controlsReady: Bool
+    let lifecycle: (LifecycleAction) -> Void
     @State private var loaded = false
     @State private var checking = false
     @State private var pageRequest: UUID?
@@ -305,6 +395,9 @@ private struct ConversationView: View {
                         Label("PowerShell Notebook", systemImage: "book.closed")
                     }.buttonStyle(.borderless)
                     Text(agentStatus(agent)).font(.footnote).foregroundStyle(.secondary)
+                    if let directory = agent.worktree ?? agent.workingDirectory {
+                        Text(directory).font(.footnote.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
+                    }
                     if agent.pausedEffective && !agent.paused {
                         Text("Paused by the server or project.").font(.footnote).foregroundStyle(.secondary)
                     }
@@ -370,8 +463,14 @@ private struct ConversationView: View {
                         Task { await refresh(); await refreshStatus() }
                     }
                     Button(agent.paused ? "Resume Agent" : "Pause Agent", systemImage: agent.paused ? "play" : "pause") {
-                        Task { await perform { try await api.pause(agent.id, paused: !agent.paused) } }
-                    }.disabled(!networkActive || mutating)
+                        lifecycle(.pauseAgent(agent.id, !agent.paused))
+                    }.disabled(!networkActive || !controlsReady || mutating)
+                    Button(agent.closed == true ? "Reopen Agent" : "Close Agent…", systemImage: agent.closed == true ? "arrow.uturn.backward" : "archivebox") {
+                        lifecycle(.close(agent.id, agent.closed != true))
+                    }.disabled(!networkActive || !controlsReady || mutating)
+                    Button("Start Fresh Context…", systemImage: "arrow.counterclockwise", role: .destructive) {
+                        lifecycle(.freshContext(agent.id))
+                    }.disabled(!networkActive || !controlsReady || mutating || !agent.canStartFreshContext)
                     Button("Interrupt…", systemImage: "stop.circle", role: .destructive) { showInterrupt = true }
                         .disabled(!networkActive || mutating)
                 }
@@ -390,8 +489,8 @@ private struct ConversationView: View {
             }
         }
         .task(id: eventHint) { await refresh() }
-        .onChange(of: routeID) { pageRequest = nil }
-        .onChange(of: networkActive) { if !networkActive { pageRequest = nil } }
+        .onChange(of: routeID) { pageRequest = nil; showInterrupt = false }
+        .onChange(of: networkActive) { if !networkActive { pageRequest = nil; showInterrupt = false } }
     }
 
     @ViewBuilder private var pagingControls: some View {

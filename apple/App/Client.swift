@@ -80,7 +80,7 @@ enum ClientError: LocalizedError, Equatable {
     case origin, unauthorized, response(Int), malformed, network, tls, keychain
     case pairOffer, pairExpired, enrollmentUnavailable, deviceName, tailnetState, tailnetNotReady, image
     case pairingAlreadySaved, forgetPending, nodeCloseFailed
-    case attachment, processLog, notebookTooLarge
+    case attachment, processLog, notebookTooLarge, memoryTooLarge
 
     var errorDescription: String? {
         switch self {
@@ -92,6 +92,7 @@ enum ClientError: LocalizedError, Equatable {
         case .attachment: "This attachment is not a supported image or exceeds the preview limit."
         case .processLog: "The process log is not plain text or exceeds the display limit."
         case .notebookTooLarge: "The notebook response exceeds the 32 MiB limit."
+        case .memoryTooLarge: "Project memory and history exceed the 8 MiB display limit."
         case .enrollmentUnavailable: "Embedded Tailscale enrollment is unavailable in this build."
         case .tailnetState: "Could not access private Tailscale device state."
         case .pairingAlreadySaved: "This server is already saved. To pair again, forget it first and get a new pairing QR."
@@ -223,11 +224,16 @@ struct ServerStatus: Decodable, Sendable {
     let agents: [Agent]
     let inbox: Int?
     let openQuestions: Int?
+    let paused: Bool?
 }
 
 struct Project: Decodable, Identifiable, Sendable {
     let id: String
     let name: String
+    let bindings: [String]?
+    let worktreesByDefault: Bool?
+    let orchestratorId: String?
+    let paused: Bool?
 }
 
 struct Agent: Decodable, Identifiable, Sendable {
@@ -239,6 +245,12 @@ struct Agent: Decodable, Identifiable, Sendable {
     let closed: Bool?
     let paused: Bool
     let pausedEffective: Bool
+    let workingDirectory: String?
+    let worktree: String?
+
+    var canStartFreshContext: Bool {
+        !pausedEffective && !["paused", "running", "waiting_for_quota", "waiting_for_network", "waiting_for_slot"].contains(status)
+    }
 }
 
 struct Entry: Decodable, Identifiable, Sendable {
@@ -488,6 +500,44 @@ struct API: Sendable {
 
     func interrupt(_ agent: String) async throws {
         _ = try await call("POST", route(agent, "interrupt"))
+    }
+
+    func projectMemory(_ id: String) async throws -> ProjectMemory {
+        try requireBearer()
+        try Self.checkRouteID(id)
+        do {
+            let (data, _) = try await response("GET", "/api/projects/\(id)/memory", limit: 8 * 1024 * 1024)
+            return try decode(ProjectMemory.self, data)
+        } catch ClientError.attachment { throw ClientError.memoryTooLarge }
+    }
+
+    func createProject(_ project: ProjectCreation) async throws -> Project {
+        try requireBearer()
+        return try decode(Project.self, await call("POST", "/api/projects", body: JSONEncoder().encode(project)))
+    }
+
+    func createChat(_ name: String) async throws -> Agent {
+        struct Chat: Encodable { let name: String }
+        try requireBearer()
+        return try decode(Agent.self, await call("POST", "/api/agents", body: JSONEncoder().encode(Chat(name: name))))
+    }
+
+    func applyLifecycle(_ action: LifecycleAction) async throws {
+        struct Close: Encodable { let closed: Bool }
+        try requireBearer()
+        switch action {
+        case .pauseAll(let paused):
+            _ = try await call("POST", "/api/pause", body: JSONEncoder().encode(Pause(paused: paused)))
+        case .pauseProject(let id, let paused):
+            try Self.checkRouteID(id)
+            _ = try await call("POST", "/api/projects/\(id)/pause", body: JSONEncoder().encode(Pause(paused: paused)))
+        case .pauseAgent(let id, let paused):
+            try await pause(id, paused: paused)
+        case .close(let id, let closed):
+            _ = try await call("POST", route(id, "close"), body: JSONEncoder().encode(Close(closed: closed)))
+        case .freshContext(let id):
+            _ = try await call("POST", route(id, "start-fresh-context"))
+        }
     }
 
     private func route(_ agent: String, _ action: String) throws -> String {

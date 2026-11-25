@@ -12,6 +12,7 @@
 		128763D247C303D05E3A32BA /* TailnetTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33414BAA3A0D9F1A66305699 /* TailnetTransport.swift */; };
 		2260B0B328F51E58556275E6 /* LiveEvents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7309633EE2E13A8F89FB924A /* LiveEvents.swift */; };
 		23A905C67BC47A823017DA6C /* Client.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13EA62427E8B256347FC0858 /* Client.swift */; };
+		2F504A81DC2FDFF7E088AEA8 /* ProjectWorkspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = 710EAFECDF40B85F91489538 /* ProjectWorkspace.swift */; };
 		47F95AF728200D8996673317 /* QR.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB79A7B841A9E892C17E98A7 /* QR.swift */; };
 		480D9F1EE4B0159774C13F1E /* ClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E70246C11BAE9986E883FFA /* ClientTests.swift */; };
 		4840A29B12CC0D8540F1CA87 /* Operations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39B4F8B9ABCF38ED1999593C /* Operations.swift */; };
@@ -37,6 +38,7 @@
 		DCC1E2EA2D51545F3615A95E /* RichTranscript.swift in Sources */ = {isa = PBXBuildFile; fileRef = 504195C01908429552CF5CD0 /* RichTranscript.swift */; };
 		F210C421087F3C1FE5B7C0BB /* Pairing.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5610B571F9AB02248FE2F42 /* Pairing.swift */; };
 		F22070ABEBD1DC30FD6873CF /* Inbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26B0506E9E29AC99DFA612AE /* Inbox.swift */; };
+		F9EC220C55A866FB4A16D094 /* ProjectWorkspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = 710EAFECDF40B85F91489538 /* ProjectWorkspace.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -66,6 +68,7 @@
 		39B4F8B9ABCF38ED1999593C /* Operations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Operations.swift; sourceTree = "<group>"; };
 		504195C01908429552CF5CD0 /* RichTranscript.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RichTranscript.swift; sourceTree = "<group>"; };
 		52B596FD73CE03FE5810A97B /* Messages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Messages.swift; sourceTree = "<group>"; };
+		710EAFECDF40B85F91489538 /* ProjectWorkspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectWorkspace.swift; sourceTree = "<group>"; };
 		7309633EE2E13A8F89FB924A /* LiveEvents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveEvents.swift; sourceTree = "<group>"; };
 		7436B48633AF38F0900290F1 /* MartenTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MartenTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		7E70246C11BAE9986E883FFA /* ClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientTests.swift; sourceTree = "<group>"; };
@@ -110,6 +113,7 @@
 				1FD59F4AC4F947B3F9984D71 /* Notebook.swift */,
 				39B4F8B9ABCF38ED1999593C /* Operations.swift */,
 				C5610B571F9AB02248FE2F42 /* Pairing.swift */,
+				710EAFECDF40B85F91489538 /* ProjectWorkspace.swift */,
 				AB79A7B841A9E892C17E98A7 /* QR.swift */,
 				504195C01908429552CF5CD0 /* RichTranscript.swift */,
 				33414BAA3A0D9F1A66305699 /* TailnetTransport.swift */,
@@ -254,6 +258,7 @@
 				535526E45D48C8AF3A4E4BE8 /* Notebook.swift in Sources */,
 				4840A29B12CC0D8540F1CA87 /* Operations.swift in Sources */,
 				B2D11A5E574174A955EB7A2C /* Pairing.swift in Sources */,
+				F9EC220C55A866FB4A16D094 /* ProjectWorkspace.swift in Sources */,
 				C126AB3F7D6FC3F8C4159EF7 /* QR.swift in Sources */,
 				DCC1E2EA2D51545F3615A95E /* RichTranscript.swift in Sources */,
 				BCFDA48C0F9A61E70A4CDFBA /* TailnetTransport.swift in Sources */,
@@ -283,6 +288,7 @@
 				996D45C0A3EF134A28D2E99E /* Notebook.swift in Sources */,
 				A40C0E19F2A5703B53062ECF /* Operations.swift in Sources */,
 				F210C421087F3C1FE5B7C0BB /* Pairing.swift in Sources */,
+				2F504A81DC2FDFF7E088AEA8 /* ProjectWorkspace.swift in Sources */,
 				47F95AF728200D8996673317 /* QR.swift in Sources */,
 				9CA6F859AB2A9024A2BEB3B9 /* RichTranscript.swift in Sources */,
 				128763D247C303D05E3A32BA /* TailnetTransport.swift in Sources */,
