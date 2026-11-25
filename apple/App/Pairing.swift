@@ -98,6 +98,13 @@ protocol EmbeddedEnrollment: Sendable {
     func discardEnrollment(for endpoint: Endpoint) async
 }
 
+protocol ManagedEnrollment: EmbeddedEnrollment {
+    func commitEnrollment(for endpoint: Endpoint) async throws
+    func connectedTransport(for endpoint: Endpoint) async throws -> any Transport
+    /// Returns a replacement only when the current proxy was confirmed stale.
+    func recoverOnForeground(for endpoint: Endpoint) async throws -> (any Transport)?
+}
+
 struct PairingHandshake: Sendable {
     let directTransport: any Transport
     let embedded: (any EmbeddedEnrollment)?
@@ -132,9 +139,9 @@ struct PairingHandshake: Sendable {
 
     private static func deviceName(_ raw: String) throws -> String {
         let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        let forbiddenBidi: Set<UInt32> = [0x061C, 0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066, 0x2067, 0x2068, 0x2069]
+        let forbidden: Set<Unicode.GeneralCategory> = [.control, .format, .lineSeparator, .paragraphSeparator]
         guard (1...80).contains(name.utf16.count),
-              !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) || forbiddenBidi.contains($0.value) }) else {
+              !name.unicodeScalars.contains(where: { forbidden.contains($0.properties.generalCategory) }) else {
             throw ClientError.deviceName
         }
         return name

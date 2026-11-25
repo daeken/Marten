@@ -1,3 +1,5 @@
+import CoreImage
+import CoreImage.CIFilterBuiltins
 import Foundation
 import XCTest
 @testable import Marten
@@ -172,10 +174,216 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
         let ordinary = StubTransport([])
         let connections = Connections(transport: ordinary, keychain: vault, defaults: defaults)
         XCTAssertNil(connections.connected)
-        connections.connect(endpoint)
+        XCTAssertFalse(connections.pairingEnabled)
+        connections.scan(Self.fixture())
+        XCTAssertNil(connections.pendingOffer)
+        await connections.confirmOffer(deviceName: "Phone")
+        await connections.foreground()
+        await connections.select(endpoint)
         XCTAssertNil(connections.connected)
         let requests = await ordinary.requests
         XCTAssertTrue(requests.isEmpty)
+    }
+
+    @MainActor func testFixtureConfirmationAndReconnectKeepSecretsOnThePinnedRoute() async throws {
+        let domain = "NativeMartenTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
+        let vault = CredentialStore(service: domain)
+        let endpoint = try Endpoint(Self.fixtureOrigin)
+        defer {
+            defaults.removePersistentDomain(forName: domain)
+            try? vault.remove(endpoint)
+        }
+        let direct = StubTransport([])
+        let first = FixtureEventTransport([.init(200, #"{"token":"fixture-operator"}"#)])
+        let second = FixtureEventTransport([.init(200, #"{"projects":[],"agents":[]}"#)])
+        let manager = ManagedFixture(first: first, replacement: second)
+        let connections = Connections(transport: direct, keychain: vault, defaults: defaults, enrollment: manager,
+                                      clock: { .distantPast })
+        XCTAssertTrue(connections.pairingEnabled)
+        connections.scan(Self.fixture())
+        XCTAssertEqual(connections.pendingOffer?.endpoint, endpoint)
+        XCTAssertNil(connections.connected)
+        connections.cancelOffer()
+        await connections.confirmOffer(deviceName: "Phone")
+        let afterCancel = await manager.calls
+        XCTAssertEqual(afterCancel, [])
+
+        connections.scan(Self.fixture())
+        await connections.confirmOffer(deviceName: "  Phone  ")
+        await connections.confirmOffer(deviceName: "Phone")
+        XCTAssertNil(connections.pendingOffer)
+        XCTAssertEqual(connections.endpoints, [endpoint])
+        XCTAssertEqual(try vault.token(for: endpoint), "fixture-operator")
+        let saved = try XCTUnwrap(defaults.persistentDomain(forName: domain))
+        XCTAssertEqual(saved.count, 2)
+        XCTAssertEqual(saved["endpoints"] as? [String], [endpoint.origin])
+        XCTAssertEqual(saved["activeEndpoint"] as? String, endpoint.origin)
+        let original = try XCTUnwrap(connections.connected)
+        let stream = try XCTUnwrap(original.events())
+        stream.cancel()
+        let directAPI = API(endpoint: endpoint, token: "fixture-operator", transport: first)
+        XCTAssertNil(try directAPI.events())
+
+        let workspace = connections.workspaceID
+        let generation = connections.transportGeneration
+        await connections.foreground()
+        XCTAssertEqual(connections.workspaceID, workspace)
+        XCTAssertEqual(connections.transportGeneration, generation)
+        await manager.replaceOnNextProbe()
+        await connections.foreground()
+        XCTAssertEqual(connections.workspaceID, workspace)
+        XCTAssertNotEqual(connections.transportGeneration, generation)
+        let replacement = try XCTUnwrap(connections.connected)
+        try replacement.events()?.cancel()
+        _ = try await replacement.status()
+
+        let relaunched = Connections(transport: direct, keychain: vault, defaults: defaults, enrollment: manager)
+        XCTAssertNil(relaunched.connected)
+        await relaunched.foreground()
+        XCTAssertEqual(relaunched.connected?.token, "fixture-operator")
+        let calls = await manager.calls
+        XCTAssertEqual(calls, ["enroll", "commit", "probe", "probe", "reopen"])
+        let firstRequests = await first.http.requests
+        XCTAssertEqual(firstRequests.map(\.httpMethod), ["POST"])
+        let redeem = try XCTUnwrap(firstRequests.first)
+        XCTAssertEqual(redeem.url?.absoluteString, endpoint.origin + "/api/pair/redeem")
+        XCTAssertNil(redeem.value(forHTTPHeaderField: "Authorization"))
+        XCTAssertEqual(try Self.body(redeem), ["code": Self.offerCode, "deviceName": "Phone"])
+        let secondRequests = await second.http.requests
+        XCTAssertEqual(secondRequests.map(\.httpMethod), ["GET"])
+        XCTAssertEqual(secondRequests.first?.value(forHTTPHeaderField: "Authorization"), "Bearer fixture-operator")
+        for capture in [first.eventRequests, second.eventRequests] {
+            XCTAssertEqual(capture.count, 1)
+            XCTAssertEqual(capture.first?.url?.absoluteString, "wss://test-node.tail-test1.ts.net/api/events")
+            XCTAssertEqual(capture.first?.value(forHTTPHeaderField: "Authorization"), "Bearer fixture-operator")
+        }
+        let directRequests = await direct.requests
+        XCTAssertTrue(directRequests.isEmpty)
+    }
+
+    @MainActor func testFailedConfirmationConsumesOfferWithoutFallback() async throws {
+        let domain = "NativeMartenTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
+        defer { defaults.removePersistentDomain(forName: domain) }
+        let direct = StubTransport([])
+        let proxy = StubTransport([.init(400)])
+        let manager = ManagedFixture(first: proxy, replacement: proxy)
+        let clock = FixtureClock()
+        let connections = Connections(transport: direct, keychain: CredentialStore(service: domain), defaults: defaults,
+                                      enrollment: manager, clock: clock.read)
+        for name in ["Phone\u{200B}Name", "Phone\u{2028}Name", String(repeating: "😀", count: 41)] {
+            connections.scan(Self.fixture())
+            await connections.confirmOffer(deviceName: name)
+            XCTAssertNil(connections.pendingOffer)
+            XCTAssertEqual(connections.error, ClientError.deviceName.errorDescription)
+        }
+        connections.scan(Self.fixture())
+        clock.expire(true)
+        await connections.confirmOffer(deviceName: "Phone")
+        XCTAssertEqual(connections.error, ClientError.pairExpired.errorDescription)
+        XCTAssertNil(connections.pendingOffer)
+        let earlyCalls = await manager.calls
+        XCTAssertEqual(earlyCalls, [])
+        clock.expire(false)
+        connections.scan(Self.fixture())
+        await connections.confirmOffer(deviceName: "Phone")
+        await connections.confirmOffer(deviceName: "Phone")
+        XCTAssertNil(connections.pendingOffer)
+        XCTAssertNil(connections.connected)
+        XCTAssertTrue(connections.endpoints.isEmpty)
+        let calls = await manager.calls
+        XCTAssertEqual(calls, ["enroll", "discard"])
+        let sent = await proxy.requests
+        XCTAssertEqual(sent.count, 1)
+        let directRequests = await direct.requests
+        XCTAssertTrue(directRequests.isEmpty)
+    }
+
+    func testWSSRejectsOtherAuthoritiesBrowserTokensAndUnpinnedRoute() throws {
+        let endpoint = try Endpoint(Self.fixtureOrigin)
+        let stub = FixtureEventTransport([])
+        let transport = try TailnetTransport(endpoint: endpoint, transport: stub)
+        let url = "wss://test-node.tail-test1.ts.net/api/events"
+        for rejected in [url + "?token=fixture-operator", url + "?", url + "#fragment", url + "/",
+                         url.replacingOccurrences(of: ".ts.net", with: ".ts.net:443"),
+                         url.replacingOccurrences(of: "test-node", with: "other"),
+                         url.replacingOccurrences(of: "wss:", with: "ws:")] {
+            var request = URLRequest(url: try XCTUnwrap(URL(string: rejected)))
+            request.setValue("Bearer fixture-operator", forHTTPHeaderField: "Authorization")
+            XCTAssertThrowsError(try transport.events(for: request)) { XCTAssertEqual($0 as? ClientError, .origin) }
+        }
+        var request = URLRequest(url: try XCTUnwrap(URL(string: url)))
+        XCTAssertThrowsError(try transport.events(for: request)) { XCTAssertEqual($0 as? ClientError, .unauthorized) }
+        request.setValue("other.tail-test1.ts.net", forHTTPHeaderField: "Host")
+        XCTAssertThrowsError(try transport.events(for: request)) { XCTAssertEqual($0 as? ClientError, .origin) }
+        XCTAssertTrue(stub.eventRequests.isEmpty)
+    }
+
+    private actor ManagedFixture: ManagedEnrollment {
+        let first: any Transport
+        let replacement: any Transport
+        var calls: [String] = []
+        private var stale = false
+        private var replaced = false
+
+        init(first: any Transport, replacement: any Transport) { self.first = first; self.replacement = replacement }
+        func enroll(authKey: String, endpoint: Endpoint, deadline: Date) async throws -> any Transport {
+            guard authKey == ClientTests.fixtureKey else { throw ClientError.pairOffer }
+            calls.append("enroll")
+            return try TailnetTransport(endpoint: endpoint, transport: first)
+        }
+        func discardEnrollment(for endpoint: Endpoint) async { calls.append("discard") }
+        func commitEnrollment(for endpoint: Endpoint) async throws { calls.append("commit") }
+        func connectedTransport(for endpoint: Endpoint) async throws -> any Transport {
+            calls.append("reopen")
+            return try TailnetTransport(endpoint: endpoint, transport: replaced ? replacement : first)
+        }
+        func replaceOnNextProbe() { stale = true }
+        func recoverOnForeground(for endpoint: Endpoint) async throws -> (any Transport)? {
+            calls.append("probe")
+            guard stale else { return nil }
+            stale = false
+            replaced = true
+            return try TailnetTransport(endpoint: endpoint, transport: replacement)
+        }
+    }
+
+    private final class FixtureEventTransport: EventTransport, @unchecked Sendable {
+        let http: StubTransport
+        private let lock = NSLock()
+        private var captured: [URLRequest] = []
+        var eventRequests: [URLRequest] { lock.withLock { captured } }
+        init(_ replies: [StubTransport.Reply]) { http = StubTransport(replies) }
+        func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) { try await http.data(for: request) }
+        func events(for request: URLRequest) throws -> EventStream {
+            lock.withLock { captured.append(request) }
+            return EventStream(hints: AsyncThrowingStream { $0.finish() }, cancel: {})
+        }
+    }
+
+    private final class FixtureClock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var expired = false
+        func expire(_ value: Bool) { lock.withLock { expired = value } }
+        func read() -> Date { lock.withLock { expired ? .distantFuture : .distantPast } }
+    }
+
+    func testImportsSyntheticV2QRImageWithoutExternalURL() throws {
+        let filter = CIFilter.qrCodeGenerator()
+        filter.message = Data(Self.fixture().utf8)
+        let code = try XCTUnwrap(filter.outputImage).transformed(by: CGAffineTransform(scaleX: 8, y: 8))
+        let image = code.composited(over: CIImage(color: .white))
+            .cropped(to: code.extent.insetBy(dx: -32, dy: -32))
+        let bytes = try XCTUnwrap(CIContext().pngRepresentation(of: image, format: .RGBA8,
+                                                                 colorSpace: CGColorSpaceCreateDeviceRGB()))
+        let url = FileManager.default.temporaryDirectory.appending(path: "\(UUID()).png")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try bytes.write(to: url)
+        let imported = try QRImage.read(url)
+        XCTAssertTrue(imported == Self.fixture(), "Unexpected pairing QR payload")
+        let offer = try PairOffer(imported, mode: .embedded, now: .distantPast)
+        XCTAssertEqual(offer.endpoint.origin, Self.fixtureOrigin)
     }
 
     func testAppHasNoExternalURLSchemeRegistration() {

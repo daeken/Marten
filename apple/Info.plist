@@ -12,6 +12,7 @@
     <dict>
         <key>NSAllowsLocalNetworking</key><true/>
     </dict>
+    <key>NSCameraUsageDescription</key><string>Scan a Marten pairing QR inside the app.</string>
     <key>UILaunchScreen</key><dict/>
     <key>UISupportedInterfaceOrientations</key>
     <array>

@@ -3,11 +3,13 @@ import SwiftUI
 struct WorkspaceView: View {
     let api: API
     let showServers: () -> Void
-    @Environment(\.scenePhase) private var phase
+    let routeID: UUID
+    let networkActive: Bool
     @State private var status: ServerStatus?
     @State private var statusError: String?
     @State private var checking = false
     @State private var scope: AgentScope = .all
+    @State private var eventHint = UUID()
 
     private var agents: [Agent] {
         (status?.agents ?? []).filter { agent in
@@ -64,23 +66,54 @@ struct WorkspaceView: View {
             .refreshable { await refresh() }
             .navigationDestination(for: String.self) { id in
                 if let agent = status?.agents.first(where: { $0.id == id }), agent.closed != true {
-                    ConversationView(api: api, agent: agent, refreshStatus: refresh).id(id)
+                    ConversationView(api: api, agent: agent, refreshStatus: refresh, routeID: routeID,
+                                     networkActive: networkActive, eventHint: eventHint).id(id)
                 } else {
                     ContentUnavailableView("Agent Unavailable", systemImage: "bubble.left")
                 }
             }
         }
-        .task(id: phase) {
-            guard phase == .active else { return }
+        .task(id: RefreshRoute(id: routeID, active: networkActive)) {
+            guard networkActive else { return }
             while !Task.isCancelled {
                 await refresh()
                 try? await Task.sleep(for: .seconds(8))
             }
         }
+        .task(id: RefreshRoute(id: routeID, active: networkActive)) {
+            guard networkActive else { return }
+            await listenForEvents()
+        }
+    }
+
+    @MainActor private func listenForEvents() async {
+        var delay = 1
+        let clock = ContinuousClock()
+        while !Task.isCancelled {
+            let start = clock.now
+            do {
+                guard let stream = try api.events() else { return }
+                defer { stream.cancel() }
+                try await withTaskCancellationHandler {
+                    for try await _ in stream.hints {
+                        try Task.checkCancellation()
+                        eventHint = UUID()
+                        await refresh()
+                        try await Task.sleep(for: .seconds(1))
+                    }
+                } onCancel: { stream.cancel() }
+            } catch {
+                // Polling remains on the same route; only the socket is retried.
+            }
+            if clock.now - start >= .seconds(30) { delay = 1 }
+            do { try await Task.sleep(for: .seconds(delay)) }
+            catch { return }
+            delay = min(delay * 2, 16)
+        }
     }
 
     @MainActor private func refresh() async {
-        guard !checking else { return }
+        guard networkActive, !Task.isCancelled, !checking else { return }
         checking = true
         defer { checking = false }
         do {
@@ -94,6 +127,11 @@ struct WorkspaceView: View {
             statusError = safeMessage(error)
         }
     }
+}
+
+private struct RefreshRoute: Equatable {
+    let id: UUID
+    let active: Bool
 }
 
 private enum AgentScope: Hashable {
@@ -147,7 +185,9 @@ private struct ConversationView: View {
     let api: API
     let agent: Agent
     let refreshStatus: () async -> Void
-    @Environment(\.scenePhase) private var phase
+    let routeID: UUID
+    let networkActive: Bool
+    let eventHint: UUID
     @State private var transcript = TranscriptBuffer()
     @State private var loaded = false
     @State private var checking = false
@@ -213,9 +253,9 @@ private struct ConversationView: View {
                     }
                     Button(agent.paused ? "Resume Agent" : "Pause Agent", systemImage: agent.paused ? "play" : "pause") {
                         Task { await perform { try await api.pause(agent.id, paused: !agent.paused) } }
-                    }.disabled(mutating)
+                    }.disabled(!networkActive || mutating)
                     Button("Interrupt…", systemImage: "stop.circle", role: .destructive) { showInterrupt = true }
-                        .disabled(mutating)
+                        .disabled(!networkActive || mutating)
                 }
             }
         }
@@ -224,13 +264,14 @@ private struct ConversationView: View {
                 Task { await perform { try await api.interrupt(agent.id) } }
             }
         }
-        .task(id: phase) {
-            guard phase == .active else { return }
+        .task(id: RefreshRoute(id: routeID, active: networkActive)) {
+            guard networkActive else { return }
             while !Task.isCancelled {
                 await refresh()
                 try? await Task.sleep(for: .seconds(4))
             }
         }
+        .task(id: eventHint) { await refresh() }
     }
 
     private var composer: some View {
@@ -257,7 +298,7 @@ private struct ConversationView: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(Color.accentColor)
                 .accessibilityLabel("Send Message")
-                .disabled(mutating || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(!networkActive || mutating || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             HStack {
                 Menu {
@@ -292,7 +333,7 @@ private struct ConversationView: View {
     }
 
     @MainActor private func refresh() async {
-        guard !checking, !loadingOlder else { return }
+        guard networkActive, !Task.isCancelled, !checking, !loadingOlder else { return }
         checking = true
         defer { checking = false }
         do {
@@ -310,7 +351,7 @@ private struct ConversationView: View {
     }
 
     @MainActor private func older() async {
-        guard !checking, !loadingOlder, let cursor = transcript.entries.first?.seq else { return }
+        guard networkActive, !Task.isCancelled, !checking, !loadingOlder, let cursor = transcript.entries.first?.seq else { return }
         loadingOlder = true
         defer { loadingOlder = false }
         do {
@@ -326,7 +367,7 @@ private struct ConversationView: View {
     }
 
     @MainActor private func perform(_ work: () async throws -> Void) async {
-        guard !mutating else { return }
+        guard networkActive, !mutating else { return }
         mutating = true
         actionError = nil
         defer { mutating = false }

@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 @main
 struct MartenApp: App {
@@ -19,15 +20,31 @@ struct MartenApp: App {
 
 struct RootView: View {
     @Bindable var connections: Connections
+    @Environment(\.scenePhase) private var phase
+    @State private var foregroundReady = false
 
     var body: some View {
         Group {
             if let api = connections.connected {
-                WorkspaceView(api: api) { connections.showServers = true }
+                WorkspaceView(api: api, showServers: { connections.showServers = true },
+                              routeID: connections.transportGeneration,
+                              networkActive: phase == .active && foregroundReady && !connections.busy && connections.routeUsable)
                     .id(connections.workspaceID)
             } else {
                 ServerScreen(connections: connections)
             }
+        }
+        .onChange(of: phase) { if phase != .active { foregroundReady = false } }
+        .task(id: phase) {
+            guard phase == .active else { return }
+            // A cancelled recovery may still be closing the old node.
+            while connections.busy {
+                do { try await Task.sleep(for: .milliseconds(100)) }
+                catch { return }
+            }
+            guard !Task.isCancelled else { return }
+            await connections.foreground()
+            if !Task.isCancelled { foregroundReady = true }
         }
         .sheet(isPresented: $connections.showServers) {
             ServerScreen(connections: connections)
@@ -40,6 +57,12 @@ struct RootView: View {
 
 struct ServerScreen: View {
     @Bindable var connections: Connections
+    @Environment(\.scenePhase) private var phase
+    @State private var pickQR = false
+    @State private var deviceName = "Marten Device"
+    #if os(iOS)
+    @State private var scanQR = false
+    #endif
     @State private var forget: Endpoint?
     #if DEBUG
     @State private var showDev = false
@@ -55,19 +78,36 @@ struct ServerScreen: View {
                     }
                 }
                 Section("Pair a Server") {
-                    Label("New device pairing is not available in this build.", systemImage: "qrcode")
+                    if !connections.pairingEnabled {
+                        Label("New device pairing is not available in this build.", systemImage: "qrcode")
+                    } else if let offer = connections.pendingOffer {
+                        Text(offer.endpoint.origin).font(.headline)
+                        Text("Confirm that this is your server before enrolling this device in Tailscale.")
+                        TextField("Device Name", text: $deviceName)
+                        Button("Confirm Pairing") {
+                            let name = deviceName
+                            Task { await connections.confirmOffer(deviceName: name) }
+                        }
+                        Button("Cancel", role: .cancel) { connections.cancelOffer() }
+                    } else {
+                        #if os(iOS)
+                        Button("Scan Pairing QR…", systemImage: "qrcode.viewfinder") { scanQR = true }
+                            .disabled(!QRScanner.available)
+                        #endif
+                        Button("Import QR Image…", systemImage: "photo") { pickQR = true }
+                    }
                 }
                 if !connections.endpoints.isEmpty {
                     Section("Saved Servers") {
                         ForEach(connections.endpoints, id: \.self) { endpoint in
                             HStack {
                                 Button {
-                                    connections.connect(endpoint)
+                                    Task { await connections.select(endpoint) }
                                 } label: {
                                     HStack {
                                         Text(endpoint.origin).lineLimit(2)
                                         Spacer()
-                                        if connections.connected?.endpoint == endpoint {
+                                        if connections.connected?.endpoint == endpoint && connections.routeUsable {
                                             Image(systemName: "checkmark").accessibilityLabel("Connected")
                                         }
                                     }
@@ -112,6 +152,36 @@ struct ServerScreen: View {
             }
         }
         .interactiveDismissDisabled(connections.busy)
+        .onDisappear { connections.cancelOffer() }
+        .onChange(of: phase) {
+            if phase == .background {
+                connections.cancelOffer()
+                pickQR = false
+                #if os(iOS)
+                scanQR = false
+                #endif
+            }
+        }
+        .onChange(of: connections.pendingOffer != nil) {
+            if connections.pendingOffer == nil { deviceName = "Marten Device" }
+        }
+        .fileImporter(isPresented: $pickQR, allowedContentTypes: [.image]) { result in
+            guard phase != .background, connections.pairingEnabled else { return }
+            do { connections.scan(try QRImage.read(result.get())) }
+            catch { connections.show(ClientError.image) }
+        }
+        #if os(iOS)
+        .sheet(isPresented: $scanQR) {
+            ScannerScreen { result in
+                guard scanQR, phase != .background else { return }
+                scanQR = false
+                switch result {
+                case .success(let payload): connections.scan(payload)
+                case .failure: connections.show(ClientError.image)
+                }
+            }
+        }
+        #endif
         #if DEBUG
         .sheet(isPresented: $showDev) {
             LoopbackForm(connections: connections)

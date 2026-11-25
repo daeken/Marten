@@ -78,7 +78,7 @@ struct Endpoint: Hashable, Sendable {
 
 enum ClientError: LocalizedError, Equatable {
     case origin, unauthorized, response(Int), malformed, network, tls, keychain
-    case pairOffer, pairExpired, enrollmentUnavailable, deviceName, tailnetState, tailnetNotReady
+    case pairOffer, pairExpired, enrollmentUnavailable, deviceName, tailnetState, tailnetNotReady, image
 
     var errorDescription: String? {
         switch self {
@@ -86,6 +86,7 @@ enum ClientError: LocalizedError, Equatable {
         case .unauthorized: "The server rejected the Marten credential."
         case .pairOffer: "This is not a supported pairing QR for the selected connection mode."
         case .pairExpired: "This pairing QR has expired. Get a new one from the server."
+        case .image: "Could not read one pairing QR. Try scanning again or importing a different image."
         case .enrollmentUnavailable: "Embedded Tailscale enrollment is unavailable in this build."
         case .tailnetState: "Could not access private Tailscale device state."
         case .tailnetNotReady: "The embedded Tailscale connection is not ready."
@@ -103,7 +104,16 @@ protocol Transport: Sendable {
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse)
 }
 
-struct URLSessionTransport: Transport {
+struct EventStream: Sendable {
+    let hints: AsyncThrowingStream<Void, any Error>
+    let cancel: @Sendable () -> Void
+}
+
+protocol EventTransport: Transport {
+    func events(for request: URLRequest) throws -> EventStream
+}
+
+struct URLSessionTransport: EventTransport {
     private let session: URLSession
 
     init(configuration config: URLSessionConfiguration = .ephemeral) {
@@ -113,6 +123,29 @@ struct URLSessionTransport: Transport {
         config.timeoutIntervalForRequest = 15
         config.timeoutIntervalForResource = 30
         self.session = URLSession(configuration: config, delegate: NoRedirects(), delegateQueue: nil)
+    }
+
+    func events(for request: URLRequest) throws -> EventStream {
+        let socket = session.webSocketTask(with: request)
+        socket.maximumMessageSize = 1_048_576
+        let (hints, continuation) = AsyncThrowingStream<Void, any Error>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let reader = Task {
+            socket.resume()
+            defer { socket.cancel(with: .goingAway, reason: nil) }
+            do {
+                while !Task.isCancelled {
+                    _ = try await socket.receive()
+                    continuation.yield(()) // Events are invalidation hints, never action replays.
+                }
+                continuation.finish()
+            } catch { continuation.finish(throwing: ClientError.network) }
+        }
+        let cancel: @Sendable () -> Void = {
+            reader.cancel()
+            socket.cancel(with: .goingAway, reason: nil)
+        }
+        continuation.onTermination = { @Sendable _ in cancel() }
+        return EventStream(hints: hints, cancel: cancel)
     }
 
     func invalidate() { session.invalidateAndCancel() }
@@ -194,6 +227,17 @@ struct API: Sendable {
         let credential = try await bootstrap.decode(Credential.self, bootstrap.call("POST", "/api/pair/redeem", body: body))
         guard Self.validToken(credential.token) else { throw ClientError.malformed }
         return API(endpoint: endpoint, token: credential.token, transport: transport)
+    }
+
+    func events() throws -> EventStream? {
+        guard let transport = transport as? TailnetTransport, let token, Self.validToken(token),
+              var url = URLComponents(url: endpoint.url, resolvingAgainstBaseURL: false), url.scheme == "https" else { return nil }
+        url.scheme = "wss"
+        url.path = "/api/events"
+        guard let resource = url.url else { throw ClientError.origin }
+        var request = URLRequest(url: resource)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        return try transport.events(for: request)
     }
 
     func status() async throws -> ServerStatus {

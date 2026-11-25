@@ -57,6 +57,12 @@ final class Connections {
     private let transport: any Transport
     private let keychain: CredentialStore
     private let defaults: UserDefaults
+    private let enrollment: (any ManagedEnrollment)?
+    private let clock: @Sendable () -> Date
+    private(set) var pendingOffer: PairOffer?
+    var pairingEnabled: Bool { enrollment != nil }
+    private(set) var transportGeneration = UUID()
+    private(set) var routeUsable = true
     private(set) var endpoints: [Endpoint]
     private(set) var connected: API?
     // A new workspace identity clears old server state, drafts and in-flight refreshes.
@@ -66,13 +72,16 @@ final class Connections {
     var showServers = false
 
     init(transport: any Transport = URLSessionTransport(), keychain: CredentialStore = CredentialStore(),
-         defaults: UserDefaults = .standard) {
+         defaults: UserDefaults = .standard, enrollment: (any ManagedEnrollment)? = nil,
+         clock: @escaping @Sendable () -> Date = { .now }) {
+        self.enrollment = enrollment
+        self.clock = clock
         self.transport = transport
         self.keychain = keychain
         self.defaults = defaults
         endpoints = (defaults.stringArray(forKey: "endpoints") ?? []).compactMap(Endpoint.saved)
         if let last = defaults.string(forKey: "activeEndpoint"), let endpoint = Endpoint.saved(last), endpoints.contains(endpoint) {
-            connect(endpoint)
+            if (try? Endpoint(endpoint.origin)) == nil { connect(endpoint) }
         }
     }
 
@@ -103,13 +112,100 @@ final class Connections {
         show(ClientError.enrollmentUnavailable)
     }
 
+    // A scan is local and transient; only the confirmation button starts work.
+    func scan(_ payload: String) {
+        guard pairingEnabled, !busy, pendingOffer == nil else { return }
+        do { pendingOffer = try PairOffer(payload, mode: .embedded, now: clock()) }
+        catch { show(error) }
+    }
+
+    func cancelOffer() { pendingOffer = nil }
+
+    func confirmOffer(deviceName: String) async {
+        guard !busy, let enrollment, let offer = pendingOffer else { return }
+        let endpoint = offer.endpoint
+        pendingOffer = nil // Never retry or retain a consumed offer.
+        busy = true
+        error = nil
+        defer { busy = false }
+        do {
+            // Do not overwrite a possibly working node/bearer on a new scan.
+            guard !endpoints.contains(endpoint) else { throw ClientError.tailnetState }
+            let paired = try await PairingHandshake(directTransport: transport, embedded: enrollment)
+                .confirm(offer, deviceName: deviceName, clock: clock)
+            guard let bearer = paired.token else { throw ClientError.malformed }
+            do {
+                try keychain.save(bearer, for: endpoint)
+                try await enrollment.commitEnrollment(for: endpoint)
+            } catch {
+                try? keychain.remove(endpoint)
+                await enrollment.discardEnrollment(for: endpoint)
+                throw error
+            }
+            endpoints.append(endpoint)
+            persistEndpoints()
+            activate(paired)
+        } catch { show(error) }
+    }
+
+    func select(_ endpoint: Endpoint) async {
+        guard !busy, endpoints.contains(endpoint) else { return }
+        guard let enrollment, (try? Endpoint(endpoint.origin)) == endpoint else { connect(endpoint); return }
+        if connected?.endpoint == endpoint {
+            await foreground()
+            if routeUsable { showServers = false }
+            return
+        }
+        busy = true
+        defer { busy = false }
+        do {
+            let token = try keychain.token(for: endpoint)
+            let route = try await enrollment.connectedTransport(for: endpoint)
+            try Task.checkCancellation()
+            activate(API(endpoint: endpoint, token: token, transport: route))
+        } catch { show(error) }
+    }
+
+    func foreground() async {
+        guard !busy, let enrollment else { return }
+        guard let api = connected else {
+            if let origin = defaults.string(forKey: "activeEndpoint"), let endpoint = Endpoint.saved(origin), endpoints.contains(endpoint) {
+                await select(endpoint)
+            }
+            return
+        }
+        guard (try? Endpoint(api.endpoint.origin)) == api.endpoint else { return }
+        busy = true
+        defer { busy = false }
+        do {
+            // If the adapter has already swapped its session, publish that
+            // session even if the scene just went back to sleep. Only active
+            // scenes consume it, and a later probe may see the new node alive.
+            if let route = try await enrollment.recoverOnForeground(for: api.endpoint) {
+                connected = API(endpoint: api.endpoint, token: api.token, transport: route)
+                transportGeneration = UUID()
+            }
+            routeUsable = true
+            if !Task.isCancelled { error = nil }
+        } catch {
+            routeUsable = false
+            if !Task.isCancelled {
+                show(error)
+                showServers = true
+            }
+        }
+    }
+
     func disconnect() {
+        guard !busy else { return }
+        cancelOffer()
         connected = nil
         workspaceID = UUID()
         defaults.removeObject(forKey: "activeEndpoint")
     }
 
     func forget(_ endpoint: Endpoint) {
+        guard !busy else { return }
         do {
             try keychain.remove(endpoint)
             if connected?.endpoint == endpoint { disconnect() }
@@ -135,8 +231,15 @@ final class Connections {
     #endif
 
     private func activate(_ endpoint: Endpoint, token: String) {
-        defaults.set(endpoint.origin, forKey: "activeEndpoint")
-        connected = API(endpoint: endpoint, token: token, transport: transport)
+        activate(API(endpoint: endpoint, token: token, transport: transport))
+    }
+
+    private func activate(_ api: API) {
+        defaults.set(api.endpoint.origin, forKey: "activeEndpoint")
+        connected = api
+        routeUsable = true
+        error = nil
+        transportGeneration = UUID()
         workspaceID = UUID()
         showServers = false
     }

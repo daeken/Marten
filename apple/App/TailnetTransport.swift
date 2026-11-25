@@ -3,7 +3,7 @@ import Foundation
 
 /// Applies an exact authority check before handing a request to the proxy,
 /// including rejecting loopback names URLSession may bypass the proxy for.
-struct TailnetTransport: Transport {
+struct TailnetTransport: EventTransport {
     private let endpoint: Endpoint
     private let transport: any Transport
 
@@ -13,12 +13,27 @@ struct TailnetTransport: Transport {
     }
 
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        try check(request, events: false)
+        return try await transport.data(for: request)
+    }
+
+    func events(for request: URLRequest) throws -> EventStream {
+        try check(request, events: true)
+        guard let header = request.value(forHTTPHeaderField: "Authorization"), header.hasPrefix("Bearer "),
+              API.validToken(String(header.dropFirst(7))) else { throw ClientError.unauthorized }
+        guard let stream = transport as? any EventTransport else { throw ClientError.tailnetNotReady }
+        return try stream.events(for: request)
+    }
+
+    private func check(_ request: URLRequest, events: Bool) throws {
         guard let url = request.url, var parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              parts.fragment == nil, request.value(forHTTPHeaderField: "Host") == nil else { throw ClientError.origin }
+              parts.fragment == nil, request.value(forHTTPHeaderField: "Host") == nil,
+              parts.scheme == (events ? "wss" : "https") else { throw ClientError.origin }
+        if events && (parts.percentEncodedPath != "/api/events" || parts.query != nil) { throw ClientError.origin }
+        parts.scheme = "https"
         parts.percentEncodedPath = ""
         parts.percentEncodedQuery = nil
         guard parts.string == endpoint.origin else { throw ClientError.origin }
-        return try await transport.data(for: request)
     }
 }
 
@@ -73,11 +88,13 @@ import TailscaleKit
 /// Owns one userspace node per endpoint. Callers must never wire reconnect to
 /// system URLSession. A stale-proxy report invalidates the session and reopens
 /// the same private identity with no auth key, without replaying the request.
-actor TailscaleKitEnrollment: EmbeddedEnrollment {
+actor TailscaleKitEnrollment: ManagedEnrollment {
     private struct Node {
+        let id = UUID()
         let node: TailscaleNode
         let session: URLSessionTransport
         let transport: TailnetTransport
+        let proxyPort: NWEndpoint.Port
         let directory: URL
     }
 
@@ -122,8 +139,34 @@ actor TailscaleKitEnrollment: EmbeddedEnrollment {
         try await connect(endpoint, replaceStaleProxy: false)
     }
 
-    func replaceStaleProxy(for endpoint: Endpoint) async throws -> any Transport {
-        try await connect(endpoint, replaceStaleProxy: true)
+    func recoverOnForeground(for endpoint: Endpoint) async throws -> (any Transport)? {
+        guard let cached = active[endpoint] else { return try await connectedTransport(for: endpoint) }
+        let route = NWConnection(host: "127.0.0.1", port: cached.proxyPort, using: .tcp)
+        let updates = AsyncStream<Bool?> { continuation in
+            route.stateUpdateHandler = { state in
+                switch state {
+                case .ready: continuation.yield(true)
+                case .failed(.posix(.ECONNREFUSED)), .waiting(.posix(.ECONNREFUSED)): continuation.yield(false)
+                case .failed, .cancelled: continuation.yield(nil)
+                default: break
+                }
+            }
+        }
+        route.start(queue: .global(qos: .utility))
+        defer { route.cancel() }
+        let alive = await withTaskGroup(of: Bool?.self) { group in
+            group.addTask { for await result in updates { return result }; return nil }
+            group.addTask { try? await Task.sleep(for: .seconds(2)); return nil }
+            defer { group.cancelAll() }
+            return await group.next() ?? nil
+        }
+        try Task.checkCancellation()
+        // A concurrent recovery may have superseded the listener we probed.
+        guard !inFlight.contains(endpoint) else { throw ClientError.tailnetNotReady }
+        if let current = active[endpoint], current.id != cached.id { return current.transport }
+        guard let alive else { throw ClientError.tailnetNotReady }
+        guard !alive else { return nil }
+        return try await connect(endpoint, replaceStaleProxy: true)
     }
 
     private func connect(_ endpoint: Endpoint, replaceStaleProxy: Bool) async throws -> any Transport {
@@ -171,6 +214,7 @@ actor TailscaleKitEnrollment: EmbeddedEnrollment {
                 if let data = try? await node.statusJSON(), clock.now < stop, Date.now < deadline,
                    (try? JSONDecoder().decode(Status.self, from: data).BackendState) == "Running" {
                     let proxyInfo = try await node.loopback()
+                    try Task.checkCancellation()
                     guard proxyInfo.ip == "127.0.0.1", let port = proxyInfo.port,
                           let portNumber = UInt16(exactly: port), let nwPort = NWEndpoint.Port(rawValue: portNumber),
                           portNumber != 0, !proxyInfo.proxyCredential.isEmpty else { throw ClientError.tailnetNotReady }
@@ -180,7 +224,7 @@ actor TailscaleKitEnrollment: EmbeddedEnrollment {
                     let config = URLSessionConfiguration.ephemeral
                     config.proxyConfigurations = [proxy]
                     let session = URLSessionTransport(configuration: config)
-                    return Node(node: node, session: session, transport: try TailnetTransport(endpoint: endpoint, transport: session), directory: directory)
+                    return Node(node: node, session: session, transport: try TailnetTransport(endpoint: endpoint, transport: session), proxyPort: nwPort, directory: directory)
                 }
                 try await clock.sleep(for: .milliseconds(250))
             }
