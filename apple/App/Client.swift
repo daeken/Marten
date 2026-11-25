@@ -172,6 +172,8 @@ private final class NoRedirects: NSObject, URLSessionTaskDelegate {
 struct ServerStatus: Decodable, Sendable {
     let projects: [Project]
     let agents: [Agent]
+    let inbox: Int?
+    let openQuestions: Int?
 }
 
 struct Project: Decodable, Identifiable, Sendable {
@@ -198,6 +200,27 @@ struct Entry: Decodable, Identifiable, Sendable {
     let name: String?
     let reason: String?
     var id: Int64 { seq }
+}
+
+struct InboxMessage: Decodable, Identifiable, Sendable {
+    let id: String
+    let at: String
+    let from: String
+    let fromName: String
+    let projectId: String?
+    let text: String
+    let question: Bool?
+    let options: [String]?
+    let context: String?
+    let answer: String?
+    let answeredAt: String?
+
+    var isOpen: Bool { question == true && answer == nil }
+
+    static func date(_ stamp: String) -> Date? {
+        (try? Date(stamp, strategy: Date.ISO8601FormatStyle(includingFractionalSeconds: true)))
+            ?? (try? Date(stamp, strategy: .iso8601))
+    }
 }
 
 struct TranscriptPage: Decodable, Sendable {
@@ -248,6 +271,33 @@ struct API: Sendable {
         try await decode(ServerStatus.self, call("GET", "/api/status"))
     }
 
+    func inbox() async throws -> [InboxMessage] {
+        guard let token, Self.validToken(token) else { throw ClientError.unauthorized }
+        return try await decode([InboxMessage].self, call("GET", "/api/inbox"))
+    }
+
+    func answer(_ question: InboxMessage, choice: Int?, text: String) async throws -> InboxMessage {
+        struct Answer: Encodable {
+            let choice: Int?
+            let text: String?
+            enum CodingKeys: String, CodingKey { case choice, text }
+            func encode(to encoder: any Encoder) throws {
+                var keys = encoder.container(keyedBy: CodingKeys.self)
+                try keys.encode(choice, forKey: .choice)
+                try keys.encode(text, forKey: .text)
+            }
+        }
+        guard let token, Self.validToken(token) else { throw ClientError.unauthorized }
+        let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard question.isOpen, choice != nil || !words.isEmpty else { throw ClientError.malformed }
+        if let choice, question.options?.indices.contains(choice) != true { throw ClientError.malformed }
+        try Self.checkRouteID(question.id)
+        let body = try JSONEncoder().encode(Answer(choice: choice, text: words.isEmpty ? nil : words))
+        let saved = try await decode(InboxMessage.self, call("POST", "/api/questions/\(question.id)/answer", body: body))
+        guard saved.id == question.id, saved.question == true, saved.answer != nil else { throw ClientError.malformed }
+        return saved
+    }
+
     func transcript(_ agent: String, before: Int64? = nil) async throws -> TranscriptPage {
         var query = [URLQueryItem(name: "limit", value: "80")]
         if let before { query.append(.init(name: "before", value: String(before))) }
@@ -267,9 +317,13 @@ struct API: Sendable {
     }
 
     private func route(_ agent: String, _ action: String) throws -> String {
-        let permitted = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
-        guard !agent.isEmpty, agent.unicodeScalars.allSatisfy(permitted.contains) else { throw ClientError.malformed }
+        try Self.checkRouteID(agent)
         return "/api/agents/\(agent)/\(action)"
+    }
+
+    private static func checkRouteID(_ id: String) throws {
+        let permitted = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
+        guard !id.isEmpty, id.unicodeScalars.allSatisfy(permitted.contains) else { throw ClientError.malformed }
     }
 
     private func decode<T: Decodable>(_ type: T.Type, _ data: Data) throws -> T {

@@ -595,6 +595,101 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(requests.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-token" })
     }
 
+    private static func inboxItem(_ id: String, from: String = "task-42", extra: String = "") -> String {
+        #"{"id":"\#(id)","at":"2026-11-25T06:35:00.1234567+00:00","from":"\#(from)","fromName":"Fixture Agent","projectId":"p","text":"Which label?"\#(extra)}"#
+    }
+
+    @MainActor func testInboxAndQuestionAnswersUseOperatorContract() async throws {
+        let option = Self.inboxItem("opt", extra: #", "question":true,"options":["One","Two"],"context":"Pick a label""#)
+        let words = Self.inboxItem("words", extra: #", "question":true"#)
+        let noNote = Self.inboxItem("no-note", extra: #", "question":true,"options":["One"]"#)
+        let saved = Self.inboxItem("saved", from: "other", extra: #", "question":true,"answer":"Previously saved","answeredAt":"2026-11-25T07:00:00Z""#)
+        let notice = Self.inboxItem("notice")
+        let fixture = "[\(option),\(words),\(noNote),\(saved),\(notice)]"
+        let transport = StubTransport([.init(200, #"{"projects":[],"agents":[],"inbox":5,"openQuestions":3}"#), .init(200, fixture),
+                                       .init(200, Self.inboxItem("opt", extra: #", "question":true,"answer":"Two: note""#)),
+                                       .init(200, Self.inboxItem("words", extra: #", "question":true,"answer":"custom""#)),
+                                       .init(200, Self.inboxItem("no-note", extra: #", "question":true,"answer":"One""#))])
+        let endpoint = try Endpoint(Self.fixtureOrigin)
+        let api = API(endpoint: endpoint, token: "fixture-token", transport: try TailnetTransport(endpoint: endpoint, transport: transport))
+        let status = try await api.status()
+        XCTAssertEqual(status.inbox, 5)
+        XCTAssertEqual(status.openQuestions, 3)
+        let state = InboxState()
+        await state.refresh(api)
+        XCTAssertEqual(state.messages?.map(\.id), ["opt", "words", "no-note", "saved", "notice"])
+        let first = try XCTUnwrap(state.messages?.first)
+        XCTAssertEqual(first.context, "Pick a label")
+        XCTAssertNotNil(InboxMessage.date(first.at))
+        XCTAssertEqual(state.questions(for: "other", entries: []).first?.answer, "Previously saved")
+        XCTAssertEqual(state.questions(for: "task-42", entries: []).map(\.id), ["opt", "words", "no-note"])
+        state.drafts["opt"] = " note \n"
+        state.drafts["words"] = " custom "
+        await state.answer("opt", choice: 1, using: api)
+        await state.answer("words", choice: nil, using: api)
+        await state.answer("no-note", choice: 0, using: api)
+        await state.answer("saved", choice: nil, using: api)
+        await state.answer("opt", choice: 1, using: api)
+        XCTAssertEqual(state.messages?.compactMap(\.answer), ["Two: note", "custom", "One", "Previously saved"])
+        XCTAssertTrue(state.drafts.isEmpty)
+        let delivery = Entry(seq: 1, kind: "message", text: "Sera answered your question \"Which label?\":\n\nTwo: note", from: "Sera", name: nil, reason: nil)
+        XCTAssertEqual(state.questions(for: "task-42", entries: [delivery]).map(\.id), ["words", "no-note"])
+        let requests = await transport.requests
+        XCTAssertEqual(requests.map(\.httpMethod), ["GET", "GET", "POST", "POST", "POST"])
+        XCTAssertEqual(requests.compactMap { $0.url?.path }, ["/api/status", "/api/inbox", "/api/questions/opt/answer", "/api/questions/words/answer", "/api/questions/no-note/answer"])
+        XCTAssertTrue(requests.allSatisfy { $0.url?.host == endpoint.url.host && $0.url?.query == nil && $0.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-token" })
+        func payload(_ request: URLRequest) throws -> NSDictionary {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? NSDictionary)
+        }
+        XCTAssertEqual(try payload(requests[2]), ["choice": 1, "text": "note"] as NSDictionary)
+        XCTAssertEqual(try payload(requests[3]), ["choice": NSNull(), "text": "custom"] as NSDictionary)
+        XCTAssertEqual(try payload(requests[4]), ["choice": 0, "text": NSNull()] as NSDictionary)
+    }
+
+    @MainActor func testFailedAnswerReconcilesByReadingOnReplacementWithoutReplay() async throws {
+        let raw = Self.inboxItem("question", extra: #", "question":true"#)
+        let saved = Self.inboxItem("question", extra: #", "question":true,"answer":"Other operator’s answer""#)
+        let transport = StubTransport([.init(200, "[\(raw)]"), .init(409, "hidden detail")])
+        let replacement = StubTransport([.init(502), .init(200, "[\(saved)]")])
+        let endpoint = try Endpoint(Self.fixtureOrigin)
+        let api = API(endpoint: endpoint, token: "fixture-token", transport: transport)
+        let reopened = API(endpoint: endpoint, token: "fixture-token", transport: replacement)
+        let state = InboxState()
+        await state.refresh(api)
+        state.drafts["question"] = "Keep this draft"
+        await state.answer("question", choice: nil, using: api)
+        XCTAssertEqual(state.drafts["question"], "Keep this draft")
+        XCTAssertEqual(state.needsRefresh, ["question"])
+        XCTAssertFalse(state.answerErrors["question", default: ""].contains("hidden detail"))
+        await state.answer("question", choice: nil, using: reopened)
+        await state.refresh(reopened)
+        XCTAssertNotNil(state.loadError)
+        XCTAssertEqual(state.needsRefresh, ["question"])
+        XCTAssertEqual(state.messages?.first?.id, "question")
+        await state.refresh(reopened)
+        XCTAssertNil(state.loadError)
+        XCTAssertEqual(state.messages?.first?.answer, "Other operator’s answer")
+        XCTAssertTrue(state.drafts.isEmpty)
+        await state.answer("question", choice: nil, using: reopened)
+        let firstRequests = await transport.requests
+        let replacementRequests = await replacement.requests
+        XCTAssertEqual(firstRequests.map(\.httpMethod), ["GET", "POST"])
+        XCTAssertEqual(replacementRequests.map(\.httpMethod), ["GET", "GET"])
+    }
+
+    func testAnswerRejectsUnsafeQuestionIDAndUncredentialedInbox() async throws {
+        let transport = StubTransport([])
+        let endpoint = try Endpoint(Self.fixtureOrigin)
+        let api = API(endpoint: endpoint, token: "fixture-token", transport: transport)
+        let bad = try JSONDecoder().decode(InboxMessage.self, from: Data(Self.inboxItem("../status", extra: #", "question":true"#).utf8))
+        do { _ = try await api.answer(bad, choice: nil, text: "answer"); XCTFail("Accepted unsafe question ID") }
+        catch { XCTAssertEqual(error as? ClientError, .malformed) }
+        do { _ = try await API(endpoint: endpoint, transport: transport).inbox(); XCTFail("Accepted uncredentialed inbox") }
+        catch { XCTAssertEqual(error as? ClientError, .unauthorized) }
+        let requests = await transport.requests
+        XCTAssertTrue(requests.isEmpty)
+    }
+
     func testResponseErrorsDoNotSurfaceBodyOrRetry() async throws {
         let transport = StubTransport([.init(307, "never display this"), .init(401)])
         let api = API(endpoint: try Endpoint("https://marten.tail-test1.ts.net"), token: "fixture-token", transport: transport)

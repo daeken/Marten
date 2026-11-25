@@ -10,6 +10,8 @@ struct WorkspaceView: View {
     @State private var checking = false
     @State private var scope: AgentScope = .all
     @State private var eventHint = UUID()
+    @State private var path: [WorkspaceDestination] = []
+    @State private var inbox = InboxState()
 
     private var agents: [Agent] {
         (status?.agents ?? []).filter { agent in
@@ -23,7 +25,7 @@ struct WorkspaceView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             List {
                 Section {
                     Picker("Project", selection: $scope) {
@@ -42,11 +44,22 @@ struct WorkspaceView: View {
                         Button("Retry") { Task { await refresh() } }
                     }
                 }
+                NavigationLink(value: WorkspaceDestination.inbox) {
+                    HStack {
+                        Label("Inbox", systemImage: "tray")
+                        Spacer()
+                        if let waiting = status?.openQuestions, waiting > 0 {
+                            Text("\(waiting) waiting").font(.subheadline.bold())
+                        } else if let count = status?.inbox, count > 0 {
+                            Text("\(count)").foregroundStyle(.secondary).accessibilityLabel("\(count) messages")
+                        }
+                    }
+                }
                 Section("Agents") {
                     if status == nil && statusError == nil { ProgressView("Loading agents…") }
                     if status != nil && agents.isEmpty { Text("No active agents here.").foregroundStyle(.secondary) }
                     ForEach(agents) { agent in
-                        NavigationLink(value: agent.id) {
+                        NavigationLink(value: WorkspaceDestination.agent(agent.id)) {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(agent.name).font(.headline)
                                 Text("\(agent.kind.capitalized) · \(agentStatus(agent))")
@@ -64,12 +77,19 @@ struct WorkspaceView: View {
                 }
             }
             .refreshable { await refresh() }
-            .navigationDestination(for: String.self) { id in
-                if let agent = status?.agents.first(where: { $0.id == id }), agent.closed != true {
-                    ConversationView(api: api, agent: agent, refreshStatus: refresh, routeID: routeID,
-                                     networkActive: networkActive, eventHint: eventHint).id(id)
-                } else {
-                    ContentUnavailableView("Agent Unavailable", systemImage: "bubble.left")
+            .navigationDestination(for: WorkspaceDestination.self) { destination in
+                switch destination {
+                case .inbox:
+                    InboxView(inbox: inbox, projects: status?.projects ?? [], agents: status?.agents ?? [],
+                              active: networkActive, refresh: refreshInbox, answer: submitAnswer)
+                case .agent(let id):
+                    if let agent = status?.agents.first(where: { $0.id == id }), agent.closed != true {
+                        ConversationView(api: api, agent: agent, refreshStatus: refresh, routeID: routeID,
+                                         networkActive: networkActive, eventHint: eventHint,
+                                         inbox: inbox, answer: submitAnswer).id(id)
+                    } else {
+                        ContentUnavailableView("Agent Unavailable", systemImage: "bubble.left")
+                    }
                 }
             }
         }
@@ -84,6 +104,29 @@ struct WorkspaceView: View {
             guard networkActive else { return }
             await listenForEvents()
         }
+        .task(id: RefreshRoute(id: routeID, active: networkActive && !path.isEmpty)) {
+            guard networkActive, !path.isEmpty else { return }
+            while !Task.isCancelled {
+                await refreshInbox()
+                try? await Task.sleep(for: .seconds(8))
+            }
+        }
+        .task(id: eventHint) {
+            if !path.isEmpty { await refreshInbox() }
+        }
+    }
+
+    @MainActor private func submitAnswer(_ id: String, choice: Int?) {
+        guard networkActive else { return }
+        Task {
+            await inbox.answer(id, choice: choice, using: api)
+            await refresh()
+        }
+    }
+
+    @MainActor private func refreshInbox() async {
+        guard networkActive else { return }
+        await inbox.refresh(api)
     }
 
     @MainActor private func listenForEvents() async {
@@ -127,6 +170,10 @@ struct WorkspaceView: View {
             statusError = safeMessage(error)
         }
     }
+}
+
+enum WorkspaceDestination: Hashable {
+    case inbox, agent(String)
 }
 
 private struct RefreshRoute: Equatable {
@@ -189,6 +236,8 @@ private struct ConversationView: View {
     let networkActive: Bool
     let eventHint: UUID
     @State private var transcript = TranscriptBuffer()
+    let inbox: InboxState
+    let answer: (String, Int?) -> Void
     @State private var loaded = false
     @State private var checking = false
     @State private var loadingOlder = false
@@ -223,6 +272,14 @@ private struct ConversationView: View {
                         Button(loadingOlder ? "Loading…" : "Load Older Entries") { Task { await older() } }
                             .disabled(loadingOlder || checking)
                             .frame(minHeight: 44)
+                    }
+                    let questions = inbox.questions(for: agent.id, entries: transcript.entries)
+                    if !questions.isEmpty {
+                        Text("Questions").font(.title3.bold())
+                        ForEach(questions) { question in
+                            QuestionCard(message: question, inbox: inbox, active: networkActive, answer: answer)
+                            Divider()
+                        }
                     }
                     ForEach(transcript.entries) { entry in
                         EntryRow(entry: entry).id(entry.seq)
