@@ -850,6 +850,106 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(follow.shouldFollow(archived: false))
     }
 
+    func testOperationsDecodeOperatorContractAndUsePinnedRoutes() async throws {
+        let endpoint = try Endpoint(Self.fixtureOrigin)
+        let tasks = #"[{"id":5,"title":"Ship fixture","state":"waiting","waitingOn":{"agentId":"agent-2","taskId":9},"reason":"waiting for fixture","assignedBy":"orch","updated":"2026-01-01T10:00:00+00:00","check":"fixture test","lastCheck":{"at":"2026-01-01T09:00:00+00:00","passed":false,"exitCode":1,"output":"fixture output\nsecond line"}}]"#
+        let schedules = #"[{"id":1,"created":"2026-01-01T10:00:00Z","command":"fixture once","nextRun":"2026-01-01T11:00:00Z"},{"id":2,"created":"2026-01-01T10:00:00Z","command":"fixture repeat","description":"Refresh fixture","everySeconds":900,"nextRun":"2026-01-01T11:15:00Z","lastRun":"2026-01-01T11:00:00Z","lastResult":"output delivered","inProgress":true}]"#
+        let running = #"{"agentId":"agent-1","agentName":"Fixture One","id":3,"name":"fixture","command":"fixture server","workingDirectory":"/fixture","pid":100,"started":"2026-01-01T10:00:00Z","logPath":"/fixture/private.log","state":"running"}"#
+        let stopped = #"{"agentId":"agent-2","agentName":"Fixture Two","id":3,"name":"old","command":"fixture server","workingDirectory":"/fixture","pid":101,"started":"2026-01-01T09:00:00Z","stopped":"2026-01-01T10:00:00Z","state":"stopped"}"#
+        let fixture = StubTransport([.init(200, tasks), .init(200, schedules), .init(200, "[\(running),\(stopped)]"),
+                                     .init(200, "[\(running)]"), .init(200), .init(200, stopped)])
+        let api = API(endpoint: endpoint, token: "fixture-bearer", transport: try TailnetTransport(endpoint: endpoint, transport: fixture))
+        let taskList = try await api.tasks("agent-1")
+        let task = try XCTUnwrap(taskList.first)
+        XCTAssertEqual(task.state, "waiting")
+        XCTAssertEqual(task.waitingOn?.agentId, "agent-2")
+        XCTAssertEqual(task.waitingOn?.taskId, 9)
+        XCTAssertEqual(task.reason, "waiting for fixture")
+        XCTAssertEqual(task.check, "fixture test")
+        XCTAssertEqual(task.lastCheck?.passed, false)
+        XCTAssertEqual(task.lastCheck?.exitCode, 1)
+        XCTAssertEqual(task.lastCheck?.output, "fixture output\nsecond line")
+        let scheduleList = try await api.schedules("agent-1")
+        XCTAssertEqual(scheduleList.map(\.timing), ["Once", "Every 15m"])
+        XCTAssertEqual(scheduleList.last?.created, "2026-01-01T10:00:00Z")
+        XCTAssertEqual(scheduleList.last?.nextRun, "2026-01-01T11:15:00Z")
+        XCTAssertEqual(scheduleList.last?.lastRun, "2026-01-01T11:00:00Z")
+        XCTAssertEqual(scheduleList.last?.lastResult, "output delivered")
+        XCTAssertEqual(scheduleList.last?.inProgress, true)
+        let global = try await api.processes()
+        let scoped = try await api.processes("agent-1")
+        XCTAssertEqual(scoped.map(\.id), [.init(agent: "agent-1", number: 3)])
+        XCTAssertEqual(Set(global.map(\.id)).count, 2)
+        XCTAssertEqual(global.map(\.canStop), [true, false])
+        XCTAssertEqual(global.first?.workingDirectory, "/fixture")
+        try await api.removeSchedule("agent-1", 1)
+        try await api.stopProcess(try XCTUnwrap(scoped.first).id)
+        let requests = await fixture.requests
+        XCTAssertEqual(requests.map(\.httpMethod), ["GET", "GET", "GET", "GET", "DELETE", "POST"])
+        XCTAssertEqual(requests.compactMap { $0.url?.absoluteString }, [
+            "/api/agents/agent-1/tasks", "/api/agents/agent-1/schedules", "/api/processes", "/api/agents/agent-1/processes",
+            "/api/agents/agent-1/schedules/1", "/api/agents/agent-1/processes/3/stop"
+        ].map { endpoint.origin + $0 })
+        XCTAssertTrue(requests.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-bearer" && $0.httpBody == nil })
+    }
+
+    func testProcessLogUsesBoundedPlainTextAndRejectsUnsafeRequests() async throws {
+        let endpoint = try Endpoint(Self.fixtureOrigin)
+        let fixture = StubTransport([.init(200, "fixture log\n", mime: "text/plain; charset=utf-8"), .init(307), .init(401),
+                                     .init(200, "unexpected", mime: "text/html"),
+                                     .init(200, String(repeating: "x", count: 1024 * 1024 + 1), mime: "text/plain")])
+        let transport = try TailnetTransport(endpoint: endpoint, transport: fixture)
+        let api = API(endpoint: endpoint, token: "fixture-bearer", transport: transport)
+        let key = AgentProcess.Key(agent: "agent-1", number: 3)
+        let log = try await api.processLog(key)
+        XCTAssertEqual(log, "fixture log\n")
+        for expected in [ClientError.response(307), .unauthorized, .processLog, .processLog] {
+            do { _ = try await api.processLog(key); XCTFail("Accepted rejected log") }
+            catch { XCTAssertEqual(error as? ClientError, expected) }
+        }
+        do { try await api.stopProcess(.init(agent: "other/log?token=x", number: 3)); XCTFail("Accepted unsafe agent") }
+        catch { XCTAssertEqual(error as? ClientError, .malformed) }
+        do { try await api.removeSchedule("agent-1", 0); XCTFail("Accepted unsafe number") }
+        catch { XCTAssertEqual(error as? ClientError, .malformed) }
+        do { _ = try await API(endpoint: endpoint, transport: transport).processLog(key); XCTFail("Accepted missing Bearer") }
+        catch { XCTAssertEqual(error as? ClientError, .unauthorized) }
+        let requests = await fixture.requests
+        XCTAssertEqual(requests.count, 5)
+        XCTAssertTrue(requests.allSatisfy {
+            $0.httpMethod == "GET" && $0.url?.absoluteString == endpoint.origin + "/api/agents/agent-1/processes/3/log?lines=200" &&
+            $0.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-bearer" && $0.value(forHTTPHeaderField: "Accept") == "text/plain"
+        })
+    }
+
+    @MainActor func testOperationFailureKeepsRowsAndReplacementOnlyReads() async throws {
+        let endpoint = try Endpoint(Self.fixtureOrigin)
+        let schedule = #"[{"id":1,"created":"2026-01-01T10:00:00Z","command":"fixture once","nextRun":"2026-01-01T11:00:00Z"}]"#
+        let fixture = StubTransport([.init(200, schedule), .init(502, "private error"), .init(503)])
+        let replacement = StubTransport([.init(200, schedule), .init(200), .init(200, "[]")])
+        let api = API(endpoint: endpoint, token: "fixture-bearer", transport: fixture)
+        let reconnected = API(endpoint: endpoint, token: "fixture-bearer", transport: replacement)
+        let state = OperationList<AgentSchedule>()
+        await state.refresh { try await api.schedules("agent-1") }
+        await state.change({ try await api.removeSchedule("agent-1", 1) }, read: { try await api.schedules("agent-1") })
+        XCTAssertTrue(state.needsRead)
+        XCTAssertEqual(state.items?.map(\.id), [1])
+        XCTAssertNotNil(state.error)
+        XCTAssertFalse(try XCTUnwrap(state.actionError).contains("private error"))
+        await state.change({ XCTFail("Must first reconcile by reading") }, read: { XCTFail("Blocked action should not issue a read"); return [] })
+        await state.refresh { try await reconnected.schedules("agent-1") }
+        XCTAssertFalse(state.needsRead)
+        XCTAssertNil(state.error)
+        let reconnectRequests = await replacement.requests
+        XCTAssertEqual(reconnectRequests.map(\.httpMethod), ["GET"])
+        await state.change({ try await reconnected.removeSchedule("agent-1", 1) }, read: { try await reconnected.schedules("agent-1") })
+        XCTAssertEqual(state.items?.map(\.id), [])
+        XCTAssertNil(state.actionError)
+        let initialRequests = await fixture.requests
+        let finalRequests = await replacement.requests
+        XCTAssertEqual(initialRequests.map(\.httpMethod), ["GET", "DELETE", "GET"])
+        XCTAssertEqual(finalRequests.map(\.httpMethod), ["GET", "DELETE", "GET"])
+    }
+
     private static func body(_ request: URLRequest) throws -> [String: String] {
         let body = try XCTUnwrap(request.httpBody)
         return try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])

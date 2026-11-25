@@ -80,7 +80,7 @@ enum ClientError: LocalizedError, Equatable {
     case origin, unauthorized, response(Int), malformed, network, tls, keychain
     case pairOffer, pairExpired, enrollmentUnavailable, deviceName, tailnetState, tailnetNotReady, image
     case pairingAlreadySaved, forgetPending, nodeCloseFailed
-    case attachment
+    case attachment, processLog
 
     var errorDescription: String? {
         switch self {
@@ -90,6 +90,7 @@ enum ClientError: LocalizedError, Equatable {
         case .pairExpired: "This pairing QR has expired. Get a new one from the server."
         case .image: "Could not read one pairing QR. Try scanning again or importing a different image."
         case .attachment: "This attachment is not a supported image or exceeds the preview limit."
+        case .processLog: "The process log is not plain text or exceeds the display limit."
         case .enrollmentUnavailable: "Embedded Tailscale enrollment is unavailable in this build."
         case .tailnetState: "Could not access private Tailscale device state."
         case .pairingAlreadySaved: "This server is already saved. To pair again, forget it first and get a new pairing QR."
@@ -347,6 +348,51 @@ struct API: Sendable {
         let payload = try await response("GET", route(agent, "images/\(resource.name)"), accept: resource.mime, limit: 12 * 1024 * 1024)
         guard payload.1.mimeType?.lowercased() == resource.mime else { throw ClientError.attachment }
         return payload.0
+    }
+
+    func tasks(_ agent: String) async throws -> [AgentTask] {
+        try requireBearer()
+        return try await decode([AgentTask].self, call("GET", route(agent, "tasks")))
+    }
+
+    func schedules(_ agent: String) async throws -> [AgentSchedule] {
+        try requireBearer()
+        return try await decode([AgentSchedule].self, call("GET", route(agent, "schedules")))
+    }
+
+    func processes(_ agent: String? = nil) async throws -> [AgentProcess] {
+        try requireBearer()
+        let path = try agent.map { try route($0, "processes") } ?? "/api/processes"
+        return try await decode([AgentProcess].self, call("GET", path))
+    }
+
+    func removeSchedule(_ agent: String, _ id: Int) async throws {
+        try requireBearer()
+        guard id > 0 else { throw ClientError.malformed }
+        _ = try await call("DELETE", route(agent, "schedules/\(id)"))
+    }
+
+    func stopProcess(_ key: AgentProcess.Key) async throws {
+        try requireBearer()
+        guard key.number > 0 else { throw ClientError.malformed }
+        _ = try await call("POST", route(key.agent, "processes/\(key.number)/stop"))
+    }
+
+    func processLog(_ key: AgentProcess.Key) async throws -> String {
+        try requireBearer()
+        guard key.number > 0 else { throw ClientError.malformed }
+        do {
+            let (data, reply) = try await response("GET", route(key.agent, "processes/\(key.number)/log"),
+                                                   query: [.init(name: "lines", value: "200")], accept: "text/plain", limit: 1024 * 1024)
+            guard reply.mimeType == "text/plain" else { throw ClientError.processLog }
+            return String(decoding: data, as: UTF8.self)
+        } catch ClientError.attachment {
+            throw ClientError.processLog
+        }
+    }
+
+    private func requireBearer() throws {
+        guard let token, Self.validToken(token) else { throw ClientError.unauthorized }
     }
 
     func agentMessages(projectID: String?) async throws -> [AgentMessage] {

@@ -69,6 +69,9 @@ struct WorkspaceView: View {
                 NavigationLink(value: WorkspaceDestination.messages) {
                     Label("Messages Between Agents", systemImage: "arrow.left.arrow.right")
                 }
+                NavigationLink(value: WorkspaceDestination.processes(nil)) {
+                    Label("Background Processes", systemImage: "terminal")
+                }
                 Section("Agents") {
                     if status == nil && statusError == nil { ProgressView("Loading agents…") }
                     if status != nil && agents.isEmpty { Text("No active agents here.").foregroundStyle(.secondary) }
@@ -99,6 +102,18 @@ struct WorkspaceView: View {
                 case .messages:
                     MessagesView(state: messages, projects: status?.projects ?? [], agents: status?.agents ?? [],
                                  active: networkActive, refresh: refreshMessages)
+                case .operations(let id, let task):
+                    if let agent = status?.agents.first(where: { $0.id == id }) {
+                        AgentOperationsView(api: api, agent: agent, agents: status?.agents ?? [], targetTask: task,
+                                            route: routeID, active: networkActive && path.last == destination, hint: eventHint)
+                            .id(routeID)
+                    } else { ContentUnavailableView("Agent Unavailable", systemImage: "checklist") }
+                case .processes(let id):
+                    ProcessesView(api: api, agentID: id, route: routeID, active: networkActive && path.last == destination, hint: eventHint)
+                        .id(routeID)
+                case .processLog(let key):
+                    ProcessLogView(api: api, key: key, route: routeID, active: networkActive && path.last == destination)
+                        .id(routeID)
                 case .agent(let id):
                     if let agent = status?.agents.first(where: { $0.id == id }) {
                         ConversationView(api: api, agent: agent, refreshStatus: refresh, routeID: routeID,
@@ -224,6 +239,7 @@ struct WorkspaceView: View {
 
 enum WorkspaceDestination: Hashable {
     case inbox, messages, agent(String)
+    case operations(String, task: Int?), processes(String?), processLog(AgentProcess.Key)
 }
 
 private struct MessagesRefresh: Equatable {
@@ -277,6 +293,9 @@ private struct ConversationView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
+                    NavigationLink(value: WorkspaceDestination.operations(agent.id, task: nil)) {
+                        Label("Tasks, Schedules & Processes", systemImage: "checklist")
+                    }.buttonStyle(.borderless)
                     Text(agentStatus(agent)).font(.footnote).foregroundStyle(.secondary)
                     if agent.pausedEffective && !agent.paused {
                         Text("Paused by the server or project.").font(.footnote).foregroundStyle(.secondary)
@@ -333,6 +352,9 @@ private struct ConversationView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Menu("Agent Actions", systemImage: "ellipsis.circle") {
+                    NavigationLink(value: WorkspaceDestination.operations(agent.id, task: nil)) {
+                        Label("Tasks, Schedules & Processes", systemImage: "checklist")
+                    }
                     Button("Refresh", systemImage: "arrow.clockwise") {
                         Task { await refresh(); await refreshStatus() }
                     }
