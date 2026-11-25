@@ -218,7 +218,7 @@ public sealed partial class Agent : IPowerShellOwner {
 
 	Entry Append(Entry entry) {
 		var e = Transcript.Append(entry);
-		manager.Publish(new { type = "entry", agentId = Info.Id, entry = e });
+		manager.Publish(new { type = "entry", agentId = Info.Id, entry = e with { Raw = null, Instructions = null } });
 		return e;
 	}
 
