@@ -20,6 +20,7 @@
 		56322259F308F31D088F6C3E /* Timeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC4FEA88791C90D0E5315E22 /* Timeline.swift */; };
 		584D35746983352495BAF27B /* Connections.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FF64C6D95C2712DCD5F203E /* Connections.swift */; };
 		724A3E0D31209666CEC2652A /* Workspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7425BD4A106FDE0A234CC40 /* Workspace.swift */; };
+		7E0874FE16B8DF9701CF346C /* Administration.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6F4F3E1FB9A5D1D84E9F2B2 /* Administration.swift */; };
 		8A7216E96170AAC9585274FE /* Timeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC4FEA88791C90D0E5315E22 /* Timeline.swift */; };
 		9282BA520E0A8129370A981A /* Inbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26B0506E9E29AC99DFA612AE /* Inbox.swift */; };
 		996D45C0A3EF134A28D2E99E /* Notebook.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FD59F4AC4F947B3F9984D71 /* Notebook.swift */; };
@@ -38,6 +39,7 @@
 		C7D347CF686AF60C04E7A2C2 /* Providers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 097A46E1BF9D1439D8F4E1C1 /* Providers.swift */; };
 		C8A1FCFC8656D59C6F56FE67 /* LiveEvents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7309633EE2E13A8F89FB924A /* LiveEvents.swift */; };
 		DCC1E2EA2D51545F3615A95E /* RichTranscript.swift in Sources */ = {isa = PBXBuildFile; fileRef = 504195C01908429552CF5CD0 /* RichTranscript.swift */; };
+		E652BC28F8B7DD4B7E6BCC15 /* Administration.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6F4F3E1FB9A5D1D84E9F2B2 /* Administration.swift */; };
 		F210C421087F3C1FE5B7C0BB /* Pairing.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5610B571F9AB02248FE2F42 /* Pairing.swift */; };
 		F22070ABEBD1DC30FD6873CF /* Inbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26B0506E9E29AC99DFA612AE /* Inbox.swift */; };
 		F989CD325FF9F20E8726DC51 /* Providers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 097A46E1BF9D1439D8F4E1C1 /* Providers.swift */; };
@@ -79,6 +81,7 @@
 		7D5B77581012182B5CE21966 /* AgentSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSettings.swift; sourceTree = "<group>"; };
 		7E70246C11BAE9986E883FFA /* ClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientTests.swift; sourceTree = "<group>"; };
 		9F88394C5EA8FF4E026A7BC1 /* MartenApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MartenApp.swift; sourceTree = "<group>"; };
+		A6F4F3E1FB9A5D1D84E9F2B2 /* Administration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Administration.swift; sourceTree = "<group>"; };
 		AB79A7B841A9E892C17E98A7 /* QR.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QR.swift; sourceTree = "<group>"; };
 		AC4FEA88791C90D0E5315E22 /* Timeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Timeline.swift; sourceTree = "<group>"; };
 		BEE2674A0B2F5E7B72841D3F /* Marten.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Marten.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -110,6 +113,7 @@
 		9333A5C200A70EAD051F4DD5 /* App */ = {
 			isa = PBXGroup;
 			children = (
+				A6F4F3E1FB9A5D1D84E9F2B2 /* Administration.swift */,
 				7D5B77581012182B5CE21966 /* AgentSettings.swift */,
 				13EA62427E8B256347FC0858 /* Client.swift */,
 				1FF64C6D95C2712DCD5F203E /* Connections.swift */,
@@ -257,6 +261,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				E652BC28F8B7DD4B7E6BCC15 /* Administration.swift in Sources */,
 				FD50C3D509048985E1E04C0C /* AgentSettings.swift in Sources */,
 				05CEFCF0AE2C7E8586FB8B4C /* Client.swift in Sources */,
 				B25E14328507A741FC4D4DC6 /* Connections.swift in Sources */,
@@ -289,6 +294,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				7E0874FE16B8DF9701CF346C /* Administration.swift in Sources */,
 				AFA7F7F72F06595FF42F4EED /* AgentSettings.swift in Sources */,
 				23A905C67BC47A823017DA6C /* Client.swift in Sources */,
 				584D35746983352495BAF27B /* Connections.swift in Sources */,

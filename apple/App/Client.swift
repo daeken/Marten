@@ -539,6 +539,56 @@ struct API: Sendable {
         return try decode([ReviewedTool].self, await call("GET", "/api/tools", query: [.init(name: "projectId", value: id)]))
     }
 
+    func mcpStatus() async throws -> [MCPStatus] {
+        try requireBearer()
+        return try decode([MCPStatus].self, await call("GET", "/api/mcp"))
+    }
+
+    func outsideClients() async throws -> [OutsideClient] {
+        try requireBearer()
+        return try decode([OutsideClient].self, await call("GET", "/api/clients"))
+    }
+
+    func backupStatus() async throws -> BackupInfo {
+        try requireBearer()
+        return try decode(BackupInfo.self, await call("GET", "/api/backups"))
+    }
+
+    func reloadMCP() async throws { try await adminChange("POST", "/api/mcp/refresh") }
+    func backupNow() async throws { try await adminChange("POST", "/api/backups") }
+
+    func addOutsideClient(_ input: String) async throws {
+        struct Name: Encodable { let name: String }
+        let name = OutsideClient.normalized(input)
+        guard OutsideClient.isValid(name) else { throw ClientError.malformed }
+        try await adminChange("POST", "/api/clients", body: JSONEncoder().encode(Name(name: name)))
+    }
+
+    func removeOutsideClient(_ name: String) async throws {
+        guard OutsideClient.isValid(name) else { throw ClientError.malformed }
+        try await adminChange("DELETE", "/api/clients/\(name)")
+    }
+
+    func setBackupPassphrase(_ input: String?) async throws {
+        struct Payload: Encodable {
+            let key: String?
+            enum CodingKeys: String, CodingKey { case key }
+            func encode(to encoder: any Encoder) throws {
+                var payload = encoder.container(keyedBy: CodingKeys.self)
+                try payload.encode(key, forKey: .key)
+            }
+        }
+        let trimmed = input?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed?.isEmpty != true else { throw ClientError.malformed }
+        try await adminChange("PUT", "/api/backups/passphrase", body: JSONEncoder().encode(Payload(key: trimmed)))
+    }
+
+    private func adminChange(_ method: String, _ path: String, body: Data? = nil) async throws {
+        try requireBearer()
+        try Task.checkCancellation()
+        _ = try await call(method, path, body: body)
+    }
+
     func signOutProviderAccount() async throws {
         try requireBearer()
         try Task.checkCancellation()

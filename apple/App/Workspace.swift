@@ -166,6 +166,9 @@ struct WorkspaceView: View {
                         guard controlsReady, path.last == destination else { return }
                         controls.create(draft, using: api, route: routeID) { finishCreation($0, from: destination) }
                     })
+                case .administration(let page):
+                    AdministrationView(page: page, api: api, route: routeID, active: networkActive && path.last == destination,
+                                       hint: eventHint, agents: status?.agents ?? []).id(routeID)
                 case .settings(let id):
                     if let agent = status?.agents.first(where: { $0.id == id }) {
                         AgentSettingsView(api: api, agent: agent, config: status?.config, agents: status?.agents ?? [],
@@ -358,6 +361,7 @@ enum WorkspaceDestination: Hashable {
     case inbox, messages, providers, agent(String)
     case createChat, createProject, memory(String)
     case settings(String)
+    case administration(AdministrationPage)
     case notebook(String), operations(String, task: Int?), processes(String?), processLog(AgentProcess.Key)
 }
 

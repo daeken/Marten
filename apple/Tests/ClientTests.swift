@@ -1379,6 +1379,87 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(final.map(\.httpMethod), ["GET", "POST", "GET"])
     }
 
+    private static let backupStatusFixture = #"{"directory":"/srv/fixture/backups","encrypting":true,"intervalMinutes":15,"snapshots":[{"name":"fixture.enc","taken":"2026-01-01T10:00:00Z","bytes":4294967296,"encrypted":true}]}"#
+
+    func testAdministrationStatusAndAuthenticatedWebRoutes() async throws {
+        let endpoint = try Endpoint(Self.fixtureOrigin)
+        let mcp = #"[{"name":"fixture","command":"synthetic-credential-command","args":["synthetic-credential-arg"],"disabled":false,"tools":["fixturetool",null],"readAt":"2026-01-01T10:00:00Z","error":"synthetic-credential-error","running":[{"agentId":"agent-1","agentName":"Fixture Agent","pid":123}]}]"#
+        let clients = #"[{"name":"fixture-client","created":"2026-01-01T10:00:00Z","tokenPath":"/srv/fixture/client.token","unread":3,"token":"synthetic-credential-token"}]"#
+        let fixture = StubTransport([.init(200, mcp), .init(200, clients), .init(200, Self.backupStatusFixture)] + Array(repeating: .init(200), count: 6))
+        let transport = try TailnetTransport(endpoint: endpoint, transport: fixture)
+        let api = API(endpoint: endpoint, token: "fixture-bearer", transport: transport)
+        let servers = try await api.mcpStatus()
+        XCTAssertEqual(servers.first?.running.first?.agentId, "agent-1")
+        XCTAssertEqual(servers.first?.running.first?.pid, 123)
+        XCTAssertEqual(servers.first?.failed, true)
+        XCTAssertEqual(servers.first?.tools.compactMap { $0 }, ["fixturetool"])
+        let outside = try await api.outsideClients()
+        XCTAssertEqual(outside.first?.unread, 3)
+        XCTAssertEqual(outside.first?.tokenPath, "/srv/fixture/client.token")
+        XCTAssertFalse(String(reflecting: servers).contains("synthetic-credential"))
+        XCTAssertFalse(String(reflecting: outside).contains("synthetic-credential"))
+        let info = try await api.backupStatus()
+        XCTAssertEqual(info.snapshots.first?.bytes, 4294967296)
+        XCTAssertEqual(info.snapshots.first?.encrypted, true)
+        XCTAssertEqual(info.intervalMinutes, 15)
+        try await api.reloadMCP()
+        try await api.addOutsideClient(" Fixture-Client ")
+        try await api.removeOutsideClient("fixture-client")
+        try await api.backupNow()
+        try await api.setBackupPassphrase(" synthetic-passphrase ")
+        try await api.setBackupPassphrase(nil)
+        do { try await api.removeOutsideClient("../other"); XCTFail("Accepted an unsafe client name") }
+        catch { XCTAssertEqual(error as? ClientError, .malformed) }
+        do { try await api.setBackupPassphrase(" \n"); XCTFail("Accepted a blank passphrase as a mutation") }
+        catch { XCTAssertEqual(error as? ClientError, .malformed) }
+        let guest = API(endpoint: endpoint, transport: transport)
+        do { _ = try await guest.outsideClients(); XCTFail("Listed without Bearer") }
+        catch { XCTAssertEqual(error as? ClientError, .unauthorized) }
+        do { try await guest.reloadMCP(); XCTFail("Reloaded without Bearer") }
+        catch { XCTAssertEqual(error as? ClientError, .unauthorized) }
+        do { try await guest.setBackupPassphrase(nil); XCTFail("Changed encryption without Bearer") }
+        catch { XCTAssertEqual(error as? ClientError, .unauthorized) }
+        let requests = await fixture.requests
+        XCTAssertEqual(requests.map(\.httpMethod), ["GET", "GET", "GET", "POST", "POST", "DELETE", "POST", "PUT", "PUT"])
+        XCTAssertEqual(requests.compactMap { $0.url?.absoluteString }, [
+            "/api/mcp", "/api/clients", "/api/backups", "/api/mcp/refresh", "/api/clients", "/api/clients/fixture-client",
+            "/api/backups", "/api/backups/passphrase", "/api/backups/passphrase"
+        ].map { endpoint.origin + $0 })
+        XCTAssertTrue(requests.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-bearer" })
+        XCTAssertEqual(try Self.body(requests[4]), ["name": "fixture-client"])
+        XCTAssertTrue(try Self.body(requests[7]) == ["key": "synthetic-passphrase"])
+        let removal = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(requests[8].httpBody)) as? [String: Any])
+        XCTAssertTrue(removal["key"] is NSNull)
+    }
+
+    @MainActor func testBackupMutationCancellationAndFailureAreReadOnlyOnReconnect() async throws {
+        let endpoint = try Endpoint(Self.fixtureOrigin)
+        let fixture = StubTransport([.init(200, Self.backupStatusFixture), .init(502, "synthetic-passphrase echoed by upstream"), .init(503)])
+        let replacement = StubTransport([.init(200, Self.backupStatusFixture)])
+        let api = API(endpoint: endpoint, token: "fixture-bearer", transport: fixture)
+        let next = API(endpoint: endpoint, token: "fixture-bearer", transport: replacement)
+        let state = OperationList<BackupInfo>()
+        await state.refresh { [try await api.backupStatus()] }
+        let cancelled = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            try await api.backupNow()
+        }
+        do { try await cancelled.value; XCTFail("A cancelled backup request should not start") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        await state.change({ try await api.setBackupPassphrase("synthetic-passphrase") }, read: { [try await api.backupStatus()] })
+        XCTAssertTrue(state.needsRead)
+        XCTAssertEqual(state.items?.first?.encrypting, true)
+        XCTAssertTrue(state.actionError?.contains("502") == true)
+        XCTAssertFalse(state.actionError?.contains("synthetic-passphrase") == true)
+        await state.change({ XCTFail("Mutation must be blocked until a fresh read") }, read: { [] })
+        await state.refresh { [try await next.backupStatus()] }
+        XCTAssertFalse(state.needsRead)
+        let initial = await fixture.requests
+        let reconnect = await replacement.requests
+        XCTAssertEqual(initial.map(\.httpMethod), ["GET", "PUT", "GET"])
+        XCTAssertEqual(reconnect.map(\.httpMethod), ["GET"])
+    }
+
     private static func body(_ request: URLRequest) throws -> [String: String] {
         let body = try XCTUnwrap(request.httpBody)
         return try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])

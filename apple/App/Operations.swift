@@ -211,7 +211,14 @@ struct ProcessesView: View {
     var body: some View {
         let shown = processes.items.map { $0.filter { showStopped || $0.state != "stopped" } }
         List {
-            if agentID == nil { Toggle("Show Stopped", isOn: $showStopped) }
+            if agentID == nil {
+                Section("Server Administration") {
+                    NavigationLink("MCP Servers", value: WorkspaceDestination.administration(.mcp))
+                    NavigationLink("Outside Clients", value: WorkspaceDestination.administration(.clients))
+                    NavigationLink("Backups", value: WorkspaceDestination.administration(.backups))
+                }
+                Toggle("Show Stopped", isOn: $showStopped)
+            }
             LoadState(items: shown, error: processes.error, empty: "No background processes to show.")
             if let error = processes.actionError { Label(error, systemImage: "exclamationmark.circle") }
             ForEach(shown ?? []) { process in
