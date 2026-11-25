@@ -200,6 +200,12 @@ struct Entry: Decodable, Identifiable, Sendable {
     let name: String?
     let reason: String?
     var id: Int64 { seq }
+    private(set) var ts: String? = nil
+    private(set) var callId: String? = nil
+    private(set) var arguments: String? = nil
+    private(set) var isError: Bool? = nil
+    private(set) var seqs: [Int64]? = nil
+    private(set) var model: String? = nil
 }
 
 struct InboxMessage: Decodable, Identifiable, Sendable {
@@ -221,6 +227,18 @@ struct InboxMessage: Decodable, Identifiable, Sendable {
         (try? Date(stamp, strategy: Date.ISO8601FormatStyle(includingFractionalSeconds: true)))
             ?? (try? Date(stamp, strategy: .iso8601))
     }
+}
+
+struct AgentMessage: Decodable, Hashable, Sendable {
+    let at: String
+    let fromId: String
+    let fromName: String
+    let toId: String
+    let toName: String
+    let projectId: String?
+    let mode: String
+    let text: String
+    let reason: String?
 }
 
 struct TranscriptPage: Decodable, Sendable {
@@ -269,6 +287,12 @@ struct API: Sendable {
 
     func status() async throws -> ServerStatus {
         try await decode(ServerStatus.self, call("GET", "/api/status"))
+    }
+
+    func agentMessages(projectID: String?) async throws -> [AgentMessage] {
+        guard let token, Self.validToken(token) else { throw ClientError.unauthorized }
+        let query = projectID.flatMap { $0.isEmpty ? nil : URLQueryItem(name: "projectId", value: $0) }
+        return try await decode([AgentMessage].self, call("GET", "/api/messages", query: query.map { [$0] } ?? []))
     }
 
     func inbox() async throws -> [InboxMessage] {

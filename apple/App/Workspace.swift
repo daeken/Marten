@@ -12,6 +12,15 @@ struct WorkspaceView: View {
     @State private var eventHint = UUID()
     @State private var path: [WorkspaceDestination] = []
     @State private var inbox = InboxState()
+    @State private var messages = MessagesState()
+
+    private var showsMessages: Bool { path.last == .messages }
+    private var showsInboxData: Bool {
+        switch path.last {
+        case .inbox, .agent: true
+        default: false
+        }
+    }
 
     private var agents: [Agent] {
         (status?.agents ?? []).filter { agent in
@@ -55,6 +64,9 @@ struct WorkspaceView: View {
                         }
                     }
                 }
+                NavigationLink(value: WorkspaceDestination.messages) {
+                    Label("Messages Between Agents", systemImage: "arrow.left.arrow.right")
+                }
                 Section("Agents") {
                     if status == nil && statusError == nil { ProgressView("Loading agents…") }
                     if status != nil && agents.isEmpty { Text("No active agents here.").foregroundStyle(.secondary) }
@@ -82,10 +94,13 @@ struct WorkspaceView: View {
                 case .inbox:
                     InboxView(inbox: inbox, projects: status?.projects ?? [], agents: status?.agents ?? [],
                               active: networkActive, refresh: refreshInbox, answer: submitAnswer)
+                case .messages:
+                    MessagesView(state: messages, projects: status?.projects ?? [], agents: status?.agents ?? [],
+                                 active: networkActive, refresh: refreshMessages)
                 case .agent(let id):
-                    if let agent = status?.agents.first(where: { $0.id == id }), agent.closed != true {
+                    if let agent = status?.agents.first(where: { $0.id == id }) {
                         ConversationView(api: api, agent: agent, refreshStatus: refresh, routeID: routeID,
-                                         networkActive: networkActive, eventHint: eventHint,
+                                         networkActive: networkActive && path.last == destination, eventHint: eventHint,
                                          inbox: inbox, answer: submitAnswer).id(id)
                     } else {
                         ContentUnavailableView("Agent Unavailable", systemImage: "bubble.left")
@@ -104,15 +119,26 @@ struct WorkspaceView: View {
             guard networkActive else { return }
             await listenForEvents()
         }
-        .task(id: RefreshRoute(id: routeID, active: networkActive && !path.isEmpty)) {
-            guard networkActive, !path.isEmpty else { return }
+        .task(id: RefreshRoute(id: routeID, active: networkActive && showsInboxData)) {
+            guard networkActive, showsInboxData else { return }
             while !Task.isCancelled {
                 await refreshInbox()
                 try? await Task.sleep(for: .seconds(8))
             }
         }
         .task(id: eventHint) {
-            if !path.isEmpty { await refreshInbox() }
+            if showsInboxData { await refreshInbox() }
+            if showsMessages { await refreshMessages() }
+        }
+        .task(id: MessagesRefresh(route: routeID, active: networkActive && showsMessages, project: messages.projectID)) {
+            guard networkActive, showsMessages else { return }
+            while !Task.isCancelled {
+                await refreshMessages()
+                try? await Task.sleep(for: .seconds(8))
+            }
+        }
+        .onChange(of: status?.projects.map(\.id)) { _, ids in
+            if let ids, let project = messages.projectID, !ids.contains(project) { messages.select(nil) }
         }
     }
 
@@ -127,6 +153,11 @@ struct WorkspaceView: View {
     @MainActor private func refreshInbox() async {
         guard networkActive else { return }
         await inbox.refresh(api)
+    }
+
+    @MainActor private func refreshMessages() async {
+        guard networkActive else { return }
+        await messages.refresh(api)
     }
 
     @MainActor private func listenForEvents() async {
@@ -173,7 +204,13 @@ struct WorkspaceView: View {
 }
 
 enum WorkspaceDestination: Hashable {
-    case inbox, agent(String)
+    case inbox, messages, agent(String)
+}
+
+private struct MessagesRefresh: Equatable {
+    let route: UUID
+    let active: Bool
+    let project: String?
 }
 
 private struct RefreshRoute: Equatable {
@@ -189,45 +226,6 @@ private func agentStatus(_ agent: Agent) -> String {
     agent.pausedEffective ? "Paused" : agent.status.replacingOccurrences(of: "_", with: " ").capitalized
 }
 
-struct TranscriptBuffer {
-    private(set) var entries: [Entry] = []
-    private(set) var hasOlder = false
-
-    // Returns true when the latest page is disconnected from the loaded window.
-    // Reset to a contiguous window so an exclusive `before` cursor never skips a gap.
-    @discardableResult mutating func applyLatest(_ page: TranscriptPage) -> Bool {
-        if entries.isEmpty || page.entries.isEmpty {
-            entries = []
-            merge(page.entries)
-            hasOlder = page.hasOlder
-            return false
-        }
-        let known = Set(entries.map(\.seq))
-        if !page.entries.contains(where: { known.contains($0.seq) }) {
-            entries = []
-            merge(page.entries)
-            hasOlder = page.hasOlder
-            return true
-        }
-        merge(page.entries)
-        return false
-    }
-
-    mutating func prepend(_ page: TranscriptPage, before cursor: Int64) {
-        // Stop on a non-advancing page even if a server incorrectly reports hasOlder.
-        let older = page.entries.filter { $0.seq < cursor }
-        merge(older)
-        hasOlder = page.hasOlder && !older.isEmpty
-    }
-
-    private mutating func merge(_ added: [Entry]) {
-        var bySequence: [Int64: Entry] = [:]
-        for entry in entries { bySequence[entry.seq] = entry }
-        for entry in added { bySequence[entry.seq] = entry }
-        entries = bySequence.values.sorted { $0.seq < $1.seq }
-    }
-}
-
 private struct ConversationView: View {
     let api: API
     let agent: Agent
@@ -235,22 +233,21 @@ private struct ConversationView: View {
     let routeID: UUID
     let networkActive: Bool
     let eventHint: UUID
-    @State private var transcript = TranscriptBuffer()
+    @State private var timeline = TimelinePages()
     let inbox: InboxState
     let answer: (String, Int?) -> Void
     @State private var loaded = false
     @State private var checking = false
-    @State private var loadingOlder = false
+    @State private var pageRequest: UUID?
+    @State private var pageError: String?
     @State private var mutating = false
     @State private var draft = ""
     @State private var mode: SendMode = .queued
     @State private var refreshError: String?
     @State private var actionError: String?
     @State private var showInterrupt = false
-    @State private var scrollTarget: Int64?
+    @State private var scrollTarget: TimelineRow.ID = .end
     @State private var scrollGeneration = 0
-    @State private var scrollToEnd = false
-    @State private var jumpedWindow = false
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -264,26 +261,22 @@ private struct ConversationView: View {
                         Label(refreshError, systemImage: "exclamationmark.circle").font(.footnote)
                     } else if !loaded {
                         ProgressView("Loading transcript…")
-                    } else if transcript.entries.isEmpty {
-                        Text("No transcript entries yet.").foregroundStyle(.secondary)
                     }
-                    if jumpedWindow { Text("Showing the newest page. Load older entries to catch up.").font(.footnote) }
-                    if transcript.hasOlder {
-                        Button(loadingOlder ? "Loading…" : "Load Older Entries") { Task { await older() } }
-                            .disabled(loadingOlder || checking)
-                            .frame(minHeight: 44)
-                    }
-                    let questions = inbox.questions(for: agent.id, entries: transcript.entries)
-                    if !questions.isEmpty {
-                        Text("Questions").font(.title3.bold())
-                        ForEach(questions) { question in
-                            QuestionCard(message: question, inbox: inbox, active: networkActive, answer: answer)
-                            Divider()
+                    if timeline.page != nil {
+                        let rows = timeline.rows(questions: inbox.questions(for: agent.id))
+                        if rows.isEmpty { Text("No transcript entries yet.").foregroundStyle(.secondary) }
+                        ForEach(rows) { row in
+                            Group {
+                                switch row.content {
+                                case .question(let question):
+                                    QuestionCard(message: question, inbox: inbox, active: networkActive, answer: answer)
+                                case .entry(let entry, let result):
+                                    EntryRow(entry: entry, result: result)
+                                }
+                            }.id(row.id)
                         }
                     }
-                    ForEach(transcript.entries) { entry in
-                        EntryRow(entry: entry).id(entry.seq)
-                    }
+                    Color.clear.frame(height: 1).id(TimelineRow.ID.end).accessibilityHidden(true)
                 }
                 .padding()
                 .frame(maxWidth: 860)
@@ -294,7 +287,7 @@ private struct ConversationView: View {
             #endif
             .refreshable { await refresh() }
             .onChange(of: scrollGeneration) {
-                if let scrollTarget { proxy.scrollTo(scrollTarget, anchor: scrollToEnd ? .bottom : .top) }
+                proxy.scrollTo(scrollTarget, anchor: scrollTarget == .end ? .bottom : .top)
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) { composer }
@@ -329,10 +322,31 @@ private struct ConversationView: View {
             }
         }
         .task(id: eventHint) { await refresh() }
+        .onChange(of: routeID) { pageRequest = nil }
+        .onChange(of: networkActive) { if !networkActive { pageRequest = nil } }
+    }
+
+    @ViewBuilder private var pagingControls: some View {
+        if timeline.page?.hasOlder == true || timeline.archive != nil || pageError != nil {
+            HStack {
+                Button("Older") { Task { await move(.older) } }
+                    .disabled(!networkActive || pageRequest != nil || timeline.target(.older) == nil)
+                    .accessibilityLabel("Older transcript page")
+                if timeline.archive != nil {
+                    Button("Newer") { Task { await move(.newer) } }
+                        .disabled(!networkActive || pageRequest != nil)
+                        .accessibilityLabel("Newer transcript page")
+                }
+                Text(pageRequest != nil ? "Loading page…" : timeline.archive != nil ? "Archived page" : "Latest entries")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+            if let pageError { Label(pageError, systemImage: "exclamationmark.circle").font(.footnote) }
+        }
     }
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 4) {
+            pagingControls
             if let actionError {
                 HStack {
                     Text(actionError).font(.footnote)
@@ -371,11 +385,11 @@ private struct ConversationView: View {
                 .disabled(mutating)
                 Spacer()
                 Button("Latest", systemImage: "arrow.down.to.line") {
-                    jump(to: transcript.entries.last?.seq, end: true)
+                    returnToLatest()
                 }
                 .font(.footnote)
                 .accessibilityLabel("Jump to Latest")
-                .disabled(transcript.entries.isEmpty)
+                .disabled(timeline.latest == nil)
             }
         }
         .padding(.horizontal)
@@ -383,22 +397,27 @@ private struct ConversationView: View {
         .background(.bar)
     }
 
-    private func jump(to seq: Int64?, end: Bool) {
-        scrollTarget = seq
-        scrollToEnd = end
+    private func jump(to target: TimelineRow.ID = .end) {
+        scrollTarget = target
         scrollGeneration += 1
     }
 
+    private func returnToLatest() {
+        pageRequest = nil
+        pageError = nil
+        timeline.returnToLatest()
+        jump()
+    }
+
     @MainActor private func refresh() async {
-        guard networkActive, !Task.isCancelled, !checking, !loadingOlder else { return }
+        guard networkActive, !Task.isCancelled, !checking else { return }
         checking = true
         defer { checking = false }
         do {
             let page = try await api.transcript(agent.id)
             try Task.checkCancellation()
-            let reset = transcript.applyLatest(page)
-            if reset { jumpedWindow = true }
-            if !loaded || reset { jump(to: transcript.entries.last?.seq, end: true) }
+            timeline.updateLatest(page)
+            if !loaded { jump() }
             loaded = true
             refreshError = nil
         } catch is CancellationError {
@@ -407,19 +426,21 @@ private struct ConversationView: View {
         }
     }
 
-    @MainActor private func older() async {
-        guard networkActive, !Task.isCancelled, !checking, !loadingOlder, let cursor = transcript.entries.first?.seq else { return }
-        loadingOlder = true
-        defer { loadingOlder = false }
+    @MainActor private func move(_ direction: TimelinePages.Move) async {
+        guard networkActive, !Task.isCancelled, pageRequest == nil, let target = timeline.target(direction) else { return }
+        guard let cursor = target.last else { returnToLatest(); return }
+        let id = UUID()
+        pageRequest = id
+        pageError = nil
+        defer { if pageRequest == id { pageRequest = nil } }
         do {
             let page = try await api.transcript(agent.id, before: cursor)
-            transcript.prepend(page, before: cursor)
-            refreshError = nil
-            jumpedWindow = false
-            jump(to: cursor, end: false)
+            guard pageRequest == id, !Task.isCancelled else { return }
+            timeline.show(page, at: target)
+            jump()
         } catch is CancellationError {
         } catch {
-            refreshError = safeMessage(error)
+            if pageRequest == id { pageError = safeMessage(error) }
         }
     }
 
@@ -442,35 +463,6 @@ private struct ConversationView: View {
             try await api.send(agent.id, text: message, mode: mode)
             if draft == message { draft = "" }
         }
-        if actionError == nil { jump(to: transcript.entries.last?.seq, end: true) }
-    }
-}
-
-private struct EntryRow: View {
-    let entry: Entry
-
-    private var title: String {
-        if entry.kind == "message" { return entry.from ?? "Message" }
-        if entry.kind == "assistant" { return "Assistant" }
-        return entry.kind.replacingOccurrences(of: "_", with: " ").capitalized
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if entry.kind == "assistant" || entry.kind == "message" || entry.kind == "error" {
-                Text(title).font(.subheadline.bold()).foregroundStyle(.secondary)
-                if let text = entry.text { Text(text).textSelection(.enabled) }
-            } else if let detail = entry.text ?? entry.reason {
-                DisclosureGroup(entry.name.map { "\(title) · \($0)" } ?? title) {
-                    Text(detail).font(.callout).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .font(.subheadline)
-            } else {
-                Text(entry.name.map { "\(title) · \($0)" } ?? title).font(.subheadline).foregroundStyle(.secondary)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
+        if actionError == nil { returnToLatest() }
     }
 }

@@ -621,8 +621,8 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
         let first = try XCTUnwrap(state.messages?.first)
         XCTAssertEqual(first.context, "Pick a label")
         XCTAssertNotNil(InboxMessage.date(first.at))
-        XCTAssertEqual(state.questions(for: "other", entries: []).first?.answer, "Previously saved")
-        XCTAssertEqual(state.questions(for: "task-42", entries: []).map(\.id), ["opt", "words", "no-note"])
+        XCTAssertEqual(state.questions(for: "other").first?.answer, "Previously saved")
+        XCTAssertEqual(state.questions(for: "task-42").map(\.id), ["opt", "words", "no-note"])
         state.drafts["opt"] = " note \n"
         state.drafts["words"] = " custom "
         await state.answer("opt", choice: 1, using: api)
@@ -632,8 +632,6 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
         await state.answer("opt", choice: 1, using: api)
         XCTAssertEqual(state.messages?.compactMap(\.answer), ["Two: note", "custom", "One", "Previously saved"])
         XCTAssertTrue(state.drafts.isEmpty)
-        let delivery = Entry(seq: 1, kind: "message", text: "Sera answered your question \"Which label?\":\n\nTwo: note", from: "Sera", name: nil, reason: nil)
-        XCTAssertEqual(state.questions(for: "task-42", entries: [delivery]).map(\.id), ["words", "no-note"])
         let requests = await transport.requests
         XCTAssertEqual(requests.map(\.httpMethod), ["GET", "GET", "POST", "POST", "POST"])
         XCTAssertEqual(requests.compactMap { $0.url?.path }, ["/api/status", "/api/inbox", "/api/questions/opt/answer", "/api/questions/words/answer", "/api/questions/no-note/answer"])
@@ -708,21 +706,82 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
         } catch let error as ClientError { XCTAssertEqual(error, .unauthorized) }
     }
 
-    func testTranscriptOverlapAndDisjointWindows() {
-        func page(_ ids: [Int64], older: Bool) -> TranscriptPage {
-            TranscriptPage(entries: ids.map { Entry(seq: $0, kind: "message", text: nil, from: nil, name: nil, reason: nil) }, hasOlder: older)
+    @MainActor func testTimelineKeepsArchiveStableDuringRefreshAndPlacesSavedAnswersOnce() async throws {
+        let open = Self.inboxItem("pending", extra: #", "question":true"#)
+        let stale = Self.inboxItem("saved", extra: #", "question":true"#)
+        let saved = Self.inboxItem("saved", extra: #", "question":true,"answer":"Yes","answeredAt":"2026-11-25T06:35:03Z""#)
+        let fixture = StubTransport([.init(200, "[\(open),\(saved)]"), .init(502), .init(200, "[\(open),\(stale)]")])
+        let api = API(endpoint: try Endpoint(Self.fixtureOrigin), token: "fixture-token", transport: fixture)
+        let inbox = InboxState()
+        await inbox.refresh(api)
+        func page(_ rows: String, older: Bool = true) throws -> TranscriptPage {
+            try JSONDecoder().decode(TranscriptPage.self, from: Data("{\"entries\":[\(rows)],\"hasOlder\":\(older)}".utf8))
         }
-        var buffer = TranscriptBuffer()
-        buffer.applyLatest(page([11, 12, 13], older: true))
-        buffer.prepend(page([8, 9, 10, 11], older: false), before: 11)
-        XCTAssertFalse(buffer.applyLatest(page([12, 13, 14], older: true)))
-        XCTAssertEqual(buffer.entries.map(\.seq), Array(8...14))
-        XCTAssertFalse(buffer.hasOlder)
-        XCTAssertTrue(buffer.applyLatest(page([20, 21], older: true)))
-        XCTAssertEqual(buffer.entries.map(\.seq), [20, 21])
-        XCTAssertTrue(buffer.hasOlder)
-        buffer.prepend(page([20], older: true), before: 20)
-        XCTAssertFalse(buffer.hasOlder)
+        let latest = try page(#"{"seq":3,"ts":"2026-11-25T06:35:02Z","kind":"tool_call","callId":"c","arguments":"{}"},{"seq":4,"ts":"2026-11-25T06:35:03Z","kind":"tool_result","callId":"c","text":"Output","isError":true},{"seq":5,"ts":"2026-11-25T06:35:04Z","kind":"assistant","text":"Done"}"#)
+        var timeline = TimelinePages()
+        timeline.updateLatest(latest)
+        func rows(_ state: TimelinePages) throws -> [TimelineRow] {
+            let questions = inbox.questions(for: "task-42")
+            _ = try XCTUnwrap(state.page)
+            return state.rows(questions: questions)
+        }
+        let initial = try rows(timeline)
+        XCTAssertEqual(initial.map(\.id), [.entry(3), .question("saved"), .entry(5), .question("pending")])
+        guard case .entry(_, let result) = initial[0].content else { return XCTFail("No associated tool result") }
+        XCTAssertEqual(result?.text, "Output")
+        XCTAssertEqual(result?.isError, true)
+        await inbox.refresh(api) // failed invalidation read keeps last good state
+        XCTAssertEqual(try rows(timeline).map(\.id), initial.map(\.id))
+        await inbox.refresh(api) // a stale open snapshot cannot undo the acknowledged answer
+        XCTAssertEqual(try rows(timeline).map(\.id), initial.map(\.id))
+        let older = try XCTUnwrap(timeline.target(.older))
+        XCTAssertEqual(older, [3])
+        try timeline.show(page(#"{"seq":1,"ts":"2026-11-25T06:35:00Z","kind":"assistant","text":"Earlier"},{"seq":2,"ts":"2026-11-25T06:35:01Z","kind":"tool_result","text":"Unmatched","callId":"previous"}"#), at: older)
+        XCTAssertEqual(timeline.target(.older), [3, 1])
+        XCTAssertEqual(try rows(timeline).map(\.id), [.entry(1), .entry(2)])
+        let firstArchive = try XCTUnwrap(timeline.archive)
+        try timeline.show(page(#"{"seq":1,"kind":"message"}"#), at: [3, 1]) // nonadvancing response
+        XCTAssertNil(timeline.target(.older))
+        XCTAssertEqual(timeline.target(.newer), [3])
+        timeline.show(firstArchive, at: [3])
+        let delivery = try page(#"{"seq":5,"ts":"2026-11-25T06:35:04Z","kind":"assistant","text":"Done"},{"seq":6,"ts":"2026-11-25T06:35:05Z","kind":"message","from":"Sera","text":"Sera answered your question \"Which label?\":\n\nYes"}"#)
+        timeline.updateLatest(delivery) // WSS invalidations may update latest while archive is shown
+        XCTAssertEqual(try rows(timeline).map(\.id), [.entry(1), .entry(2)])
+        XCTAssertEqual(timeline.target(.newer), [])
+        timeline.returnToLatest()
+        XCTAssertEqual(try rows(timeline).map(\.id), [.entry(5), .entry(6), .question("pending")])
+        timeline.updateLatest(try page(#"{"seq":7,"ts":"2026-11-25T06:35:06Z","kind":"assistant","text":"A later window"}"#, older: false))
+        XCTAssertEqual(try rows(timeline).map(\.id), [.entry(7), .question("pending")])
+        let requests = await fixture.requests
+        XCTAssertTrue(requests.allSatisfy { $0.httpMethod == "GET" })
+    }
+
+    @MainActor func testMessagesProjectFilterKeepsOrderingAndDuplicatesAcrossRefresh() async throws {
+        let one = #"{"at":"2026-11-25T06:35:04Z","fromId":"a","fromName":"Alpha","toId":"b","toName":"Beta","projectId":"p&x=1","mode":"immediate","text":"Latest","reason":"handoff"}"#
+        let two = #"{"at":"2026-11-25T06:35:03Z","fromId":"c","fromName":"Chat","toId":"a","toName":"Alpha","mode":"queued","text":"Older"}"#
+        let transport = StubTransport([.init(200, "[\(one),\(one),\(two)]"), .init(502), .init(200, "[\(one),\(one)]")])
+        let endpoint = try Endpoint(Self.fixtureOrigin)
+        let api = API(endpoint: endpoint, token: "fixture-token", transport: try TailnetTransport(endpoint: endpoint, transport: transport))
+        let messages = MessagesState()
+        await messages.refresh(api)
+        XCTAssertEqual(messages.rows?.map { $0.message.text }, ["Latest", "Latest", "Older"])
+        let first = try XCTUnwrap(messages.rows)
+        XCTAssertEqual(Set(first.map(\.id)).count, 3)
+        XCTAssertEqual(first.first?.message.reason, "handoff")
+        XCTAssertEqual(first.first?.message.toId, "b")
+        await messages.refresh(api)
+        XCTAssertNotNil(messages.error)
+        XCTAssertEqual(messages.rows?.map(\.id), first.map(\.id))
+        messages.select("p&x=1")
+        XCTAssertNil(messages.rows)
+        await messages.refresh(api)
+        XCTAssertEqual(messages.rows?.map(\.id), Array(first.prefix(2).map(\.id)))
+        let requests = await transport.requests
+        XCTAssertEqual(requests.map(\.httpMethod), ["GET", "GET", "GET"])
+        XCTAssertTrue(requests.allSatisfy { $0.url?.path == "/api/messages" && $0.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-token" })
+        XCTAssertNil(requests[0].url?.query)
+        let url = try XCTUnwrap(requests[2].url)
+        XCTAssertEqual(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems, [URLQueryItem(name: "projectId", value: "p&x=1")])
     }
 
     private static func body(_ request: URLRequest) throws -> [String: String] {

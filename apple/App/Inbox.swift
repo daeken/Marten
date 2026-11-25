@@ -11,13 +11,8 @@ final class InboxState {
     private var readID = UUID()
     private var revision = UUID()
 
-    func questions(for agent: String, entries: [Entry]) -> [InboxMessage] {
-        let delivered = Set(entries.filter { $0.kind == "message" && $0.from == "Sera" }.compactMap(\.text))
-        return (messages ?? []).filter { item in
-            guard item.question == true, item.from == agent else { return false }
-            guard let saved = item.answer else { return true }
-            return !delivered.contains("Sera answered your question \"\(item.text)\":\n\n\(saved)")
-        }
+    func questions(for agent: String) -> [InboxMessage] {
+        (messages ?? []).filter { $0.question == true && $0.from == agent }
     }
 
     func refresh(_ api: API) async {
@@ -28,10 +23,11 @@ final class InboxState {
         do {
             let fresh = try await api.inbox()
             guard !Task.isCancelled, readID == request, revision == before else { return }
-            messages = fresh
+            let recorded = Dictionary((messages ?? []).filter { $0.answer != nil }.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            messages = fresh.map { item in item.answer == nil ? recorded[item.id] ?? item : item }
             loadError = nil
             needsRefresh.removeAll()
-            for item in fresh where item.answer != nil {
+            for item in messages ?? [] where item.answer != nil {
                 drafts[item.id] = nil
                 answerErrors[item.id] = nil
             }
@@ -160,7 +156,7 @@ struct QuestionCard: View {
     }
 }
 
-private struct InboxTime: View {
+struct InboxTime: View {
     let stamp: String
     var body: some View {
         Group {
