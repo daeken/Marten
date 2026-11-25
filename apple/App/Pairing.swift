@@ -9,6 +9,7 @@ enum PairingMode: Sendable {
 struct PairOffer: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     let endpoint: Endpoint
     let expiresAt: Date
+    let expiryStamp: String
     fileprivate let code: String
     fileprivate let tsAuthKey: String?
     var description: String { "Marten pairing offer (redacted)" }
@@ -32,8 +33,7 @@ struct PairOffer: Sendable, CustomStringConvertible, CustomDebugStringConvertibl
         guard deadline > now else { throw ClientError.pairExpired }
         switch mode {
         case .embedded:
-            guard case .string(let key)? = fields["tsAuthKey"], (12...256).contains(key.utf8.count),
-                  key.hasPrefix("tskey-auth-"), key.utf8.dropFirst(11).allSatisfy(Self.isBase64URL) else {
+            guard case .string(let key)? = fields["tsAuthKey"], Self.validEnrollmentKey(key) else {
                 throw ClientError.pairOffer
             }
             endpoint = try Endpoint(server)
@@ -45,6 +45,7 @@ struct PairOffer: Sendable, CustomStringConvertible, CustomDebugStringConvertibl
         }
         self.code = code
         expiresAt = deadline
+        expiryStamp = expires
     }
 
     private enum Scalar {
@@ -85,6 +86,12 @@ struct PairOffer: Sendable, CustomStringConvertible, CustomDebugStringConvertibl
         }
         throw ClientError.pairOffer
     }
+
+    static func validEnrollmentKey(_ key: String) -> Bool {
+        (12...256).contains(key.utf8.count) && key.hasPrefix("tskey-auth-") && key.utf8.dropFirst(11).allSatisfy(isBase64URL)
+    }
+
+    func matchesEnrollmentKey(_ key: String?) -> Bool { tsAuthKey == key }
 
     private static func isBase64URL(_ byte: UInt8) -> Bool {
         (65...90).contains(byte) || (97...122).contains(byte) || (48...57).contains(byte) || byte == 45 || byte == 95

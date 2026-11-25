@@ -99,6 +99,7 @@ final class WorkspaceControls {
     }
     private(set) var status: ServerStatus?
     private(set) var statusError: String?
+    private(set) var authorizationRejected = false
     private(set) var notice: String?
     private(set) var loadedRoute: UUID?
     private(set) var pending: Confirmation?
@@ -121,10 +122,14 @@ final class WorkspaceControls {
             status = latest
             loadedRoute = route
             statusError = nil
+            authorizationRejected = false
             needsRead = false
         } catch is CancellationError {
         } catch {
-            if !Task.isCancelled && generation == request { statusError = safeMessage(error) }
+            if !Task.isCancelled && generation == request {
+                statusError = safeMessage(error)
+                authorizationRejected = (error as? ClientError) == .unauthorized
+            }
         }
     }
 

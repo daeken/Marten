@@ -3,6 +3,7 @@ import SwiftUI
 struct WorkspaceView: View {
     let api: API
     let showServers: () -> Void
+    let endPairedSession: (() -> Void)?
     let routeID: UUID
     let networkActive: Bool
     @State private var controls = WorkspaceControls()
@@ -70,6 +71,9 @@ struct WorkspaceView: View {
                                 .font(.footnote).foregroundStyle(.secondary)
                         }
                     }
+                }
+                if endPairedSession != nil {
+                    NavigationLink(value: WorkspaceDestination.devices) { Label("Paired Devices", systemImage: "qrcode") }
                 }
                 NavigationLink(value: WorkspaceDestination.providers) {
                     Label("Providers & Account", systemImage: "person.crop.circle")
@@ -139,6 +143,11 @@ struct WorkspaceView: View {
                 case .messages:
                     MessagesView(state: messages, projects: status?.projects ?? [], agents: status?.agents ?? [],
                                  active: networkActive, refresh: refreshMessages)
+                case .devices:
+                    if let endPairedSession {
+                        DeviceManagementView(api: api, active: networkActive && path.last == .devices,
+                                             route: routeID, endSession: endPairedSession).id(routeID)
+                    }
                 case .providers:
                     ProvidersView(status: status, active: networkActive && path.last == .providers,
                                   ready: controlsReady && path.last == .providers, busy: controls.busy, route: routeID,
@@ -330,6 +339,7 @@ struct WorkspaceView: View {
     @MainActor private func refresh() async {
         guard networkActive else { return }
         await controls.refresh(using: api, route: routeID)
+        if controls.authorizationRejected { endPairedSession?() }
     }
 
     private func lifecycle(_ action: LifecycleAction, name: String = "") {
@@ -358,7 +368,7 @@ struct WorkspaceView: View {
 }
 
 enum WorkspaceDestination: Hashable {
-    case inbox, messages, providers, agent(String)
+    case inbox, messages, providers, devices, agent(String)
     case createChat, createProject, memory(String)
     case settings(String)
     case administration(AdministrationPage)

@@ -367,6 +367,35 @@ struct API: Sendable {
         !token.isEmpty && token.utf8.count <= 8192 && token.utf8.allSatisfy { (33...126).contains($0) }
     }
 
+    func pairedDevices() async throws -> PairedDevices {
+        try requireBearer()
+        return try decode(PairedDevices.self, await call("GET", "/api/pair/devices"))
+    }
+
+    func revokeDevice(_ id: UUID) async throws {
+        try await adminChange("DELETE", "/api/pair/devices/\(id.uuidString.lowercased())")
+    }
+
+    func createDeviceInvite(key: String?, mode: PairingMode, now: @Sendable () -> Date = { .now }) async throws -> DeviceInvite {
+        struct Input: Encodable { let tsAuthKey: String }
+        struct Reply: Decodable { let payload: String; let expiresAt: String }
+        try requireBearer()
+        let body: Data?
+        switch mode {
+        case .direct:
+            guard key == nil else { throw ClientError.pairOffer }
+            body = nil
+        case .embedded:
+            guard let key, PairOffer.validEnrollmentKey(key) else { throw ClientError.pairOffer }
+            body = try JSONEncoder().encode(Input(tsAuthKey: key))
+        }
+        try Task.checkCancellation()
+        let (data, _) = try await response("POST", "/api/pair/create", body: body, limit: 8192)
+        try Task.checkCancellation()
+        let reply = try decode(Reply.self, data)
+        return try DeviceInvite(payload: reply.payload, expiry: reply.expiresAt, mode: mode, endpoint: endpoint, key: key, now: now())
+    }
+
     func redeem(code: String, deviceName: String) async throws -> API {
         struct Redemption: Encodable { let code: String; let deviceName: String }
         struct Credential: Decodable { let token: String }

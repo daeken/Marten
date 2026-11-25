@@ -1460,6 +1460,73 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(reconnect.map(\.httpMethod), ["GET"])
     }
 
+    func testInviteExpiresAndIsPinnedToExpectedAuthorityAndKey() async throws {
+        let endpoint = try Endpoint(Self.fixtureOrigin)
+        let expiry = "2026-11-25T06:35:00.123Z"
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let expiryDate = try XCTUnwrap(formatter.date(from: expiry))
+        func reply(_ payload: String) throws -> StubTransport.Reply {
+            let data = try JSONEncoder().encode(["payload": payload, "expiresAt": expiry])
+            return .init(200, String(decoding: data, as: UTF8.self))
+        }
+        let fixture = StubTransport(try [reply(Self.fixture()), reply(Self.fixture()),
+                                         reply(Self.fixture("https://wrong.tail-test1.ts.net")), reply(Self.fixture(key: false))])
+        let route = try TailnetTransport(endpoint: endpoint, transport: fixture)
+        let api = API(endpoint: endpoint, token: "fixture-bearer", transport: route)
+        let before = expiryDate.addingTimeInterval(-5)
+        let invite = try await api.createDeviceInvite(key: Self.fixtureKey, mode: .embedded) { before }
+        XCTAssertEqual(invite.expiresAt, expiryDate)
+        XCTAssertNotNil(invite.image(at: before))
+        XCTAssertNil(invite.image(at: expiryDate))
+        XCTAssertFalse(String(reflecting: invite).contains(Self.fixtureKey))
+        do { _ = try await api.createDeviceInvite(key: Self.fixtureKey, mode: .embedded) { expiryDate }; XCTFail("Accepted expired QR") }
+        catch { XCTAssertEqual(error as? ClientError, .pairExpired) }
+        do { _ = try await api.createDeviceInvite(key: Self.fixtureKey, mode: .embedded) { before }; XCTFail("Accepted different authority") }
+        catch { XCTAssertEqual(error as? ClientError, .pairOffer) }
+        _ = try await api.createDeviceInvite(key: nil, mode: .direct) { before }
+        do { _ = try await api.createDeviceInvite(key: "invalid", mode: .embedded); XCTFail("Sent invalid key") }
+        catch { XCTAssertEqual(error as? ClientError, .pairOffer) }
+        do { _ = try await API(endpoint: endpoint, transport: route).pairedDevices(); XCTFail("Listed without credential") }
+        catch { XCTAssertEqual(error as? ClientError, .unauthorized) }
+        let requests = await fixture.requests
+        XCTAssertEqual(requests.count, 4)
+        XCTAssertTrue(requests.allSatisfy { $0.httpMethod == "POST" && $0.url?.absoluteString == endpoint.origin + "/api/pair/create" && $0.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-bearer" })
+        XCTAssertTrue(try Self.body(requests[0]) == ["tsAuthKey": Self.fixtureKey])
+        XCTAssertNil(requests.last?.httpBody)
+    }
+
+    @MainActor func testUncertainDeviceRevokeRequiresReadAndDetectsRejectedCurrentSession() async throws {
+        let endpoint = try Endpoint(Self.fixtureOrigin)
+        let id = try XCTUnwrap(UUID(uuidString: "f12af00d-03c2-4c7a-85f0-107568e70000"))
+        let listing = #"{"enabled":true,"requiresTailscaleEnrollment":true,"devices":[{"id":"f12af00d-03c2-4c7a-85f0-107568e70000","name":"Fixture","createdAt":"2026-11-25T06:30:00Z"}]}"#
+        let original = StubTransport([.init(200, listing), .init(502), .init(503)])
+        let reconnect = StubTransport([.init(200, listing), .init(204), .init(403), .init(403)])
+        let api = API(endpoint: endpoint, token: "fixture-bearer", transport: original)
+        let next = API(endpoint: endpoint, token: "fixture-bearer", transport: reconnect)
+        let state = DeviceManagementState()
+        await state.refresh(api)
+        XCTAssertEqual(state.listing?.devices.first?.id, id)
+        XCTAssertEqual(state.listing?.requiresTailscaleEnrollment, true)
+        await state.revoke(id, using: api)
+        XCTAssertFalse(state.ready)
+        XCTAssertFalse(state.rejectedSession)
+        XCTAssertNotNil(state.actionError)
+        await state.revoke(id, using: api)
+        await state.refresh(next)
+        let reads = await reconnect.requests
+        XCTAssertEqual(reads.map(\.httpMethod), ["GET"])
+        XCTAssertTrue(state.ready)
+        await state.revoke(id, using: next)
+        XCTAssertTrue(state.rejectedSession)
+        XCTAssertNil(state.listing)
+        let initial = await original.requests
+        let final = await reconnect.requests
+        XCTAssertEqual(initial.map(\.httpMethod), ["GET", "DELETE", "GET"])
+        XCTAssertEqual(final.map(\.httpMethod), ["GET", "DELETE", "GET", "GET"])
+        XCTAssertEqual(final.map { $0.url?.path }, ["/api/pair/devices", "/api/pair/devices/f12af00d-03c2-4c7a-85f0-107568e70000", "/api/pair/devices", "/api/status"])
+    }
+
     private static func body(_ request: URLRequest) throws -> [String: String] {
         let body = try XCTUnwrap(request.httpBody)
         return try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])

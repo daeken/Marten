@@ -27,6 +27,8 @@ struct RootView: View {
         Group {
             if let api = connections.connected {
                 WorkspaceView(api: api, showServers: { connections.showServers = true },
+                              endPairedSession: connections.pairingEnabled && api.endpoint.url.scheme == "https"
+                                  ? { connections.endRejectedPairedSession(api) } : nil,
                               routeID: connections.transportGeneration,
                               networkActive: phase == .active && foregroundReady && !connections.busy && connections.routeUsable)
                     .id(connections.workspaceID)

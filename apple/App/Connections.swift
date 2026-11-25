@@ -190,18 +190,31 @@ final class Connections {
             // session even if the scene just went back to sleep. Only active
             // scenes consume it, and a later probe may see the new node alive.
             if let route = try await enrollment.recoverOnForeground(for: api.endpoint) {
+                guard connected?.endpoint == api.endpoint, connected?.token == api.token else { return }
                 connected = API(endpoint: api.endpoint, token: api.token, transport: route)
                 transportGeneration = UUID()
             }
+            guard connected?.endpoint == api.endpoint, connected?.token == api.token else { return }
             routeUsable = true
             if !Task.isCancelled { error = nil }
         } catch {
+            guard connected?.endpoint == api.endpoint, connected?.token == api.token else { return }
             routeUsable = false
             if !Task.isCancelled {
                 show(error)
                 showServers = true
             }
         }
+    }
+
+    func endRejectedPairedSession(_ api: API) {
+        guard pairingEnabled, api.endpoint.url.scheme == "https", let token = api.token,
+              connected?.endpoint == api.endpoint, connected?.token == token else { return }
+        cancelOffer()
+        connected = nil
+        workspaceID = UUID()
+        defaults.removeObject(forKey: "activeEndpoint")
+        error = "This device’s authorization was rejected by the server. Forget the saved server before pairing again."
     }
 
     func disconnect() {
