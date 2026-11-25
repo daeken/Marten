@@ -55,6 +55,8 @@ public sealed record Config {
 	public List<string> RemoteHosts { get; init; } = new();
 	/// <summary>Canonical HTTPS origin advertised to paired devices. Null disables new pairing.</summary>
 	public string? PairingOrigin { get; init; }
+	/// <summary>Opt-in embedded native transport, separate from manually configured web proxies.</summary>
+	public TailnetSettings? Tailnet { get; init; }
 	/// <summary>Extra Origin allowed to call the API, e.g. the Vite dev server.</summary>
 	public string? DevOrigin { get; init; }
 

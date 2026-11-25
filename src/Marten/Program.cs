@@ -121,12 +121,20 @@ var manager = managerRef = new AgentManager(home, config, backend, tools) { Laun
 var hub = new EventHub();
 manager.Events += hub.Broadcast;
 var pairing = new DevicePairing(home);
-var security = new Security(home, config) { ClientAuth = manager.Outside.Authenticate, Pairing = pairing };
-if(config.PairingOrigin != null && security.PairingOrigin == null)
-	Console.Error.WriteLine("Pairing disabled: pairingOrigin must be a valid HTTPS origin.");
+var tailnet = new TailnetTransport(config);
+var security = new Security(home, config, tailnet) { ClientAuth = manager.Outside.Authenticate, Pairing = pairing };
+if(config.PairingOrigin != null) {
+	if(config.Tailnet != null) Console.Error.WriteLine("Ignoring pairingOrigin in embedded mode; pairing uses the verified tailnet.host.");
+	else if(security.ConfiguredPairingOrigin == null) Console.Error.WriteLine("Pairing disabled: pairingOrigin must be a valid HTTPS origin.");
+}
 
 var builder = WebApplication.CreateSlimBuilder(args);
 builder.WebHost.UseUrls($"http://127.0.0.1:{config.Port}");
+if(config.Tailnet != null) builder.WebHost.ConfigureKestrel(kestrel => {
+	// Ignore configured Kestrel endpoints in embedded mode. Only the helper listens on the tailnet.
+	kestrel.Configure(new ConfigurationBuilder().Build());
+	kestrel.Listen(System.Net.IPAddress.Loopback, config.Port);
+});
 builder.Logging.SetMinimumLevel(LogLevel.Warning);
 builder.Services.ConfigureHttpJsonOptions(o => {
 	o.SerializerOptions.PropertyNamingPolicy = JsonIO.Options.PropertyNamingPolicy;
@@ -171,7 +179,7 @@ object BackendSummary(MessagesBackend b) => new {
 object ProjectSummary(Project p) => new { p.Info.Id, p.Info.Name, p.Info.Created, p.Info.Bindings, p.Info.WorktreesByDefault, p.Info.OrchestratorId, p.Info.Paused };
 
 var api = app.MapGroup("/api");
-api.MapPairing(pairing, security.PairingOrigin);
+api.MapPairing(pairing, security);
 api.MapGet("/status", () => new {
 	auth = new { connected = auth.Connected, email = auth.Email, signingIn = auth.SigningIn, lastError = auth.LastError },
 	backends = messagesBackends.Select(BackendSummary),
@@ -481,8 +489,16 @@ Console.WriteLine($"Backups: {backups.Directory}{(backups.Encrypting ? " (encryp
 Console.WriteLine(webRoot == null
 	? "No built UI found (web/dist). Run `npm run build` in web/, or set MARTEN_WEB_ROOT."
 	: $"Marten UI: http://127.0.0.1:{config.Port}/ (paste the token from the Marten home's secrets/ui-token into the page)");
+Task? tailnetRun = null;
+using var onStarted = app.Lifetime.ApplicationStarted.Register(() => {
+	if(config.Tailnet != null) tailnetRun = Task.Run(() => tailnet.RunAsync(home,
+		Console.Error.WriteLine, app.Lifetime.ApplicationStopping));
+});
 try { await app.RunAsync(); }
-finally { await drain.Value; }
+finally {
+	if(tailnetRun != null) await tailnetRun;
+	await drain.Value;
+}
 
 static string? Blank(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
 
