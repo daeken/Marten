@@ -1,0 +1,20 @@
+include: project.yml
+name: MartenEmbedded
+options:
+  deploymentTarget:
+    iOS: '18.1'
+    macOS: '15.6'
+targets:
+  Marten:
+    settings:
+      base:
+        ARCHS: arm64
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) MARTEN_EMBEDDED_TAILNET
+    dependencies:
+      - framework: .local/TailscaleKit.xcframework
+        embed: true
+        codeSign: true
+  MartenTests:
+    settings:
+      base:
+        ARCHS: arm64

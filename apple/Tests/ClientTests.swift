@@ -117,6 +117,46 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
         func discardEnrollment(for endpoint: Endpoint) async { discardedOrigins.append(endpoint.origin) }
     }
 
+    func testEmbeddedProxyGuardNeverHandsOffOtherAuthorities() async throws {
+        let stub = StubTransport([.init(200)])
+        let transport = try TailnetTransport(endpoint: Endpoint(Self.fixtureOrigin), transport: stub)
+        for bad in ["http://localhost/status", "https://127.0.0.1/status", "https://localhost/status",
+                    "https://other.tail-test1.ts.net/api/status", Self.fixtureOrigin + ":443/api/status",
+                    Self.fixtureOrigin + "/api/status#fragment"] {
+            do {
+                _ = try await transport.data(for: URLRequest(url: XCTUnwrap(URL(string: bad))))
+                XCTFail("An unpinned request reached the embedded transport")
+            } catch { XCTAssertEqual(error as? ClientError, .origin) }
+        }
+        let good = try XCTUnwrap(URL(string: Self.fixtureOrigin + "/api/status?q=ok"))
+        var forged = URLRequest(url: good)
+        forged.setValue("other.tail-test1.ts.net", forHTTPHeaderField: "Host")
+        do {
+            _ = try await transport.data(for: forged)
+            XCTFail("Client accepted a caller-supplied Host header")
+        } catch { XCTAssertEqual(error as? ClientError, .origin) }
+        _ = try await transport.data(for: URLRequest(url: good))
+        let requests = await stub.requests
+        XCTAssertEqual(requests.map(\.url), [good])
+    }
+
+    func testTailnetStateIsPrivateAndScopedToExactEndpoint() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let first = try Endpoint(Self.fixtureOrigin)
+        let second = try Endpoint("https://other.tail-test1.ts.net")
+        let store = TailnetState(root: root)
+        let directory = try store.directory(for: first)
+        XCTAssertNotEqual(directory, try store.directory(for: second))
+        try store.prepareNew(directory)
+        XCTAssertEqual((try FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions] as? NSNumber)?.intValue, 0o700)
+        XCTAssertFalse(store.isReady(directory))
+        try store.markReady(directory)
+        XCTAssertTrue(store.isReady(try TailnetState(root: root).directory(for: first)))
+        XCTAssertThrowsError(try store.prepareNew(directory))
+        XCTAssertTrue(store.isReady(directory))
+    }
+
     func testAppHasNoExternalURLSchemeRegistration() {
         XCTAssertEqual(Bundle.main.bundleIdentifier, "dev.marten.native")
         XCTAssertNil(Bundle.main.object(forInfoDictionaryKey: "CFBundleURLTypes"))

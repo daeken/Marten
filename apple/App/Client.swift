@@ -78,7 +78,7 @@ struct Endpoint: Hashable, Sendable {
 
 enum ClientError: LocalizedError, Equatable {
     case origin, unauthorized, response(Int), malformed, network, tls, keychain
-    case pairOffer, pairExpired, enrollmentUnavailable, deviceName
+    case pairOffer, pairExpired, enrollmentUnavailable, deviceName, tailnetState, tailnetNotReady
 
     var errorDescription: String? {
         switch self {
@@ -87,6 +87,8 @@ enum ClientError: LocalizedError, Equatable {
         case .pairOffer: "This is not a supported pairing QR for the selected connection mode."
         case .pairExpired: "This pairing QR has expired. Get a new one from the server."
         case .enrollmentUnavailable: "Embedded Tailscale enrollment is unavailable in this build."
+        case .tailnetState: "Could not access private Tailscale device state."
+        case .tailnetNotReady: "The embedded Tailscale connection is not ready."
         case .deviceName: "Use a device name of 1–80 characters with no control characters."
         case .response(let status): "The server returned HTTP \(status). Redirects are not followed."
         case .malformed: "The server returned an unexpected response."
@@ -104,8 +106,7 @@ protocol Transport: Sendable {
 struct URLSessionTransport: Transport {
     private let session: URLSession
 
-    init() {
-        let config = URLSessionConfiguration.ephemeral
+    init(configuration config: URLSessionConfiguration = .ephemeral) {
         config.urlCache = nil
         config.httpCookieStorage = nil
         config.urlCredentialStorage = nil
@@ -113,6 +114,8 @@ struct URLSessionTransport: Transport {
         config.timeoutIntervalForResource = 30
         self.session = URLSession(configuration: config, delegate: NoRedirects(), delegateQueue: nil)
     }
+
+    func invalidate() { session.invalidateAndCancel() }
 
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         // Default URLSession trust evaluation (ATS, chain, expiry, hostname); no trust override.
