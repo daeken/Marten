@@ -91,9 +91,16 @@ final class Connections {
     #endif
 
     func connect(_ endpoint: Endpoint) {
-        do {
-            activate(endpoint, token: try keychain.token(for: endpoint))
-        } catch { show(error) }
+        // No production connection mode is active in this build. In particular,
+        // a saved origin from an older build cannot select system networking.
+        #if DEBUG
+        if (try? Endpoint(developmentOrigin: endpoint.origin)) == endpoint {
+            do { activate(endpoint, token: try keychain.token(for: endpoint)) }
+            catch { show(error) }
+            return
+        }
+        #endif
+        show(ClientError.enrollmentUnavailable)
     }
 
     func disconnect() {

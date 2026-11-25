@@ -157,6 +157,27 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(store.isReady(directory))
     }
 
+    @MainActor func testSavedProductionOriginDoesNotUseSystemTransportWhilePairingIsGated() async throws {
+        let domain = "NativeMartenTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
+        let vault = CredentialStore(service: domain)
+        let endpoint = try Endpoint(Self.fixtureOrigin)
+        defer {
+            defaults.removePersistentDomain(forName: domain)
+            try? vault.remove(endpoint)
+        }
+        defaults.set([endpoint.origin], forKey: "endpoints")
+        defaults.set(endpoint.origin, forKey: "activeEndpoint")
+        try vault.save("fixture-token", for: endpoint)
+        let ordinary = StubTransport([])
+        let connections = Connections(transport: ordinary, keychain: vault, defaults: defaults)
+        XCTAssertNil(connections.connected)
+        connections.connect(endpoint)
+        XCTAssertNil(connections.connected)
+        let requests = await ordinary.requests
+        XCTAssertTrue(requests.isEmpty)
+    }
+
     func testAppHasNoExternalURLSchemeRegistration() {
         XCTAssertEqual(Bundle.main.bundleIdentifier, "dev.marten.native")
         XCTAssertNil(Bundle.main.object(forInfoDictionaryKey: "CFBundleURLTypes"))
