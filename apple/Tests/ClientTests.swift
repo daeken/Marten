@@ -35,9 +35,9 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
     private static let offerCode = String(repeating: "A", count: 43)
     private static let fixtureKey = "tskey-auth-fixture-not-a-key"
     private static let fixtureOrigin = "https://test-node.tail-test1.ts.net"
-    private static func fixture(_ origin: String = fixtureOrigin, key: Bool = true) -> String {
+    private static func fixture(_ origin: String = fixtureOrigin, key: Bool = true, code: String = offerCode) -> String {
         let optional = key ? ",\"tsAuthKey\":\"\(fixtureKey)\"" : ""
-        return #"{"v":2,"server":"\#(origin)","code":"\#(offerCode)","expiresAt":"2026-11-25T06:35:00.123Z"\#(optional)}"#
+        return #"{"v":2,"server":"\#(origin)","code":"\#(code)","expiresAt":"2026-11-25T06:35:00.123Z"\#(optional)}"#
     }
 
     func testV2PairOfferIsStrictAndModeExplicit() throws {
@@ -181,6 +181,10 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
         await connections.foreground()
         await connections.select(endpoint)
         XCTAssertNil(connections.connected)
+        await connections.forget(endpoint)
+        XCTAssertEqual(connections.endpoints, [endpoint])
+        XCTAssertEqual(try vault.token(for: endpoint), "fixture-token")
+        XCTAssertTrue(connections.pendingForget.isEmpty)
         let requests = await ordinary.requests
         XCTAssertTrue(requests.isEmpty)
     }
@@ -320,21 +324,155 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(stub.eventRequests.isEmpty)
     }
 
+    @MainActor func testForgetIsRetryableAndRePairRequiresFreshOffer() async throws {
+        let domain = "NativeMartenTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
+        let vault = CredentialStore(service: domain)
+        let endpoint = try Endpoint(Self.fixtureOrigin)
+        let other = try Endpoint("https://another.tail-test1.ts.net")
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer {
+            defaults.removePersistentDomain(forName: domain)
+            try? vault.remove(endpoint)
+            try? vault.remove(other)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let disk = TailnetState(root: root)
+        let node = try disk.directory(for: endpoint)
+        let otherNode = try disk.directory(for: other)
+        let oldIdentity = node.appending(path: "old-identity")
+        try disk.prepareNew(otherNode)
+        try disk.markReady(otherNode)
+        try vault.save("fixture-other", for: other)
+        defaults.set([other.origin], forKey: "endpoints")
+
+        let direct = StubTransport([])
+        let proxy = StubTransport([.init(200, #"{"token":"fixture-old"}"#), .init(400),
+                                   .init(200, #"{"token":"fixture-new"}"#)])
+        let manager = ManagedFixture(first: proxy, replacement: proxy, disk: disk)
+        let connections = Connections(transport: direct, keychain: vault, defaults: defaults, enrollment: manager,
+                                      clock: { .distantPast })
+        connections.scan(Self.fixture())
+        await connections.confirmOffer(deviceName: "Phone")
+        XCTAssertTrue(disk.isReady(node))
+        try Data([1]).write(to: oldIdentity)
+        XCTAssertEqual(try vault.token(for: endpoint), "fixture-old")
+        connections.disconnect()
+        XCTAssertTrue(disk.isReady(node))
+        XCTAssertEqual(try vault.token(for: endpoint), "fixture-old")
+        await connections.select(endpoint)
+        XCTAssertEqual(connections.connected?.endpoint, endpoint)
+
+        let freshCode = String(repeating: "B", count: 43)
+        connections.scan(Self.fixture(code: freshCode))
+        await connections.confirmOffer(deviceName: "Phone")
+        XCTAssertEqual(connections.error, ClientError.pairingAlreadySaved.errorDescription)
+        XCTAssertEqual(try vault.token(for: endpoint), "fixture-old")
+
+        await manager.failNextForget()
+        connections.scan(Self.fixture(code: freshCode))
+        await connections.forget(endpoint)
+        XCTAssertNil(connections.pendingOffer)
+        XCTAssertNil(connections.connected)
+        XCTAssertNil(defaults.string(forKey: "activeEndpoint"))
+        XCTAssertEqual(defaults.stringArray(forKey: "pendingForget"), [endpoint.origin])
+        XCTAssertEqual(connections.error, ClientError.tailnetState.errorDescription)
+        XCTAssertThrowsError(try vault.token(for: endpoint))
+        XCTAssertTrue(disk.isReady(node))
+        XCTAssertEqual(connections.endpoints, [other, endpoint])
+
+        let relaunched = Connections(transport: direct, keychain: vault, defaults: defaults, enrollment: manager,
+                                     clock: { .distantPast })
+        XCTAssertEqual(relaunched.pendingForget, [endpoint])
+        await relaunched.foreground()
+        await relaunched.select(endpoint)
+        XCTAssertNil(relaunched.connected)
+        XCTAssertEqual(relaunched.error, ClientError.forgetPending.errorDescription)
+        relaunched.scan(Self.fixture(code: freshCode))
+        await relaunched.confirmOffer(deviceName: "Phone")
+        XCTAssertEqual(relaunched.error, ClientError.forgetPending.errorDescription)
+        await relaunched.forget(endpoint)
+        XCTAssertEqual(relaunched.endpoints, [other])
+        XCTAssertNil(defaults.object(forKey: "pendingForget"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: node.path))
+        XCTAssertTrue(disk.isReady(otherNode))
+        XCTAssertEqual(try vault.token(for: other), "fixture-other")
+
+        // Like the #55 contract, the server fixture rejects the consumed code.
+        relaunched.scan(Self.fixture())
+        await relaunched.confirmOffer(deviceName: "Phone")
+        XCTAssertEqual(relaunched.error, ClientError.response(400).errorDescription)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: node.path))
+        relaunched.scan(Self.fixture(code: freshCode))
+        await relaunched.confirmOffer(deviceName: "Phone")
+        XCTAssertEqual(relaunched.connected?.token, "fixture-new")
+        XCTAssertEqual(try vault.token(for: endpoint), "fixture-new")
+        XCTAssertTrue(disk.isReady(node))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: oldIdentity.path))
+        let calls = await manager.calls
+        XCTAssertEqual(calls, ["enroll", "commit", "reopen", "forget", "forget", "enroll", "discard", "enroll", "commit"])
+        let proxied = await proxy.requests
+        XCTAssertEqual(proxied.map { $0.url?.path }, Array(repeating: "/api/pair/redeem", count: 3))
+        XCTAssertEqual(try proxied.map { try Self.body($0)["code"] }, [Self.offerCode, Self.offerCode, freshCode])
+        XCTAssertTrue(proxied.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == nil })
+        let directRequests = await direct.requests
+        XCTAssertTrue(directRequests.isEmpty)
+    }
+
+    #if MARTEN_EMBEDDED_TAILNET
+    func testEmbeddedAdapterForgetsClosedCommittedStateWithoutEnrolling() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let state = TailnetState(root: root)
+        let endpoint = try Endpoint(Self.fixtureOrigin)
+        let node = try state.directory(for: endpoint)
+        try state.prepareNew(node)
+        try state.markReady(node)
+        let adapter = TailscaleKitEnrollment(state: state)
+        try await adapter.forgetEnrollment(for: endpoint)
+        try await adapter.forgetEnrollment(for: endpoint)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: node.path))
+        do {
+            _ = try await adapter.connectedTransport(for: endpoint)
+            XCTFail("Adapter reopened a forgotten node")
+        } catch { XCTAssertEqual(error as? ClientError, .tailnetState) }
+        try state.prepareNew(node)
+        XCTAssertFalse(state.isReady(node))
+    }
+    #endif
+
     private actor ManagedFixture: ManagedEnrollment {
         let first: any Transport
         let replacement: any Transport
         var calls: [String] = []
         private var stale = false
         private var replaced = false
+        private var forgetFails = false
+        let disk: TailnetState?
 
-        init(first: any Transport, replacement: any Transport) { self.first = first; self.replacement = replacement }
+        init(first: any Transport, replacement: any Transport, disk: TailnetState? = nil) {
+            self.first = first; self.replacement = replacement; self.disk = disk
+        }
         func enroll(authKey: String, endpoint: Endpoint, deadline: Date) async throws -> any Transport {
             guard authKey == ClientTests.fixtureKey else { throw ClientError.pairOffer }
             calls.append("enroll")
+            if let disk { try disk.prepareNew(disk.directory(for: endpoint)) }
             return try TailnetTransport(endpoint: endpoint, transport: first)
         }
-        func discardEnrollment(for endpoint: Endpoint) async { calls.append("discard") }
-        func commitEnrollment(for endpoint: Endpoint) async throws { calls.append("commit") }
+        func discardEnrollment(for endpoint: Endpoint) async {
+            calls.append("discard")
+            try? disk?.removeNode(for: endpoint)
+        }
+        func commitEnrollment(for endpoint: Endpoint) async throws {
+            calls.append("commit")
+            if let disk { try disk.markReady(disk.directory(for: endpoint)) }
+        }
+        func failNextForget() { forgetFails = true }
+        func forgetEnrollment(for endpoint: Endpoint) async throws {
+            calls.append("forget")
+            if forgetFails { forgetFails = false; throw ClientError.tailnetState }
+            try disk?.removeNode(for: endpoint)
+        }
         func connectedTransport(for endpoint: Endpoint) async throws -> any Transport {
             calls.append("reopen")
             return try TailnetTransport(endpoint: endpoint, transport: replaced ? replacement : first)
@@ -423,7 +561,7 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(saved?.count, 2)
         let relaunched = Connections(transport: transport, keychain: vault, defaults: defaults)
         XCTAssertEqual(relaunched.connected?.token, "fixture-token")
-        relaunched.forget(endpoint)
+        await relaunched.forget(endpoint)
         XCTAssertNil(relaunched.connected)
         XCTAssertThrowsError(try vault.token(for: endpoint))
     }

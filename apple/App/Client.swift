@@ -79,6 +79,7 @@ struct Endpoint: Hashable, Sendable {
 enum ClientError: LocalizedError, Equatable {
     case origin, unauthorized, response(Int), malformed, network, tls, keychain
     case pairOffer, pairExpired, enrollmentUnavailable, deviceName, tailnetState, tailnetNotReady, image
+    case pairingAlreadySaved, forgetPending, nodeCloseFailed
 
     var errorDescription: String? {
         switch self {
@@ -89,6 +90,9 @@ enum ClientError: LocalizedError, Equatable {
         case .image: "Could not read one pairing QR. Try scanning again or importing a different image."
         case .enrollmentUnavailable: "Embedded Tailscale enrollment is unavailable in this build."
         case .tailnetState: "Could not access private Tailscale device state."
+        case .pairingAlreadySaved: "This server is already saved. To pair again, forget it first and get a new pairing QR."
+        case .forgetPending: "Finish forgetting this server before connecting or pairing it again."
+        case .nodeCloseFailed: "Could not confirm that the local Tailscale node stopped. Quit and reopen Marten, then try Forget again."
         case .tailnetNotReady: "The embedded Tailscale connection is not ready."
         case .deviceName: "Use a device name of 1–80 characters with no control characters."
         case .response(let status): "The server returned HTTP \(status). Redirects are not followed."

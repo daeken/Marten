@@ -78,6 +78,14 @@ struct TailnetState {
 
     func isReady(_ directory: URL) -> Bool { FileManager.default.fileExists(atPath: marker(directory).path) }
 
+    /// Call only once no live node can write this directory.
+    func removeNode(for endpoint: Endpoint) throws {
+        let directory = try directory(for: endpoint)
+        do { try FileManager.default.removeItem(at: directory) }
+        catch let error as CocoaError where error.code == .fileNoSuchFile { /* Already absent. */ }
+        catch { throw ClientError.tailnetState }
+    }
+
     private func marker(_ directory: URL) -> URL { directory.appending(path: ".marten-ready", directoryHint: .notDirectory) }
 }
 
@@ -101,6 +109,10 @@ actor TailscaleKitEnrollment: ManagedEnrollment {
     private let state: TailnetState
     private var active: [Endpoint: Node] = [:]
     private var inFlight: Set<Endpoint> = []
+    // At the pinned SDK, close consumes the handle even on error. An
+    // ambiguous close must not be followed by deletion or reopening until
+    // process exit, when there can no longer be a writer in this process.
+    private var failedClose: Set<Endpoint> = []
 
     init(state: TailnetState) { self.state = state }
 
@@ -115,7 +127,7 @@ actor TailscaleKitEnrollment: ManagedEnrollment {
             active[endpoint] = node
             return node.transport
         } catch {
-            try? FileManager.default.removeItem(at: directory)
+            if !failedClose.contains(endpoint) { try? state.removeNode(for: endpoint) }
             throw error
         }
     }
@@ -130,9 +142,18 @@ actor TailscaleKitEnrollment: ManagedEnrollment {
         guard !inFlight.contains(endpoint), let node = active[endpoint], !state.isReady(node.directory) else { return }
         inFlight.insert(endpoint)
         defer { inFlight.remove(endpoint) }
-        active.removeValue(forKey: endpoint)
-        await close(node)
-        try? FileManager.default.removeItem(at: node.directory)
+        do {
+            try await stopNode(for: endpoint)
+            try state.removeNode(for: endpoint)
+        } catch { /* Best-effort rollback; never delete under an unconfirmed close. */ }
+    }
+
+    func forgetEnrollment(for endpoint: Endpoint) async throws {
+        _ = try state.directory(for: endpoint) // Reject any noncanonical origin.
+        try begin(endpoint)
+        defer { inFlight.remove(endpoint) }
+        try await stopNode(for: endpoint)
+        try state.removeNode(for: endpoint)
     }
 
     func connectedTransport(for endpoint: Endpoint) async throws -> any Transport {
@@ -162,8 +183,8 @@ actor TailscaleKitEnrollment: ManagedEnrollment {
         }
         try Task.checkCancellation()
         // A concurrent recovery may have superseded the listener we probed.
-        guard !inFlight.contains(endpoint) else { throw ClientError.tailnetNotReady }
-        if let current = active[endpoint], current.id != cached.id { return current.transport }
+        guard !inFlight.contains(endpoint), let current = active[endpoint] else { throw ClientError.tailnetNotReady }
+        if current.id != cached.id { return current.transport }
         guard let alive else { throw ClientError.tailnetNotReady }
         guard !alive else { return nil }
         return try await connect(endpoint, replaceStaleProxy: true)
@@ -176,8 +197,7 @@ actor TailscaleKitEnrollment: ManagedEnrollment {
         guard state.isReady(directory) else { throw ClientError.tailnetState }
         if let cached = active[endpoint] {
             if !replaceStaleProxy { return cached.transport }
-            active.removeValue(forKey: endpoint)
-            await close(cached)
+            try await stopNode(for: endpoint)
         }
         let node = try await open(endpoint, directory: directory, authKey: nil, deadline: .now.addingTimeInterval(25))
         active[endpoint] = node
@@ -185,12 +205,22 @@ actor TailscaleKitEnrollment: ManagedEnrollment {
     }
 
     private func begin(_ endpoint: Endpoint) throws {
+        guard !failedClose.contains(endpoint) else { throw ClientError.nodeCloseFailed }
         guard inFlight.insert(endpoint).inserted else { throw ClientError.tailnetNotReady }
     }
 
-    private func close(_ entry: Node) async {
-        entry.session.invalidate()
-        try? await entry.node.close()
+    private func stopNode(for endpoint: Endpoint) async throws {
+        guard let entry = active.removeValue(forKey: endpoint) else { return }
+        entry.session.invalidate() // Stop both HTTP requests and WSS reads.
+        try await close(entry.node, for: endpoint)
+    }
+
+    private func close(_ node: TailscaleNode, for endpoint: Endpoint) async throws {
+        do { try await node.close() }
+        catch {
+            failedClose.insert(endpoint)
+            throw ClientError.nodeCloseFailed
+        }
     }
 
     private func open(_ endpoint: Endpoint, directory: URL, authKey: String?, deadline: Date) async throws -> Node {
@@ -230,7 +260,7 @@ actor TailscaleKitEnrollment: ManagedEnrollment {
             }
             throw ClientError.tailnetNotReady
         } catch {
-            try? await node.close()
+            try await close(node, for: endpoint)
             if error is CancellationError { throw CancellationError() }
             throw ClientError.tailnetNotReady
         }

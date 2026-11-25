@@ -18,3 +18,4 @@ targets:
     settings:
       base:
         ARCHS: arm64
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) MARTEN_EMBEDDED_TAILNET

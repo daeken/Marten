@@ -64,6 +64,7 @@ final class Connections {
     private(set) var transportGeneration = UUID()
     private(set) var routeUsable = true
     private(set) var endpoints: [Endpoint]
+    private(set) var pendingForget: Set<Endpoint>
     private(set) var connected: API?
     // A new workspace identity clears old server state, drafts and in-flight refreshes.
     private(set) var workspaceID = UUID()
@@ -79,7 +80,9 @@ final class Connections {
         self.transport = transport
         self.keychain = keychain
         self.defaults = defaults
-        endpoints = (defaults.stringArray(forKey: "endpoints") ?? []).compactMap(Endpoint.saved)
+        let saved = (defaults.stringArray(forKey: "endpoints") ?? []).compactMap(Endpoint.saved)
+        endpoints = saved
+        pendingForget = Set((defaults.stringArray(forKey: "pendingForget") ?? []).compactMap(Endpoint.saved)).intersection(saved)
         if let last = defaults.string(forKey: "activeEndpoint"), let endpoint = Endpoint.saved(last), endpoints.contains(endpoint) {
             if (try? Endpoint(endpoint.origin)) == nil { connect(endpoint) }
         }
@@ -92,6 +95,7 @@ final class Connections {
         defer { busy = false }
         do {
             let endpoint = try Endpoint(developmentOrigin: origin)
+            guard !pendingForget.contains(endpoint) else { throw ClientError.forgetPending }
             guard API.validToken(token) else { throw ClientError.unauthorized }
             _ = try await API(endpoint: endpoint, token: token, transport: transport).status()
             try remember(token, for: endpoint)
@@ -100,6 +104,7 @@ final class Connections {
     #endif
 
     func connect(_ endpoint: Endpoint) {
+        guard !pendingForget.contains(endpoint) else { show(ClientError.forgetPending); return }
         // No production connection mode is active in this build. In particular,
         // a saved origin from an older build cannot select system networking.
         #if DEBUG
@@ -130,7 +135,8 @@ final class Connections {
         defer { busy = false }
         do {
             // Do not overwrite a possibly working node/bearer on a new scan.
-            guard !endpoints.contains(endpoint) else { throw ClientError.tailnetState }
+            guard !pendingForget.contains(endpoint) else { throw ClientError.forgetPending }
+            guard !endpoints.contains(endpoint) else { throw ClientError.pairingAlreadySaved }
             let paired = try await PairingHandshake(directTransport: transport, embedded: enrollment)
                 .confirm(offer, deviceName: deviceName, clock: clock)
             guard let bearer = paired.token else { throw ClientError.malformed }
@@ -150,6 +156,7 @@ final class Connections {
 
     func select(_ endpoint: Endpoint) async {
         guard !busy, endpoints.contains(endpoint) else { return }
+        guard !pendingForget.contains(endpoint) else { show(ClientError.forgetPending); return }
         guard let enrollment, (try? Endpoint(endpoint.origin)) == endpoint else { connect(endpoint); return }
         if connected?.endpoint == endpoint {
             await foreground()
@@ -169,7 +176,8 @@ final class Connections {
     func foreground() async {
         guard !busy, let enrollment else { return }
         guard let api = connected else {
-            if let origin = defaults.string(forKey: "activeEndpoint"), let endpoint = Endpoint.saved(origin), endpoints.contains(endpoint) {
+            if let origin = defaults.string(forKey: "activeEndpoint"), let endpoint = Endpoint.saved(origin),
+               endpoints.contains(endpoint), !pendingForget.contains(endpoint) {
                 await select(endpoint)
             }
             return
@@ -204,14 +212,43 @@ final class Connections {
         defaults.removeObject(forKey: "activeEndpoint")
     }
 
-    func forget(_ endpoint: Endpoint) {
-        guard !busy else { return }
+    func forget(_ endpoint: Endpoint) async {
+        guard !busy, endpoints.contains(endpoint) else { return }
+        let embedded = (try? Endpoint(endpoint.origin)) == endpoint
+        // Do not lose the saved row (and with it the cleanup action) in a
+        // build that cannot close and remove embedded state.
+        guard !embedded || enrollment != nil else { show(ClientError.enrollmentUnavailable); return }
+        cancelOffer()
+        busy = true
+        error = nil
+        defer { busy = false }
+
+        // Retain a retryable row, but never reconnect to it once cleanup has
+        // started, even after failure or relaunch. Store no credentials here.
+        pendingForget.insert(endpoint)
+        persistPendingForget()
+        if connected?.endpoint == endpoint {
+            connected = nil
+            workspaceID = UUID()
+            showServers = false
+        }
+        if defaults.string(forKey: "activeEndpoint") == endpoint.origin {
+            defaults.removeObject(forKey: "activeEndpoint")
+        }
+
         do {
             try keychain.remove(endpoint)
-            if connected?.endpoint == endpoint { disconnect() }
+            if embedded { try await enrollment?.forgetEnrollment(for: endpoint) }
             endpoints.removeAll { $0 == endpoint }
             persistEndpoints()
-        } catch { show(error) }
+            pendingForget.remove(endpoint)
+            persistPendingForget()
+        } catch { self.error = safeMessage(error) }
+    }
+
+    private func persistPendingForget() {
+        if pendingForget.isEmpty { defaults.removeObject(forKey: "pendingForget") }
+        else { defaults.set(pendingForget.map(\.origin).sorted(), forKey: "pendingForget") }
     }
 
     func show(_ error: Error) {

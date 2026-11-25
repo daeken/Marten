@@ -105,7 +105,12 @@ struct ServerScreen: View {
                                     Task { await connections.select(endpoint) }
                                 } label: {
                                     HStack {
-                                        Text(endpoint.origin).lineLimit(2)
+                                        VStack(alignment: .leading) {
+                                            Text(endpoint.origin).lineLimit(2)
+                                            if connections.pendingForget.contains(endpoint) {
+                                                Text("Local cleanup pending").font(.caption).foregroundStyle(.secondary)
+                                            }
+                                        }
                                         Spacer()
                                         if connections.connected?.endpoint == endpoint && connections.routeUsable {
                                             Image(systemName: "checkmark").accessibilityLabel("Connected")
@@ -115,6 +120,7 @@ struct ServerScreen: View {
                                     .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
+                                .disabled(connections.pendingForget.contains(endpoint))
                                 Button(role: .destructive) { forget = endpoint } label: {
                                     Image(systemName: "trash").frame(minWidth: 44, minHeight: 44)
                                 }
@@ -148,7 +154,7 @@ struct ServerScreen: View {
                 }
             }
             .overlay {
-                if connections.busy { ProgressView("Connecting…").padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)) }
+                if connections.busy { ProgressView("Working…").padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)) }
             }
         }
         .interactiveDismissDisabled(connections.busy)
@@ -191,10 +197,14 @@ struct ServerScreen: View {
         }
         #endif
         .alert("Forget this server?", isPresented: Binding(get: { forget != nil }, set: { if !$0 { forget = nil } }), presenting: forget) { endpoint in
-            Button("Forget", role: .destructive) { connections.forget(endpoint) }
+            Button("Forget", role: .destructive) { Task { await connections.forget(endpoint) } }
             Button("Cancel", role: .cancel) {}
         } message: { endpoint in
-            Text("Remove the local credential for \(endpoint.origin)? This does not revoke it on the server.")
+            if (try? Endpoint(endpoint.origin)) == endpoint {
+                Text("Remove the local credential and Tailscale node state for \(endpoint.origin)? This does not revoke the credential on the server or remove the device from your tailnet. To pair again, get a new QR.")
+            } else {
+                Text("Remove the local credential for \(endpoint.origin)? This does not revoke it on the server.")
+            }
         }
     }
 }

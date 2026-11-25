@@ -100,6 +100,9 @@ protocol EmbeddedEnrollment: Sendable {
 
 protocol ManagedEnrollment: EmbeddedEnrollment {
     func commitEnrollment(for endpoint: Endpoint) async throws
+    /// Close the local session/node and remove its private state without remote revocation.
+    /// Already-absent state must be treated as success so interrupted cleanup can be retried.
+    func forgetEnrollment(for endpoint: Endpoint) async throws
     func connectedTransport(for endpoint: Endpoint) async throws -> any Transport
     /// Returns a replacement only when the current proxy was confirmed stale.
     func recoverOnForeground(for endpoint: Endpoint) async throws -> (any Transport)?
