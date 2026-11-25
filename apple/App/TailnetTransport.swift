@@ -17,6 +17,11 @@ struct TailnetTransport: EventTransport {
         return try await transport.data(for: request)
     }
 
+    func boundedData(for request: URLRequest, limit: Int) async throws -> (Data, HTTPURLResponse) {
+        try check(request, events: false)
+        return try await transport.boundedData(for: request, limit: limit)
+    }
+
     func events(for request: URLRequest) throws -> EventStream {
         try check(request, events: true)
         guard let header = request.value(forHTTPHeaderField: "Authorization"), header.hasPrefix("Bearer "),

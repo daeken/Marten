@@ -784,6 +784,72 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems, [URLQueryItem(name: "projectId", value: "p&x=1")])
     }
 
+    func testAttachmentStaysOnPinnedBearerRouteAndRejectsUnexpectedResponses() async throws {
+        let endpoint = try Endpoint(Self.fixtureOrigin)
+        let fixture = StubTransport([.init(200, "placeholder", mime: "image/png"), .init(307), .init(200, "unexpected", mime: "text/html"), .init(200, String(repeating: "x", count: 12 * 1024 * 1024 + 1), mime: "image/png")])
+        let transport = try TailnetTransport(endpoint: endpoint, transport: fixture)
+        let api = API(endpoint: endpoint, token: "fixture-bearer", transport: transport)
+        let image = TranscriptImage(path: #"C:\private\images\20260101-image.png"#, mimeType: "image/png")
+        let data = try await api.image(image, agent: "agent-1")
+        XCTAssertEqual(data, Data("placeholder".utf8))
+        for expected in [ClientError.response(307), .attachment, .attachment] {
+            do { _ = try await api.image(image, agent: "agent-1"); XCTFail("Accepted rejected image") }
+            catch { XCTAssertEqual(error as? ClientError, expected) }
+        }
+        for path in ["/tmp/.png", "/tmp/injected%2Fname.png", "/tmp/name.png?token=x", "/tmp/name.svg"] {
+            do { _ = try await api.image(.init(path: path, mimeType: "image/png"), agent: "agent-1"); XCTFail("Accepted bad filename") }
+            catch { XCTAssertEqual(error as? ClientError, .attachment) }
+        }
+        do { _ = try await API(endpoint: endpoint, transport: transport).image(image, agent: "agent-1"); XCTFail("Accepted missing Bearer") }
+        catch { XCTAssertEqual(error as? ClientError, .unauthorized) }
+        let requests = await fixture.requests
+        XCTAssertEqual(requests.count, 4)
+        XCTAssertTrue(requests.allSatisfy { $0.url?.absoluteString == endpoint.origin + "/api/agents/agent-1/images/20260101-image.png" && $0.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-bearer" && $0.value(forHTTPHeaderField: "Accept") == "image/png" })
+    }
+
+    func testNativeRichTextAndBoundedImageDecoding() throws {
+        let source = "# Heading\n\n**bold** and [label](https://example.invalid/x)\n\n```swift\nlet n = 1\n```"
+        let blocks = TranscriptBlock.parse(source)
+        XCTAssertEqual(blocks.map(\.style), [.heading, .paragraph, .code])
+        XCTAssertEqual(blocks.last?.text, "let n = 1")
+        let inline = TranscriptBlock.inline(blocks[1].text)
+        XCTAssertEqual(String(inline.characters), "bold and label")
+        XCTAssertTrue(inline.runs.allSatisfy { $0.link == nil })
+        let bytes = try XCTUnwrap(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR1sAAAAASUVORK5CYII="))
+        let image = try AttachmentPreview.thumbnail(bytes)
+        XCTAssertEqual(image.width, 1)
+        XCTAssertEqual(image.height, 1)
+        XCTAssertThrowsError(try AttachmentPreview.thumbnail(Data("<svg/>".utf8)))
+    }
+
+    func testLiveEventsKeepAccumulatedDeltasAndFollowOnlyAtLiveTail() {
+        var events = LiveEvents()
+        func receive(_ payload: String) -> (updated: Bool, invalidate: Bool) { events.receive(Data(payload.utf8)) }
+        XCTAssertTrue(receive(#"{"type":"model_call_start","agentId":"a","modelCall":{"kind":"compaction"}}"#).updated)
+        XCTAssertEqual(events.agents["a"]?.thinking, "Compacting context")
+        XCTAssertFalse(receive(#"{"type":"delta","agentId":"a","text":"Hello "}"#).invalidate)
+        _ = receive(#"{"type":"delta","agentId":"b","text":"Other agent"}"#)
+        _ = receive(#"{"type":"delta","agentId":"a","text":"again"}"#)
+        XCTAssertEqual(events.agents["a"]?.text, "Hello again")
+        XCTAssertTrue(receive(#"{"type":"entry","agentId":"a","entry":{"seq":9,"kind":"assistant"}}"#).invalidate)
+        XCTAssertTrue(events.agents["a"]?.text.isEmpty == true)
+        _ = receive(#"{"type":"tool_start","agentId":"a","name":"fixture"}"#)
+        XCTAssertEqual(events.agents["a"]?.tool, "fixture")
+        _ = receive(#"{"type":"entry","agentId":"a","entry":{"seq":10,"kind":"tool_result"}}"#)
+        XCTAssertNil(events.agents["a"]?.tool)
+        _ = receive(#"{"type":"model_call_end","agentId":"a","modelCall":{"outcome":"failed"}}"#)
+        XCTAssertNil(events.agents["a"])
+        XCTAssertEqual(events.agents["b"]?.text, "Other agent")
+        XCTAssertTrue(LiveEvents().agents.isEmpty)
+        var follow = LiveFollow()
+        XCTAssertTrue(follow.shouldFollow(archived: false))
+        XCTAssertFalse(follow.shouldFollow(archived: true))
+        follow.measure(distance: 200)
+        XCTAssertFalse(follow.shouldFollow(archived: false))
+        follow.resume()
+        XCTAssertTrue(follow.shouldFollow(archived: false))
+    }
+
     private static func body(_ request: URLRequest) throws -> [String: String] {
         let body = try XCTUnwrap(request.httpBody)
         return try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])
@@ -794,7 +860,8 @@ private actor StubTransport: Transport {
     struct Reply {
         let code: Int
         let body: String
-        init(_ code: Int, _ body: String = "") { self.code = code; self.body = body }
+        let mime: String?
+        init(_ code: Int, _ body: String = "", mime: String? = nil) { self.code = code; self.body = body; self.mime = mime }
     }
     var requests: [URLRequest] = []
     var replies: [Reply]
@@ -806,6 +873,6 @@ private actor StubTransport: Transport {
         guard !replies.isEmpty else { throw URLError(.badServerResponse) }
         let reply = replies.removeFirst()
         return (Data(reply.body.utf8), HTTPURLResponse(url: request.url!, statusCode: reply.code,
-                                                       httpVersion: "HTTP/1.1", headerFields: nil)!)
+                                                       httpVersion: "HTTP/1.1", headerFields: reply.mime.map { ["Content-Type": $0] })!)
     }
 }

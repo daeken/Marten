@@ -108,6 +108,10 @@ struct TimelineRow: Identifiable {
 struct EntryRow: View {
     let entry: Entry
     let result: Entry?
+    let api: API
+    let agent: String
+    let active: Bool
+    let route: UUID
 
     @ViewBuilder var body: some View {
         switch entry.kind {
@@ -123,20 +127,23 @@ struct EntryRow: View {
                 switch entry.kind {
                 case "tool_call":
                     DisclosureGroup(toolLabel) {
-                        if let arguments = entry.arguments { code(arguments) }
-                        if let output = result?.text { code(output) }
+                        if let arguments = entry.arguments { TranscriptCode(text: pretty(arguments)) }
+                        if let result { output(result) }
                     }
                 case "tool_result":
                     DisclosureGroup(entry.isError == true ? "Tool result (error) · call on another page" : "Tool result · call on another page") {
-                        if let output = entry.text { code(output) }
+                        output(entry)
                     }
                 case "reasoning", "compaction":
                     DisclosureGroup(entry.kind == "reasoning" ? "Reasoning" : entry.reason == "whole" ? "Context compacted · summary" : "Older context rolled over · summary") {
-                        if let text = entry.text { Text(text).textSelection(.enabled) }
+                        if let text = entry.text { RichTranscript(text: text) }
                     }
                 default:
                     Text(title).font(.subheadline.bold()).foregroundStyle(entry.kind == "error" ? Color.red : .secondary)
-                    if let text = entry.text { Text(text).textSelection(.enabled) }
+                    if let text = entry.text {
+                        if entry.kind == "message" && entry.from == "Sera" { Text(text).textSelection(.enabled) }
+                        else { RichTranscript(text: text) }
+                    }
                 }
                 if let stamp = entry.ts { InboxTime(stamp: stamp) }
             }
@@ -162,8 +169,17 @@ struct EntryRow: View {
         Text(text).font(.footnote).foregroundStyle(.secondary).frame(maxWidth: .infinity)
     }
 
-    private func code(_ text: String) -> some View {
-        Text(text).font(.callout.monospaced()).textSelection(.enabled)
-            .frame(maxWidth: .infinity, alignment: .leading)
+    private func pretty(_ arguments: String) -> String {
+        guard let json = try? JSONSerialization.jsonObject(with: Data(arguments.utf8)) else { return arguments }
+        if entry.name == "powershell", let command = (json as? [String: Any])?["command"] as? String { return command }
+        guard let formatted = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) else { return arguments }
+        return String(decoding: formatted, as: UTF8.self)
+    }
+
+    @ViewBuilder private func output(_ entry: Entry) -> some View {
+        if let text = entry.text { TranscriptCode(text: text) }
+        ForEach(Array((entry.images ?? []).enumerated()), id: \.offset) { _, ref in
+            AttachmentPreview(ref: ref, api: api, agent: agent, active: active, route: route).id(ref)
+        }
     }
 }

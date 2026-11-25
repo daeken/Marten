@@ -10,6 +10,8 @@ struct WorkspaceView: View {
     @State private var checking = false
     @State private var scope: AgentScope = .all
     @State private var eventHint = UUID()
+    @State private var activity: [String: LiveActivity] = [:]
+    @State private var socketID = UUID()
     @State private var path: [WorkspaceDestination] = []
     @State private var inbox = InboxState()
     @State private var messages = MessagesState()
@@ -101,7 +103,8 @@ struct WorkspaceView: View {
                     if let agent = status?.agents.first(where: { $0.id == id }) {
                         ConversationView(api: api, agent: agent, refreshStatus: refresh, routeID: routeID,
                                          networkActive: networkActive && path.last == destination, eventHint: eventHint,
-                                         inbox: inbox, answer: submitAnswer).id(id)
+                                         inbox: inbox, answer: submitAnswer,
+                                         activity: networkActive ? activity[id] : nil).id(id)
                     } else {
                         ContentUnavailableView("Agent Unavailable", systemImage: "bubble.left")
                     }
@@ -116,8 +119,11 @@ struct WorkspaceView: View {
             }
         }
         .task(id: RefreshRoute(id: routeID, active: networkActive)) {
+            let id = UUID()
+            socketID = id
+            activity = [:]
             guard networkActive else { return }
-            await listenForEvents()
+            await listenForEvents(id: id)
         }
         .task(id: RefreshRoute(id: routeID, active: networkActive && showsInboxData)) {
             guard networkActive, showsInboxData else { return }
@@ -160,7 +166,16 @@ struct WorkspaceView: View {
         await messages.refresh(api)
     }
 
-    @MainActor private func listenForEvents() async {
+    @MainActor private func consumeActivity(_ stream: AsyncStream<[String: LiveActivity]>?, id: UUID) async {
+        guard let stream else { return }
+        for await update in stream {
+            guard !Task.isCancelled, socketID == id else { return }
+            activity = update
+        }
+        if socketID == id { activity = [:] }
+    }
+
+    @MainActor private func listenForEvents(id: UUID) async {
         var delay = 1
         let clock = ContinuousClock()
         while !Task.isCancelled {
@@ -169,12 +184,16 @@ struct WorkspaceView: View {
                 guard let stream = try api.events() else { return }
                 defer { stream.cancel() }
                 try await withTaskCancellationHandler {
+                    async let live: Void = consumeActivity(stream.activity, id: id)
+                    defer { stream.cancel() }
                     for try await _ in stream.hints {
                         try Task.checkCancellation()
                         eventHint = UUID()
                         await refresh()
                         try await Task.sleep(for: .seconds(1))
                     }
+                    stream.cancel()
+                    await live
                 } onCancel: { stream.cancel() }
             } catch {
                 // Polling remains on the same route; only the socket is retried.
@@ -236,6 +255,7 @@ private struct ConversationView: View {
     @State private var timeline = TimelinePages()
     let inbox: InboxState
     let answer: (String, Int?) -> Void
+    let activity: LiveActivity?
     @State private var loaded = false
     @State private var checking = false
     @State private var pageRequest: UUID?
@@ -248,6 +268,10 @@ private struct ConversationView: View {
     @State private var showInterrupt = false
     @State private var scrollTarget: TimelineRow.ID = .end
     @State private var scrollGeneration = 0
+    @State private var follow = LiveFollow()
+
+    private var rows: [TimelineRow] { timeline.rows(questions: inbox.questions(for: agent.id)) }
+    private var live: LiveActivity? { timeline.archive == nil ? activity : nil }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -263,7 +287,6 @@ private struct ConversationView: View {
                         ProgressView("Loading transcript…")
                     }
                     if timeline.page != nil {
-                        let rows = timeline.rows(questions: inbox.questions(for: agent.id))
                         if rows.isEmpty { Text("No transcript entries yet.").foregroundStyle(.secondary) }
                         ForEach(rows) { row in
                             Group {
@@ -271,12 +294,22 @@ private struct ConversationView: View {
                                 case .question(let question):
                                     QuestionCard(message: question, inbox: inbox, active: networkActive, answer: answer)
                                 case .entry(let entry, let result):
-                                    EntryRow(entry: entry, result: result)
+                                    EntryRow(entry: entry, result: result, api: api, agent: agent.id, active: networkActive, route: routeID)
                                 }
                             }.id(row.id)
                         }
                     }
+                    if let live {
+                        if let tool = live.tool { Label("Running \(tool)…", systemImage: "hammer").font(.footnote) }
+                        if !live.text.isEmpty { RichTranscript(text: live.text) }
+                        else if let thinking = live.thinking { ProgressView(thinking).font(.footnote) }
+                    }
                     Color.clear.frame(height: 1).id(TimelineRow.ID.end).accessibilityHidden(true)
+                        .onGeometryChange(for: CGFloat.self) { geometry in
+                            guard let viewport = geometry.bounds(of: .scrollView(axis: .vertical)) else { return .infinity }
+                            return -viewport.maxY
+                        } action: { distance in follow.measure(distance: distance) }
+                        .onDisappear { follow.measure(distance: .infinity) }
                 }
                 .padding()
                 .frame(maxWidth: 860)
@@ -289,6 +322,8 @@ private struct ConversationView: View {
             .onChange(of: scrollGeneration) {
                 proxy.scrollTo(scrollTarget, anchor: scrollTarget == .end ? .bottom : .top)
             }
+            .onChange(of: rows.map(\.id)) { followLatest(using: proxy) }
+            .onChange(of: live) { followLatest(using: proxy) }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) { composer }
         .navigationTitle(agent.name)
@@ -402,10 +437,16 @@ private struct ConversationView: View {
         scrollGeneration += 1
     }
 
+    private func followLatest(using proxy: ScrollViewProxy) {
+        guard follow.shouldFollow(archived: timeline.archive != nil) else { return }
+        proxy.scrollTo(TimelineRow.ID.end, anchor: .bottom)
+    }
+
     private func returnToLatest() {
         pageRequest = nil
         pageError = nil
         timeline.returnToLatest()
+        follow.resume()
         jump()
     }
 

@@ -80,6 +80,7 @@ enum ClientError: LocalizedError, Equatable {
     case origin, unauthorized, response(Int), malformed, network, tls, keychain
     case pairOffer, pairExpired, enrollmentUnavailable, deviceName, tailnetState, tailnetNotReady, image
     case pairingAlreadySaved, forgetPending, nodeCloseFailed
+    case attachment
 
     var errorDescription: String? {
         switch self {
@@ -88,6 +89,7 @@ enum ClientError: LocalizedError, Equatable {
         case .pairOffer: "This is not a supported pairing QR for the selected connection mode."
         case .pairExpired: "This pairing QR has expired. Get a new one from the server."
         case .image: "Could not read one pairing QR. Try scanning again or importing a different image."
+        case .attachment: "This attachment is not a supported image or exceeds the preview limit."
         case .enrollmentUnavailable: "Embedded Tailscale enrollment is unavailable in this build."
         case .tailnetState: "Could not access private Tailscale device state."
         case .pairingAlreadySaved: "This server is already saved. To pair again, forget it first and get a new pairing QR."
@@ -106,11 +108,21 @@ enum ClientError: LocalizedError, Equatable {
 
 protocol Transport: Sendable {
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse)
+    func boundedData(for request: URLRequest, limit: Int) async throws -> (Data, HTTPURLResponse)
+}
+
+extension Transport {
+    func boundedData(for request: URLRequest, limit: Int) async throws -> (Data, HTTPURLResponse) {
+        let (body, response) = try await data(for: request)
+        guard body.count <= limit else { throw ClientError.attachment }
+        return (body, response)
+    }
 }
 
 struct EventStream: Sendable {
     let hints: AsyncThrowingStream<Void, any Error>
     let cancel: @Sendable () -> Void
+    var activity: AsyncStream<[String: LiveActivity]>? = nil
 }
 
 protocol EventTransport: Transport {
@@ -133,13 +145,23 @@ struct URLSessionTransport: EventTransport {
         let socket = session.webSocketTask(with: request)
         socket.maximumMessageSize = 1_048_576
         let (hints, continuation) = AsyncThrowingStream<Void, any Error>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let (activity, updates) = AsyncStream<[String: LiveActivity]>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let reader = Task {
+            var live = LiveEvents()
             socket.resume()
-            defer { socket.cancel(with: .goingAway, reason: nil) }
+            defer { updates.finish(); socket.cancel(with: .goingAway, reason: nil) }
             do {
                 while !Task.isCancelled {
-                    _ = try await socket.receive()
-                    continuation.yield(()) // Events are invalidation hints, never action replays.
+                    let frame = try await socket.receive()
+                    let payload: Data
+                    switch frame {
+                    case .string(let text): payload = Data(text.utf8)
+                    case .data(let data): payload = data
+                    @unknown default: continue
+                    }
+                    let change = live.receive(payload)
+                    if change.updated { updates.yield(live.agents) }
+                    if change.invalidate { continuation.yield(()) }
                 }
                 continuation.finish()
             } catch { continuation.finish(throwing: ClientError.network) }
@@ -149,7 +171,21 @@ struct URLSessionTransport: EventTransport {
             socket.cancel(with: .goingAway, reason: nil)
         }
         continuation.onTermination = { @Sendable _ in cancel() }
-        return EventStream(hints: hints, cancel: cancel)
+        return EventStream(hints: hints, cancel: cancel, activity: activity)
+    }
+
+    func boundedData(for request: URLRequest, limit: Int) async throws -> (Data, HTTPURLResponse) {
+        let (bytes, response) = try await session.bytes(for: request)
+        defer { bytes.task.cancel() }
+        guard let http = response as? HTTPURLResponse else { throw ClientError.malformed }
+        guard (200..<300).contains(http.statusCode) else { return (Data(), http) }
+        guard http.expectedContentLength <= Int64(limit) else { throw ClientError.attachment }
+        var data = Data()
+        for try await byte in bytes {
+            guard data.count < limit else { throw ClientError.attachment }
+            data.append(byte)
+        }
+        return (data, http)
     }
 
     func invalidate() { session.invalidateAndCancel() }
@@ -206,6 +242,22 @@ struct Entry: Decodable, Identifiable, Sendable {
     private(set) var isError: Bool? = nil
     private(set) var seqs: [Int64]? = nil
     private(set) var model: String? = nil
+    private(set) var images: [TranscriptImage]? = nil
+}
+
+struct TranscriptImage: Decodable, Hashable, Sendable {
+    let path: String
+    let mimeType: String
+
+    func resource() throws -> (name: String, mime: String) {
+        let name = path.components(separatedBy: CharacterSet(charactersIn: "/\\")).last ?? ""
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
+        guard !name.isEmpty, !name.hasPrefix("."), name.utf8.count <= 255,
+              name.unicodeScalars.allSatisfy(allowed.contains) else { throw ClientError.attachment }
+        let mime = ["png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif", "webp": "image/webp"][(name as NSString).pathExtension.lowercased()]
+        guard let mime, mime == mimeType else { throw ClientError.attachment }
+        return (name, mime)
+    }
 }
 
 struct InboxMessage: Decodable, Identifiable, Sendable {
@@ -289,6 +341,14 @@ struct API: Sendable {
         try await decode(ServerStatus.self, call("GET", "/api/status"))
     }
 
+    func image(_ ref: TranscriptImage, agent: String) async throws -> Data {
+        guard let token, Self.validToken(token) else { throw ClientError.unauthorized }
+        let resource = try ref.resource()
+        let payload = try await response("GET", route(agent, "images/\(resource.name)"), accept: resource.mime, limit: 12 * 1024 * 1024)
+        guard payload.1.mimeType?.lowercased() == resource.mime else { throw ClientError.attachment }
+        return payload.0
+    }
+
     func agentMessages(projectID: String?) async throws -> [AgentMessage] {
         guard let token, Self.validToken(token) else { throw ClientError.unauthorized }
         let query = projectID.flatMap { $0.isEmpty ? nil : URLQueryItem(name: "projectId", value: $0) }
@@ -356,18 +416,26 @@ struct API: Sendable {
     }
 
     private func call(_ method: String, _ path: String, body: Data? = nil, query: [URLQueryItem] = []) async throws -> Data {
+        try await response(method, path, body: body, query: query).0
+    }
+
+    private func response(_ method: String, _ path: String, body: Data? = nil, query: [URLQueryItem] = [],
+                          accept: String = "application/json", limit: Int? = nil) async throws -> (Data, HTTPURLResponse) {
         var url = URLComponents(url: endpoint.url, resolvingAgainstBaseURL: false)!
         url.path = path
         if !query.isEmpty { url.queryItems = query }
         var request = URLRequest(url: url.url!)
         request.httpMethod = method
         request.httpBody = body
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue(accept, forHTTPHeaderField: "Accept")
         if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         let (data, response): (Data, HTTPURLResponse)
         do {
-            (data, response) = try await transport.data(for: request)
+            if let limit { (data, response) = try await transport.boundedData(for: request, limit: limit) }
+            else { (data, response) = try await transport.data(for: request) }
+        } catch let error as ClientError {
+            throw error
         } catch is CancellationError {
             throw CancellationError()
         } catch let error as URLError {
@@ -386,6 +454,6 @@ struct API: Sendable {
             // Never surface response bodies, request URLs or underlying transport errors.
             throw ClientError.response(response.statusCode)
         }
-        return data
+        return (data, response)
     }
 }
