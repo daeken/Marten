@@ -30,6 +30,93 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
         }
     }
 
+    private static let offerCode = String(repeating: "A", count: 43)
+    private static let fixtureKey = "tskey-auth-fixture-not-a-key"
+    private static let fixtureOrigin = "https://test-node.tail-test1.ts.net"
+    private static func fixture(_ origin: String = fixtureOrigin, key: Bool = true) -> String {
+        let optional = key ? ",\"tsAuthKey\":\"\(fixtureKey)\"" : ""
+        return #"{"v":2,"server":"\#(origin)","code":"\#(offerCode)","expiresAt":"2026-11-25T06:35:00.123Z"\#(optional)}"#
+    }
+
+    func testV2PairOfferIsStrictAndModeExplicit() throws {
+        let good = Self.fixture()
+        let offer = try PairOffer(good, mode: .embedded, now: .distantPast)
+        XCTAssertEqual(offer.endpoint.origin, Self.fixtureOrigin)
+        XCTAssertFalse(String(reflecting: offer).contains(Self.fixtureKey))
+        for bad in [good.replacingOccurrences(of: "\"v\":2", with: "\"v\":2.0"),
+                    good.replacingOccurrences(of: "\"v\":2", with: "\"v\":\"2\""),
+                    good.replacingOccurrences(of: "\"v\":2", with: "\"v\":2,\"\\u0076\":2"),
+                    good.replacingOccurrences(of: "\"v\":2", with: "\"v\":2,\"other\":2"),
+                    good.replacingOccurrences(of: Self.offerCode, with: String(Self.offerCode.dropLast()) + "+"),
+                    good.replacingOccurrences(of: Self.fixtureKey, with: "tskey-auth-"),
+                    good.replacingOccurrences(of: "00.123Z", with: "00Z"),
+                    good + "{}", "marten://pair?v=1&code=fixture", Self.fixture(key: false),
+                    Self.fixture(Self.fixtureOrigin + ":443"), Self.fixture("https://localhost"),
+                    String(repeating: " ", count: 4097) + good] {
+            XCTAssertThrowsError(try PairOffer(bad, mode: .embedded, now: .distantPast))
+        }
+        XCTAssertThrowsError(try PairOffer(good, mode: .embedded, now: .distantFuture)) {
+            XCTAssertEqual($0 as? ClientError, .pairExpired)
+        }
+        XCTAssertThrowsError(try PairOffer(good, mode: .direct, now: .distantPast))
+        let direct = "https://private.example:8443"
+        XCTAssertEqual(try PairOffer(Self.fixture(direct, key: false), mode: .direct, now: .distantPast).endpoint.origin, direct)
+    }
+
+    func testEmbeddedRedemptionNeverUsesDirectTransportOrForwardsEnrollmentKey() async throws {
+        let offer = try PairOffer(Self.fixture(), mode: .embedded, now: .distantPast)
+        let direct = StubTransport([])
+        let proxied = StubTransport([.init(200, #"{"token":"fixture-operator"}"#), .init(200, #"{"projects":[],"agents":[]}"#)])
+        do {
+            _ = try await PairingHandshake(directTransport: direct, embedded: nil)
+                .confirm(offer, deviceName: "Phone", clock: { .distantPast })
+            XCTFail("Embedded pairing without enrollment was accepted")
+        } catch { XCTAssertEqual(error as? ClientError, .enrollmentUnavailable) }
+        let enroller = FixtureEnrollment(transport: proxied)
+        let flow = PairingHandshake(directTransport: direct, embedded: enroller)
+        let paired = try await flow.confirm(offer, deviceName: "  Phone  ", clock: { .distantPast })
+        _ = try await paired.status()
+        let directRequests = await direct.requests
+        XCTAssertTrue(directRequests.isEmpty)
+        let origins = await enroller.enrolledOrigins
+        XCTAssertEqual(origins, [Self.fixtureOrigin])
+        let requests = await proxied.requests
+        XCTAssertEqual(requests.count, 2)
+        let redeem = try XCTUnwrap(requests.first)
+        XCTAssertEqual(redeem.url?.absoluteString, Self.fixtureOrigin + "/api/pair/redeem")
+        XCTAssertNil(redeem.value(forHTTPHeaderField: "Authorization"))
+        XCTAssertEqual(try Self.body(redeem), ["code": Self.offerCode, "deviceName": "Phone"])
+        XCTAssertEqual(requests.last?.value(forHTTPHeaderField: "Authorization"), "Bearer fixture-operator")
+    }
+
+    func testFailedRedemptionDiscardsEmbeddedEnrollment() async throws {
+        let offer = try PairOffer(Self.fixture(), mode: .embedded, now: .distantPast)
+        let direct = StubTransport([])
+        let enroller = FixtureEnrollment(transport: StubTransport([.init(400)]))
+        do {
+            _ = try await PairingHandshake(directTransport: direct, embedded: enroller)
+                .confirm(offer, deviceName: "Phone", clock: { .distantPast })
+            XCTFail("Invalid redemption was accepted")
+        } catch { XCTAssertEqual(error as? ClientError, .response(400)) }
+        let discarded = await enroller.discardedOrigins
+        XCTAssertEqual(discarded, [Self.fixtureOrigin])
+        let requests = await direct.requests
+        XCTAssertTrue(requests.isEmpty)
+    }
+
+    private actor FixtureEnrollment: EmbeddedEnrollment {
+        let transport: any Transport
+        var enrolledOrigins: [String] = []
+        var discardedOrigins: [String] = []
+        init(transport: any Transport) { self.transport = transport }
+        func enroll(authKey: String, endpoint: Endpoint, deadline: Date) async throws -> any Transport {
+            guard authKey == ClientTests.fixtureKey else { throw ClientError.pairOffer }
+            enrolledOrigins.append(endpoint.origin)
+            return transport
+        }
+        func discardEnrollment(for endpoint: Endpoint) async { discardedOrigins.append(endpoint.origin) }
+    }
+
     func testAppHasNoExternalURLSchemeRegistration() {
         XCTAssertEqual(Bundle.main.bundleIdentifier, "dev.marten.native")
         XCTAssertNil(Bundle.main.object(forInfoDictionaryKey: "CFBundleURLTypes"))

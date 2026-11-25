@@ -17,6 +17,22 @@ struct Endpoint: Hashable, Sendable {
         self.url = url
     }
 
+    // Standalone HTTPS is chosen explicitly; it must not loosen the embedded origin check.
+    init(directHTTPSOrigin origin: String) throws {
+        let prefix = "https://"
+        guard origin.hasPrefix(prefix), origin.utf8.count <= 267 else { throw ClientError.origin }
+        let authority = origin.dropFirst(prefix.count).split(separator: ":", omittingEmptySubsequences: false)
+        guard let host = authority.first, (1...2).contains(authority.count), host.utf8.count <= 253,
+              host != "localhost", !host.hasSuffix(".localhost"),
+              host.split(separator: ".", omittingEmptySubsequences: false).allSatisfy(Self.isDNSLabel),
+              let url = URL(string: origin), url.absoluteString == origin else { throw ClientError.origin }
+        if authority.count == 2 {
+            guard let port = Int(authority[1]), (1...65535).contains(port), port != 443,
+                  authority[1] == String(port) else { throw ClientError.origin }
+        }
+        self.url = url
+    }
+
     private static func isDNSLabel(_ label: Substring) -> Bool {
         let bytes = label.utf8
         guard bytes.count <= 63, let first = bytes.first, let last = bytes.last,
@@ -62,11 +78,16 @@ struct Endpoint: Hashable, Sendable {
 
 enum ClientError: LocalizedError, Equatable {
     case origin, unauthorized, response(Int), malformed, network, tls, keychain
+    case pairOffer, pairExpired, enrollmentUnavailable, deviceName
 
     var errorDescription: String? {
         switch self {
         case .origin: "Use the exact https://<device>.<tailnet>.ts.net origin, without a port or path. Manual development connections must use loopback."
         case .unauthorized: "The server rejected the Marten credential."
+        case .pairOffer: "This is not a supported pairing QR for the selected connection mode."
+        case .pairExpired: "This pairing QR has expired. Get a new one from the server."
+        case .enrollmentUnavailable: "Embedded Tailscale enrollment is unavailable in this build."
+        case .deviceName: "Use a device name of 1–80 characters with no control characters."
         case .response(let status): "The server returned HTTP \(status). Redirects are not followed."
         case .malformed: "The server returned an unexpected response."
         case .network: "Could not reach the server. Check the network and Tailscale connection."
@@ -159,6 +180,17 @@ struct API: Sendable {
 
     static func validToken(_ token: String) -> Bool {
         !token.isEmpty && token.utf8.count <= 8192 && token.utf8.allSatisfy { (33...126).contains($0) }
+    }
+
+    func redeem(code: String, deviceName: String) async throws -> API {
+        struct Redemption: Encodable { let code: String; let deviceName: String }
+        struct Credential: Decodable { let token: String }
+        // Construct an unauthenticated API even if called on an already paired client.
+        let bootstrap = API(endpoint: endpoint, transport: transport)
+        let body = try JSONEncoder().encode(Redemption(code: code, deviceName: deviceName))
+        let credential = try await bootstrap.decode(Credential.self, bootstrap.call("POST", "/api/pair/redeem", body: body))
+        guard Self.validToken(credential.token) else { throw ClientError.malformed }
+        return API(endpoint: endpoint, token: credential.token, transport: transport)
     }
 
     func status() async throws -> ServerStatus {
