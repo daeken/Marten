@@ -1,98 +1,77 @@
-import CoreImage
-import CoreImage.CIFilterBuiltins
 import Foundation
 import XCTest
 @testable import Marten
 
 final class ClientTests: XCTestCase, @unchecked Sendable {
-    func testImportQRImage() throws {
-        let filter = CIFilter.qrCodeGenerator()
-        filter.message = Data(Self.offer.utf8)
-        let qr = try XCTUnwrap(filter.outputImage).transformed(by: CGAffineTransform(scaleX: 8, y: 8))
-        let canvas = qr.extent.insetBy(dx: -32, dy: -32)
-        let image = qr.composited(over: CIImage(color: .white).cropped(to: canvas))
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID()).png")
-        defer { try? FileManager.default.removeItem(at: url) }
-        try CIContext().writePNGRepresentation(of: image, to: url, format: .RGBA8,
-                                              colorSpace: CGColorSpaceCreateDeviceRGB())
-        let offer = try PairOffer(QRImage.read(url))
-        XCTAssertEqual(offer.endpoint.origin, "https://marten.example:8443")
-    }
-
-    func testOriginNormalizesAndRejectsNonOrigins() throws {
-        XCTAssertEqual(try Endpoint("HTTPS://MARTEN.example:443/").origin, "https://marten.example")
-        XCTAssertEqual(try Endpoint("https://marten.example:8443").origin, "https://marten.example:8443")
-        for invalid in ["http://marten.example", "https://user@server.example", "https://server.example/api",
-                        "https://server.example?", "https://server.example#", "https://server.example:65536",
-                        "https://server.example/%2f", "marten.example", "https://%6darten.example"] {
+    func testOnlyCanonicalTailnetOriginIsAccepted() throws {
+        let origin = "https://marten.tail-test1.ts.net"
+        XCTAssertEqual(try Endpoint(origin).origin, origin)
+        XCTAssertEqual(Endpoint.saved(origin)?.origin, origin)
+        for invalid in [
+            "http://marten.tail-test1.ts.net", "HTTPS://marten.tail-test1.ts.net", "https://Marten.tail-test1.ts.net",
+            "https://marten.Tail-test1.ts.net", "https://marten.tail-test1.ts.net:443", "https://marten.tail-test1.ts.net:8443",
+            "\(origin)/", "\(origin)/api", "\(origin)?", "\(origin)#", "\(origin).", " \(origin)",
+            "https://user@marten.tail-test1.ts.net", "https://%6darten.tail-test1.ts.net", "https://marten.t%61il.ts.net",
+            "https://marten.-bad.ts.net", "https://marten.bad-.ts.net", "https://marten.bad_.ts.net",
+            "https://marten..ts.net", "https://marten.extra.label.ts.net", "https://marten.täil.ts.net",
+            "https://marten.\(String(repeating: "a", count: 64)).ts.net", "https://marten.example", "https://localhost",
+            "https://127.0.0.1", "https://marten.tail-test1.ts.net.attacker.invalid", "http://127.0.0.1:17450",
+            "marten://pair?v=1&server=https%3A%2F%2Fmarten.tail-test1.ts.net&code=synthetic-fixture",
+            #"{"v":2,"server":"https://marten.tail-test1.ts.net"}"#,
+        ] {
             XCTAssertThrowsError(try Endpoint(invalid))
         }
-        #if DEBUG
-        XCTAssertEqual(try Endpoint("http://localhost:8080/", allowLoopback: true).origin, "http://127.0.0.1:8080")
-        XCTAssertThrowsError(try Endpoint("http://127.0.0.1.evil.example", allowLoopback: true))
-        XCTAssertThrowsError(try Endpoint("http://127.1", allowLoopback: true))
-        #endif
     }
 
-    func testStrictPairLink() throws {
-        XCTAssertEqual(try PairOffer(Self.offer).endpoint.origin, "https://marten.example:8443")
-        for invalid in [Self.offer + "&code=second", Self.offer + "#fragment", Self.offer.replacingOccurrences(of: "v=1", with: "v=2"),
-                        "marten://pair?v=1&server=http%3A%2F%2F127.0.0.1&code=x", "marten://pair?v=1&server=https%3A%2F%2Fx&code="] {
-            XCTAssertThrowsError(try PairOffer(invalid))
-        }
+    func testAppHasNoExternalURLSchemeRegistration() {
+        XCTAssertEqual(Bundle.main.bundleIdentifier, "dev.marten.native")
+        XCTAssertNil(Bundle.main.object(forInfoDictionaryKey: "CFBundleURLTypes"))
     }
 
-    @MainActor func testConfirmationGatesRedemptionAndStoresOnlyToken() async throws {
+    #if DEBUG
+    @MainActor func testLoopbackIsolatedFromProductionAndCredentialsStayInKeychain() async throws {
         let domain = "NativeMartenTests.\(UUID())"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
         let vault = CredentialStore(service: domain)
-        let endpoint = try PairOffer(Self.offer).endpoint
+        let endpoint = try Endpoint(developmentOrigin: "http://localhost:17450/")
+        XCTAssertEqual(endpoint.origin, "http://127.0.0.1:17450")
+        XCTAssertThrowsError(try Endpoint(endpoint.origin))
         defer {
             defaults.removePersistentDomain(forName: domain)
             try? vault.remove(endpoint)
         }
-        let transport = StubTransport([.init(200, #"{"token":"fixture-token"}"#)])
+        let transport = StubTransport([.init(200, #"{"projects":[],"agents":[]}"#)])
         let connections = Connections(transport: transport, keychain: vault, defaults: defaults)
-        connections.receive(Self.offer)
-        let before = await transport.requests
-        XCTAssertTrue(before.isEmpty)
-        XCTAssertNil(connections.connected)
-        connections.offer = nil
-        await connections.redeem(deviceName: "Fixture Device")
-        let afterCancel = await transport.requests
-        XCTAssertTrue(afterCancel.isEmpty)
-        connections.receive(Self.offer)
-        await connections.redeem(deviceName: "Fixture Device")
-
+        for rejected in ["http://127.0.0.1.evil.example", "http://127.1", "https://marten.tail-test1.ts.net",
+                         "http://localhost@other.example", "http://127.0.0.1/path", "http://localhost?x=1"] {
+            await connections.connectLoopback(rejected, token: "fixture-token")
+            XCTAssertNil(connections.connected)
+        }
+        let rejectedRequests = await transport.requests
+        XCTAssertTrue(rejectedRequests.isEmpty)
+        await connections.connectLoopback("http://localhost:17450", token: "fixture-token")
         let requests = await transport.requests
-        let request = try XCTUnwrap(requests.first)
-        XCTAssertEqual(requests.count, 1)
-        XCTAssertEqual(request.httpMethod, "POST")
-        XCTAssertEqual(request.url?.absoluteString, "https://marten.example:8443/api/pair/redeem")
-        XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
-        XCTAssertEqual(try Self.body(request), ["code": "fixture+code=", "deviceName": "Fixture Device"])
-        XCTAssertNil(connections.error)
-        XCTAssertNil(connections.offer)
+        XCTAssertEqual(requests.map { $0.url?.absoluteString }, ["http://127.0.0.1:17450/api/status"])
         XCTAssertEqual(try vault.token(for: endpoint), "fixture-token")
-        let unrelated = try Endpoint("https://marten.example:8444")
-        XCTAssertThrowsError(try vault.token(for: unrelated))
-        let otherDomain = defaults.persistentDomain(forName: domain)
-        XCTAssertEqual(otherDomain?["activeEndpoint"] as? String, endpoint.origin)
-        XCTAssertEqual(otherDomain?["endpoints"] as? [String], [endpoint.origin])
-        XCTAssertEqual(otherDomain?.count, 2)
+        XCTAssertThrowsError(try vault.token(for: Endpoint("https://marten.tail-test1.ts.net")))
+        let saved = defaults.persistentDomain(forName: domain)
+        XCTAssertEqual(saved?["activeEndpoint"] as? String, endpoint.origin)
+        XCTAssertEqual(saved?["endpoints"] as? [String], [endpoint.origin])
+        XCTAssertEqual(saved?.count, 2)
         let relaunched = Connections(transport: transport, keychain: vault, defaults: defaults)
         XCTAssertEqual(relaunched.connected?.token, "fixture-token")
         relaunched.forget(endpoint)
         XCTAssertNil(relaunched.connected)
         XCTAssertThrowsError(try vault.token(for: endpoint))
     }
+    #endif
 
     func testOperatorRoutesAndPagingCursor() async throws {
         let transport = StubTransport([.init(200, """
             {"projects":[{"id":"p","name":"Project"}],"agents":[{"id":"task-42","name":"Test","status":"idle","kind":"task","projectId":"p","paused":false,"pausedEffective":false}]}
             """), .init(200, #"{"entries":[{"seq":44,"kind":"assistant","text":"Hi"}],"hasOlder":true}"#),
             .init(202), .init(200), .init(200)])
-        let api = API(endpoint: try Endpoint("https://marten.example"), token: "fixture-token", transport: transport)
+        let api = API(endpoint: try Endpoint("https://marten.tail-test1.ts.net"), token: "fixture-token", transport: transport)
         let status = try await api.status()
         let page = try await api.transcript("task-42", before: 80)
         try await api.send("task-42", text: "Test", mode: .immediate)
@@ -112,11 +91,11 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(requests.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-token" })
     }
 
-    func testPairErrorsDoNotSurfaceBodyOrRetry() async throws {
+    func testResponseErrorsDoNotSurfaceBodyOrRetry() async throws {
         let transport = StubTransport([.init(307, "never display this"), .init(401)])
-        let offer = try PairOffer(Self.offer)
+        let api = API(endpoint: try Endpoint("https://marten.tail-test1.ts.net"), token: "fixture-token", transport: transport)
         do {
-            _ = try await API.redeem(offer, deviceName: "Device", transport: transport)
+            _ = try await api.status()
             XCTFail("Accepted redirect")
         } catch let error as ClientError {
             XCTAssertEqual(error, .response(307))
@@ -125,7 +104,7 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
         let requests = await transport.requests
         XCTAssertEqual(requests.count, 1)
         do {
-            _ = try await API.redeem(offer, deviceName: "Device", transport: transport)
+            _ = try await api.status()
             XCTFail("Accepted unauthorized response")
         } catch let error as ClientError { XCTAssertEqual(error, .unauthorized) }
     }
@@ -146,8 +125,6 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
         buffer.prepend(page([20], older: true), before: 20)
         XCTAssertFalse(buffer.hasOlder)
     }
-
-    private static let offer = "marten://pair?v=1&server=https%3A%2F%2FMarten.example%3A8443%2F&code=fixture%2Bcode%3D"
 
     private static func body(_ request: URLRequest) throws -> [String: String] {
         let body = try XCTUnwrap(request.httpBody)

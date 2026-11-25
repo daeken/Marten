@@ -4,7 +4,26 @@ struct Endpoint: Hashable, Sendable {
     let url: URL
     var origin: String { url.absoluteString }
 
-    init(_ input: String, allowLoopback: Bool = false) throws {
+    // Validate the original wire spelling, before Foundation can normalize it.
+    init(_ origin: String) throws {
+        let prefix = "https://marten."
+        let suffix = ".ts.net"
+        guard origin.hasPrefix(prefix), origin.hasSuffix(suffix), origin.utf8.count > prefix.count + suffix.count,
+              origin.utf8.count <= prefix.count + suffix.count + 63 else { throw ClientError.origin }
+        let label = origin.dropFirst(prefix.count).dropLast(suffix.count).utf8
+        guard let first = label.first, let last = label.last,
+              Self.isLabelAlphanumeric(first), Self.isLabelAlphanumeric(last),
+              label.allSatisfy({ Self.isLabelAlphanumeric($0) || $0 == 45 }),
+              let url = URL(string: origin), url.absoluteString == origin else { throw ClientError.origin }
+        self.url = url
+    }
+
+    private static func isLabelAlphanumeric(_ byte: UInt8) -> Bool {
+        (97...122).contains(byte) || (48...57).contains(byte)
+    }
+
+    #if DEBUG
+    init(developmentOrigin input: String) throws {
         guard input.utf8.count <= 1024,
               let parts = URLComponents(string: input),
               let scheme = parts.scheme?.lowercased(), let host = parts.host?.lowercased(),
@@ -13,62 +32,35 @@ struct Endpoint: Hashable, Sendable {
               parts.user == nil, parts.password == nil, parts.query == nil, parts.fragment == nil,
               parts.percentEncodedPath.isEmpty || parts.percentEncodedPath == "/",
               parts.port.map({ (1...65535).contains($0) }) ?? true else { throw ClientError.origin }
-        if allowLoopback {
-            #if DEBUG
-            guard Self.loopback.contains(host), scheme == "http" else { throw ClientError.origin }
-            #else
-            throw ClientError.origin
-            #endif
-        } else {
-            guard scheme == "https" else { throw ClientError.origin }
-        }
+        guard Self.loopback.contains(host), scheme == "http" else { throw ClientError.origin }
         var normalized = URLComponents()
         normalized.scheme = scheme
-        normalized.host = allowLoopback ? "127.0.0.1" : host
-        normalized.port = parts.port == (scheme == "https" ? 443 : 80) ? nil : parts.port
+        normalized.host = "127.0.0.1"
+        normalized.port = parts.port == 80 ? nil : parts.port
         guard let url = normalized.url else { throw ClientError.origin }
         self.url = url
     }
 
-    static func saved(_ origin: String) -> Endpoint? {
-        (try? Endpoint(origin)) ?? (try? Endpoint(origin, allowLoopback: true))
-    }
-
     private static let hostBytes = Set("abcdefghijklmnopqrstuvwxyz0123456789.-".utf8)
     private static let loopback = ["localhost", "127.0.0.1"]
-}
+    #endif
 
-struct PairOffer {
-    let endpoint: Endpoint
-    // Never persist the offer or interpolate it into diagnostics.
-    fileprivate let code: String
-
-    init(_ input: String) throws {
-        guard input.utf8.count <= 8192,
-              let parts = URLComponents(string: input), parts.scheme?.lowercased() == "marten",
-              parts.percentEncodedHost == "pair", parts.user == nil, parts.password == nil,
-              parts.port == nil, parts.path.isEmpty, parts.fragment == nil,
-              let fields = parts.queryItems, fields.count == 3,
-              fields.first(where: { $0.name == "v" })?.value == "1",
-              let server = fields.first(where: { $0.name == "server" })?.value,
-              let code = fields.first(where: { $0.name == "code" })?.value, !code.isEmpty,
-              code.utf8.count <= 4096, code.utf8.allSatisfy({ (33...126).contains($0) }) else {
-            throw ClientError.pairLink
-        }
-        endpoint = try Endpoint(server)
-        self.code = code
+    static func saved(_ origin: String) -> Endpoint? {
+        if let production = try? Endpoint(origin) { return production }
+        #if DEBUG
+        if let development = try? Endpoint(developmentOrigin: origin), development.origin == origin { return development }
+        #endif
+        return nil
     }
 }
 
 enum ClientError: LocalizedError, Equatable {
-    case origin, pairLink, image, unauthorized, response(Int), malformed, network, tls, keychain
+    case origin, unauthorized, response(Int), malformed, network, tls, keychain
 
     var errorDescription: String? {
         switch self {
-        case .origin: "Use a valid HTTPS server origin without a path, query, or credentials. Manual development connections must use loopback."
-        case .pairLink: "This is not a supported Marten pairing link. Get a fresh QR from your server."
-        case .image: "Select an image containing exactly one pairing QR code."
-        case .unauthorized: "The server rejected the credential or pairing code. Pair again if it has expired or been revoked."
+        case .origin: "Use the exact https://marten.<tailnet>.ts.net origin, without a port or path. Manual development connections must use loopback."
+        case .unauthorized: "The server rejected the Marten credential."
         case .response(let status): "The server returned HTTP \(status). Redirects are not followed."
         case .malformed: "The server returned an unexpected response."
         case .network: "Could not reach the server. Check the network and Tailscale connection."
@@ -156,22 +148,11 @@ struct API: Sendable {
     var token: String? = nil
     let transport: any Transport
 
-    private struct Redemption: Encodable { let code: String; let deviceName: String }
-    private struct Credential: Decodable { let token: String }
     private struct Message: Encodable { let text: String; let mode: SendMode }
     private struct Pause: Encodable { let paused: Bool }
 
     static func validToken(_ token: String) -> Bool {
         !token.isEmpty && token.utf8.count <= 8192 && token.utf8.allSatisfy { (33...126).contains($0) }
-    }
-
-    static func redeem(_ offer: PairOffer, deviceName: String, transport: any Transport) async throws -> String {
-        let data = try JSONEncoder().encode(Redemption(code: offer.code, deviceName: deviceName))
-        let api = API(endpoint: offer.endpoint, transport: transport)
-        let response = try await api.call("POST", "/api/pair/redeem", body: data)
-        let credential = try api.decode(Credential.self, response)
-        guard validToken(credential.token) else { throw ClientError.malformed }
-        return credential.token
     }
 
     func status() async throws -> ServerStatus {

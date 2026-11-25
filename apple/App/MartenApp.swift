@@ -35,20 +35,12 @@ struct RootView: View {
                 .frame(width: 490, height: 530)
                 #endif
         }
-        .onOpenURL {
-            connections.receive($0.absoluteString)
-            if connections.connected != nil { connections.showServers = true }
-        }
     }
 }
 
 struct ServerScreen: View {
     @Bindable var connections: Connections
     @State private var forget: Endpoint?
-    @State private var showImporter = false
-    #if os(iOS)
-    @State private var showScanner = false
-    #endif
     #if DEBUG
     @State private var showDev = false
     #endif
@@ -56,33 +48,14 @@ struct ServerScreen: View {
     var body: some View {
         NavigationStack {
             List {
-                if let offer = connections.offer {
-                    Section("Confirm Server") {
-                        Text(offer.endpoint.origin).font(.headline).textSelection(.enabled)
-                        Text("Only continue if you recognize this address. Marten sends the one-time code to this server.")
-                        Button("Pair with This Server") {
-                            Task { await connections.redeem(deviceName: localDeviceName) }
-                        }.accessibilityIdentifier("confirmPair")
-                        Button("Cancel", role: .cancel) { connections.offer = nil }
-                    }
-                }
                 if let error = connections.error {
                     Section("Connection Problem") {
                         Text(error)
                         Button("Dismiss") { connections.error = nil }
                     }
                 }
-                Section {
-                    Button("Import QR Image", systemImage: "photo") { showImporter = true }
-                    #if os(iOS)
-                    if QRScanner.available {
-                        Button("Scan QR Code", systemImage: "qrcode.viewfinder") { showScanner = true }
-                    }
-                    #endif
-                } header: {
-                    Text("Pair a Server")
-                } footer: {
-                    Text("Use a fresh QR from your Marten server, or open its pairing link. Connect Tailscale first if the server is on your tailnet.")
+                Section("Pair a Server") {
+                    Label("New device pairing is not available in this build.", systemImage: "qrcode")
                 }
                 if !connections.endpoints.isEmpty {
                     Section("Saved Servers") {
@@ -129,7 +102,6 @@ struct ServerScreen: View {
                 if connections.connected != nil {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("Done") {
-                            connections.offer = nil
                             connections.showServers = false
                         }.disabled(connections.busy)
                     }
@@ -139,29 +111,7 @@ struct ServerScreen: View {
                 if connections.busy { ProgressView("Connecting…").padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)) }
             }
         }
-        .interactiveDismissDisabled(connections.busy || connections.offer != nil)
-        .fileImporter(isPresented: $showImporter, allowedContentTypes: [.image]) { result in
-            Task {
-                do {
-                    let url = try result.get()
-                    let value = try await Task.detached(priority: .userInitiated) { try QRImage.read(url) }.value
-                    connections.receive(value)
-                } catch { connections.show(error) }
-            }
-        }
-        #if os(iOS)
-        .sheet(isPresented: $showScanner) {
-            ScannerScreen { result in
-                showScanner = false
-                switch result {
-                case .success(let code):
-                    // Present the confirmation from this screen after closing the scanner.
-                    connections.receive(code)
-                case .failure(let error): connections.show(error)
-                }
-            }
-        }
-        #endif
+        .interactiveDismissDisabled(connections.busy)
         #if DEBUG
         .sheet(isPresented: $showDev) {
             LoopbackForm(connections: connections)
@@ -177,15 +127,6 @@ struct ServerScreen: View {
             Text("Remove the local credential for \(endpoint.origin)? This does not revoke it on the server.")
         }
     }
-}
-
-@MainActor private var localDeviceName: String {
-    // A generic label avoids sending a user's hostname to an unpaired server.
-    #if os(iOS)
-    return UIDevice.current.userInterfaceIdiom == .pad ? "Marten on iPad" : "Marten on iPhone"
-    #else
-    return "Marten on Mac"
-    #endif
 }
 
 #if DEBUG

@@ -62,7 +62,6 @@ final class Connections {
     // A new workspace identity clears old server state, drafts and in-flight refreshes.
     private(set) var workspaceID = UUID()
     private(set) var busy = false
-    var offer: PairOffer?
     var error: String?
     var showServers = false
 
@@ -77,33 +76,13 @@ final class Connections {
         }
     }
 
-    func receive(_ value: String) {
-        guard !busy, offer == nil else { return }
-        do { offer = try PairOffer(value) }
-        catch { show(error) }
-    }
-
-    func redeem(deviceName: String) async {
-        guard !busy, let offer else { return }
-        self.offer = nil
-        busy = true
-        defer { busy = false }
-        do {
-            let token = try await API.redeem(offer, deviceName: deviceName, transport: transport)
-            try remember(token, for: offer.endpoint)
-        } catch {
-            guard !(error is CancellationError) else { return }
-            self.error = "\(safeMessage(error)) Get a new pairing QR before retrying."
-        }
-    }
-
     #if DEBUG
     func connectLoopback(_ origin: String, token: String) async {
         guard !busy else { return }
         busy = true
         defer { busy = false }
         do {
-            let endpoint = try Endpoint(origin, allowLoopback: true)
+            let endpoint = try Endpoint(developmentOrigin: origin)
             guard API.validToken(token) else { throw ClientError.unauthorized }
             _ = try await API(endpoint: endpoint, token: token, transport: transport).status()
             try remember(token, for: endpoint)
@@ -136,6 +115,7 @@ final class Connections {
         if !(error is CancellationError) { self.error = safeMessage(error) }
     }
 
+    #if DEBUG
     private func remember(_ token: String, for endpoint: Endpoint) throws {
         try keychain.save(token, for: endpoint)
         if !endpoints.contains(endpoint) {
@@ -144,6 +124,8 @@ final class Connections {
         }
         activate(endpoint, token: token)
     }
+
+    #endif
 
     private func activate(_ endpoint: Endpoint, token: String) {
         defaults.set(endpoint.origin, forKey: "activeEndpoint")
