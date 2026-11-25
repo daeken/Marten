@@ -220,6 +220,8 @@ private final class NoRedirects: NSObject, URLSessionTaskDelegate {
 }
 
 struct ServerStatus: Decodable, Sendable {
+    struct Config: Decodable, Sendable { let model: String?; let defaultModel: String?; let effort: String? }
+    let config: Config?
     let projects: [Project]
     let agents: [Agent]
     let inbox: Int?
@@ -247,6 +249,25 @@ struct Agent: Decodable, Identifiable, Sendable {
     let pausedEffective: Bool
     let workingDirectory: String?
     let worktree: String?
+    let model: String?
+    let effort: String?
+    let parentId: String?
+    let pending: Int?
+    let openTasks: Int?
+    let statusDetail: String?
+    let retryAt: String?
+    let modelCall: ModelCall?
+    let nudgesStopped: Bool?
+    let abandonedRunspaces: [AbandonedRunspace]?
+
+    struct ModelCall: Decodable, Sendable {
+        let model: String
+        let kind: String
+        let startedAt: String
+        let endedAt: String?
+        let outcome: String?
+    }
+    struct AbandonedRunspace: Decodable, Sendable { let at: String; let command: String }
 
     var canStartFreshContext: Bool {
         !pausedEffective && !["paused", "running", "waiting_for_quota", "waiting_for_network", "waiting_for_slot"].contains(status)
@@ -285,7 +306,7 @@ struct TranscriptImage: Decodable, Hashable, Sendable {
     }
 }
 
-struct InboxMessage: Decodable, Identifiable, Sendable {
+struct InboxMessage: Decodable, Identifiable, Sendable, Equatable {
     let id: String
     let at: String
     let from: String
@@ -298,6 +319,10 @@ struct InboxMessage: Decodable, Identifiable, Sendable {
     let answer: String?
     let answeredAt: String?
 
+    let kind: String?
+    let reference: String?
+
+    var isToolDecision: Bool { kind == "approval" || kind == "tool_review" }
     var isOpen: Bool { question == true && answer == nil }
 
     static func date(_ stamp: String) -> Date? {
@@ -476,6 +501,10 @@ struct API: Sendable {
         guard let token, Self.validToken(token) else { throw ClientError.unauthorized }
         let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard question.isOpen, choice != nil || !words.isEmpty else { throw ClientError.malformed }
+        if question.isToolDecision {
+            guard choice == 0 || choice == 1, question.options?.count == 2,
+                  question.context?.isEmpty == false else { throw ClientError.malformed }
+        }
         if let choice, question.options?.indices.contains(choice) != true { throw ClientError.malformed }
         try Self.checkRouteID(question.id)
         let body = try JSONEncoder().encode(Answer(choice: choice, text: words.isEmpty ? nil : words))
@@ -500,6 +529,22 @@ struct API: Sendable {
 
     func interrupt(_ agent: String) async throws {
         _ = try await call("POST", route(agent, "interrupt"))
+    }
+
+    func scriptTools(project id: String) async throws -> [ReviewedTool] {
+        try requireBearer()
+        try Self.checkRouteID(id)
+        return try decode([ReviewedTool].self, await call("GET", "/api/tools", query: [.init(name: "projectId", value: id)]))
+    }
+
+    func models() async throws -> [String] {
+        try requireBearer()
+        return try decode([String].self, await call("GET", "/api/models"))
+    }
+
+    func updateSettings(_ id: String, settings: AgentSettings) async throws {
+        try requireBearer()
+        _ = try await call("PUT", route(id, "settings"), body: JSONEncoder().encode(settings))
     }
 
     func projectMemory(_ id: String) async throws -> ProjectMemory {

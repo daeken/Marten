@@ -152,6 +152,14 @@ final class WorkspaceControls {
         }) { _ in }
     }
 
+    @discardableResult
+    func saveSettings(_ draft: AgentSettings, original: AgentSettings, agent: String, using api: API, route: UUID) -> Task<Void, Never>? {
+        guard ready(route), draft != original, status?.agents.first(where: { $0.id == agent })?.settings == original else { return nil }
+        return run(using: api, route: route, label: "Save Agent Settings", request: {
+            try await api.updateSettings(agent, settings: draft)
+        }) { _ in }
+    }
+
     func create(_ draft: ProjectCreation, using api: API, route: UUID, completion: @escaping (String?) -> Void) {
         guard draft.isValid, ready(route) else { return }
         run(using: api, route: route, label: "Create Project", request: {
@@ -210,6 +218,9 @@ struct ProjectMemoryView: View {
     let hint: UUID
     let controlsReady: Bool
     let pause: () -> Void
+    let inbox: InboxState
+    let answer: (InboxMessage, Int?) -> Void
+    @State private var tools = OperationList<ReviewedTool>()
     @State private var memory: ProjectMemory?
     @State private var error: String?
     @State private var reading = false
@@ -223,6 +234,29 @@ struct ProjectMemoryView: View {
                 }
                 ForEach(Array((project.bindings ?? []).enumerated()), id: \.offset) { _, binding in
                     Text(binding).font(.footnote.monospaced()).textSelection(.enabled)
+                }
+            }
+            Section("Agent-Written Tools") {
+                if let error = tools.error { Label(error, systemImage: "exclamationmark.circle") }
+                else if tools.items == nil { ProgressView("Loading tools…") }
+                else if tools.items?.isEmpty == true { Text("No tools yet.").foregroundStyle(.secondary) }
+                ForEach(tools.items ?? []) { tool in
+                    DisclosureGroup(tool.name) {
+                        Text(tool.scope == "global" ? "Global · available across projects" : "Project · \(project.name)").font(.subheadline)
+                        Text(tool.path).font(.footnote.monospaced()).textSelection(.enabled)
+                        if let modified = tool.modified { InboxTime(stamp: modified) }
+                        if let error = tool.error { Label(error, systemImage: "exclamationmark.triangle") }
+                        else if let description = tool.description { Text(description).textSelection(.enabled) }
+                        TranscriptCode(text: tool.script)
+                        if tool.pendingReview {
+                            if let card = tool.reviewCard(in: inbox.messages ?? []) {
+                                QuestionCard(message: card, inbox: inbox, active: active, answer: answer)
+                            } else {
+                                Text("Needs review. No pending review card matches this version. Native approval requires a version-bound card.")
+                                    .foregroundStyle(.secondary)
+                            }
+                        } else { Text("No review required").foregroundStyle(.secondary) }
+                    }
                 }
             }
             if let error { Label(error, systemImage: "exclamationmark.circle") }
@@ -265,6 +299,7 @@ struct ProjectMemoryView: View {
         guard active, !Task.isCancelled, !reading else { return }
         reading = true
         defer { reading = false }
+        async let refreshTools: Void = tools.refresh { try await api.scriptTools(project: project.id) }
         do {
             let fresh = try await api.projectMemory(project.id)
             try Task.checkCancellation()
@@ -272,6 +307,7 @@ struct ProjectMemoryView: View {
             error = nil
         } catch is CancellationError {
         } catch { if !Task.isCancelled { self.error = safeMessage(error) } }
+        await refreshTools
     }
 }
 

@@ -24,7 +24,7 @@ struct WorkspaceView: View {
     private var showsMessages: Bool { path.last == .messages }
     private var showsInboxData: Bool {
         switch path.last {
-        case .inbox, .agent: true
+        case .inbox, .agent, .memory: true
         default: false
         }
     }
@@ -109,6 +109,10 @@ struct WorkspaceView: View {
                         NavigationLink(value: WorkspaceDestination.agent(agent.id)) {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(agent.name).font(.headline)
+                                if let count = agent.openTasks, count > 0 { Text("\(count) open tasks").font(.caption) }
+                                if agent.nudgesStopped == true || agent.abandonedRunspaces?.isEmpty == false {
+                                    Label("Agent warnings", systemImage: "exclamationmark.triangle").font(.caption)
+                                }
                                 Text("\(agent.kind.capitalized) · \(agentStatus(agent))")
                                     .font(.subheadline).foregroundStyle(.secondary)
                             }
@@ -136,9 +140,9 @@ struct WorkspaceView: View {
                     if let project = status?.projects.first(where: { $0.id == id }) {
                         ProjectMemoryView(api: api, project: project, agents: status?.agents ?? [], route: routeID,
                                           active: networkActive && path.last == destination, hint: eventHint,
-                                          controlsReady: controlsReady) {
+                                          controlsReady: controlsReady, pause: {
                             if let paused = project.paused, path.last == destination { lifecycle(.pauseProject(id, !paused)) }
-                        }.id(routeID)
+                        }, inbox: inbox, answer: submitAnswer).id(routeID)
                     } else { ContentUnavailableView("Project Unavailable", systemImage: "folder") }
                 case .createChat, .createProject:
                     CreationView(project: destination == .createProject, ready: controlsReady && path.last == destination, busy: controls.busy,
@@ -149,6 +153,15 @@ struct WorkspaceView: View {
                         guard controlsReady, path.last == destination else { return }
                         controls.create(draft, using: api, route: routeID) { finishCreation($0, from: destination) }
                     })
+                case .settings(let id):
+                    if let agent = status?.agents.first(where: { $0.id == id }) {
+                        AgentSettingsView(api: api, agent: agent, config: status?.config, agents: status?.agents ?? [],
+                                          route: routeID, active: networkActive && path.last == destination,
+                                          ready: controlsReady) { draft, original in
+                            guard controlsReady, path.last == destination else { return }
+                            controls.saveSettings(draft, original: original, agent: id, using: api, route: routeID)
+                        }.id(routeID)
+                    } else { ContentUnavailableView("Agent Unavailable", systemImage: "gearshape") }
                 case .notebook(let id):
                     if let agent = status?.agents.first(where: { $0.id == id }) {
                         NotebookView(api: api, agent: agent, route: routeID, active: networkActive && path.last == destination, hint: eventHint)
@@ -241,10 +254,10 @@ struct WorkspaceView: View {
         }
     }
 
-    @MainActor private func submitAnswer(_ id: String, choice: Int?) {
+    @MainActor private func submitAnswer(_ message: InboxMessage, choice: Int?) {
         guard networkActive else { return }
         Task {
-            await inbox.answer(id, choice: choice, using: api)
+            await inbox.answer(message.id, choice: choice, using: api, confirmed: message)
             await refresh()
         }
     }
@@ -331,6 +344,7 @@ struct WorkspaceView: View {
 enum WorkspaceDestination: Hashable {
     case inbox, messages, agent(String)
     case createChat, createProject, memory(String)
+    case settings(String)
     case notebook(String), operations(String, task: Int?), processes(String?), processLog(AgentProcess.Key)
 }
 
@@ -363,7 +377,7 @@ private struct ConversationView: View {
     let eventHint: UUID
     @State private var timeline = TimelinePages()
     let inbox: InboxState
-    let answer: (String, Int?) -> Void
+    let answer: (InboxMessage, Int?) -> Void
     let activity: LiveActivity?
     let controlsReady: Bool
     let lifecycle: (LifecycleAction) -> Void
@@ -453,6 +467,9 @@ private struct ConversationView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Menu("Agent Actions", systemImage: "ellipsis.circle") {
+                    NavigationLink(value: WorkspaceDestination.settings(agent.id)) {
+                        Label("Settings & Diagnostics", systemImage: "gearshape")
+                    }
                     NavigationLink(value: WorkspaceDestination.notebook(agent.id)) {
                         Label("PowerShell Notebook", systemImage: "book.closed")
                     }

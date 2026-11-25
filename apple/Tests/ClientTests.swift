@@ -1202,6 +1202,113 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(finalRequests.map(\.httpMethod), ["GET", "POST", "GET"])
     }
 
+    @MainActor func testGuardDecisionsRequireReviewedCardAndNeverReplay() async throws {
+        let endpoint = try Endpoint(Self.fixtureOrigin)
+        let permit = #"{"id":"guard-1","at":"2026-01-01T10:00:00Z","from":"agent-1","fromName":"Fixture","projectId":"project-1","text":"Approve fixture call?","question":true,"kind":"approval","reference":"fixture-fingerprint","options":["Allow once","Deny"],"context":"Rule: fixture\npreview"}"#
+        let deny = permit.replacingOccurrences(of: "guard-1", with: "guard-2")
+        let listing = "[\(permit),\(deny)]"
+        let saved = String(permit.dropLast()) + #", "answer":"Allow once: fixture note"}"#
+        let fixture = StubTransport([.init(200, listing), .init(200, saved), .init(409, "private detail")])
+        let next = StubTransport([.init(200, listing), .init(200, String(deny.dropLast()) + #", "answer":"Deny"}"#)])
+        let api = API(endpoint: endpoint, token: "fixture-bearer", transport: fixture)
+        let replacement = API(endpoint: endpoint, token: "fixture-bearer", transport: next)
+        let inbox = InboxState()
+        await inbox.refresh(api)
+        let first = try XCTUnwrap(inbox.messages?.first)
+        let second = try XCTUnwrap(inbox.messages?.last)
+        XCTAssertTrue(first.isToolDecision)
+        XCTAssertEqual(first.projectId, "project-1")
+        XCTAssertEqual(first.context, "Rule: fixture\npreview")
+        do { _ = try await api.answer(first, choice: nil, text: "fixture"); XCTFail("Submitted without explicit choice") }
+        catch { XCTAssertEqual(error as? ClientError, .malformed) }
+        await inbox.answer(first.id, choice: 0, using: api)
+        await inbox.answer(first.id, choice: 0, using: api, confirmed: second)
+        let unconfirmed = await fixture.requests
+        XCTAssertEqual(unconfirmed.map(\.httpMethod), ["GET"])
+        inbox.drafts[first.id] = " fixture note "
+        await inbox.answer(first.id, choice: 0, using: api, confirmed: first)
+        XCTAssertEqual(inbox.messages?.first?.answer, "Allow once: fixture note")
+        await inbox.answer(second.id, choice: 1, using: api, confirmed: second)
+        XCTAssertTrue(inbox.needsRefresh.contains(second.id))
+        XCTAssertFalse(inbox.answerErrors[second.id]?.contains("private detail") == true)
+        await inbox.answer(second.id, choice: 1, using: api, confirmed: second)
+        await inbox.refresh(replacement)
+        let reconnect = await next.requests
+        XCTAssertEqual(reconnect.map(\.httpMethod), ["GET"])
+        await inbox.answer(second.id, choice: 1, using: replacement, confirmed: second)
+        XCTAssertEqual(inbox.messages?.last?.answer, "Deny")
+        let requests = await fixture.requests
+        XCTAssertEqual(requests.map(\.httpMethod), ["GET", "POST", "POST"])
+        XCTAssertEqual(requests[1].url?.absoluteString, endpoint.origin + "/api/questions/guard-1/answer")
+        XCTAssertEqual(requests[2].url?.absoluteString, endpoint.origin + "/api/questions/guard-2/answer")
+        let bodies = try requests.dropFirst().map { try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap($0.httpBody)) as? [String: Any]) }
+        XCTAssertEqual(bodies[0]["choice"] as? Int, 0)
+        XCTAssertEqual(bodies[0]["text"] as? String, "fixture note")
+        XCTAssertEqual(bodies[1]["choice"] as? Int, 1)
+        XCTAssertTrue(bodies[1]["text"] is NSNull)
+    }
+
+    func testProjectToolReviewMatchesOnlyTheExactVersion() async throws {
+        let endpoint = try Endpoint(Self.fixtureOrigin)
+        let row = #"{"name":"fixture","scope":"global","path":"/fixture/tool.ps1","script":"fixture script","pendingReview":true,"error":"fixture parse error"}"#
+        let card = #"{"id":"review-1","at":"2026-01-01T10:00:00Z","from":"agent-1","fromName":"Fixture","text":"Global tool","question":true,"kind":"tool_review","reference":"/fixture/tool.ps1\n92F67C348EA1BC6C0EBD28BC2D5B3B8C859BD97826C7AB9FE36AABE3A63EE87F","options":["Approve","Reject"],"context":"fixture script"}"#
+        let changed = row.replacingOccurrences(of: "fixture script", with: "fixture script ")
+        let fixture = StubTransport([.init(200, "[\(row),\(changed)]"), .init(200, "[\(card)]"), .init(403)])
+        let transport = try TailnetTransport(endpoint: endpoint, transport: fixture)
+        let api = API(endpoint: endpoint, token: "fixture-bearer", transport: transport)
+        let tools = try await api.scriptTools(project: "project-1")
+        let inbox = try await api.inbox()
+        XCTAssertEqual(tools.first?.scope, "global")
+        XCTAssertEqual(tools.first?.script, "fixture script")
+        XCTAssertEqual(tools.first?.error, "fixture parse error")
+        XCTAssertEqual(tools.first?.reviewCard(in: inbox)?.id, "review-1")
+        XCTAssertNil(tools.last?.reviewCard(in: inbox))
+        do { _ = try await api.scriptTools(project: "project-1"); XCTFail("Accepted HTTP 403") }
+        catch { XCTAssertEqual(error as? ClientError, .unauthorized) }
+        let requests = await fixture.requests
+        XCTAssertEqual(requests.first?.url?.absoluteString, endpoint.origin + "/api/tools?projectId=project-1")
+        XCTAssertTrue(requests.allSatisfy { $0.httpMethod == "GET" && $0.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-bearer" })
+    }
+
+    @MainActor func testSettingsDefaultsDiagnosticsAndUnconfirmedSave() async throws {
+        let endpoint = try Endpoint(Self.fixtureOrigin)
+        let agent = String(Self.lifecycleAgent.dropLast()) + #", "model":"old-model","effort":"high","statusDetail":"Waiting for a slot","retryAt":"2026-01-01T10:00:00Z","modelCall":{"id":2,"model":"old-model","kind":"compaction","startedAt":"2026-01-01T09:00:00Z","endedAt":"2026-01-01T09:01:00Z","outcome":"succeeded"},"parentId":"agent-2","pending":3,"openTasks":2,"nudgesStopped":true,"abandonedRunspaces":[{"at":"2026-01-01T09:00:00Z","command":"fixture"}]}"#
+        let status = #"{"projects":[],"agents":[\#(agent)],"paused":false,"config":{"defaultModel":"default-model","effort":"low"}}"#
+        let fixture = StubTransport([.init(200, status), .init(200, #"["default-model"]"#), .init(502), .init(503)])
+        let next = StubTransport([.init(200, status)])
+        let api = API(endpoint: endpoint, token: "fixture-bearer", transport: fixture)
+        let replacement = API(endpoint: endpoint, token: "fixture-bearer", transport: next)
+        let controls = WorkspaceControls()
+        let route = UUID()
+        await controls.refresh(using: api, route: route)
+        let agentState = try XCTUnwrap(controls.status?.agents.first)
+        XCTAssertEqual(agentState.parentId, "agent-2")
+        XCTAssertEqual(agentState.pending, 3)
+        XCTAssertEqual(agentState.openTasks, 2)
+        XCTAssertEqual(agentState.modelCall?.outcome, "succeeded")
+        XCTAssertEqual(agentState.retryAt, "2026-01-01T10:00:00Z")
+        XCTAssertEqual(agentState.nudgesStopped, true)
+        XCTAssertEqual(agentState.abandonedRunspaces?.first?.command, "fixture")
+        XCTAssertEqual(controls.status?.config?.defaultModel, "default-model")
+        let catalog = try await api.models()
+        XCTAssertEqual(catalog, ["default-model"])
+        let draft = AgentSettings(model: nil, effort: "high")
+        XCTAssertNil(controls.saveSettings(draft, original: .init(), agent: "agent-1", using: api, route: route))
+        await controls.saveSettings(draft, original: agentState.settings, agent: "agent-1", using: api, route: route)?.value
+        XCTAssertFalse(controls.ready(route))
+        XCTAssertNotNil(controls.notice)
+        await controls.refresh(using: replacement, route: UUID())
+        let initial = await fixture.requests
+        let reconnect = await next.requests
+        XCTAssertEqual(initial.map(\.httpMethod), ["GET", "GET", "PUT", "GET"])
+        XCTAssertEqual(initial[1].url?.path, "/api/models")
+        XCTAssertEqual(initial[2].url?.path, "/api/agents/agent-1/settings")
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(initial[2].httpBody)) as? [String: Any])
+        XCTAssertTrue(body["model"] is NSNull)
+        XCTAssertEqual(body["effort"] as? String, "high")
+        XCTAssertEqual(reconnect.map(\.httpMethod), ["GET"])
+    }
+
     private static func body(_ request: URLRequest) throws -> [String: String] {
         let body = try XCTUnwrap(request.httpBody)
         return try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])

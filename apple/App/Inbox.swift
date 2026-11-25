@@ -37,9 +37,10 @@ final class InboxState {
         }
     }
 
-    func answer(_ id: String, choice: Int?, using api: API) async {
+    func answer(_ id: String, choice: Int?, using api: API, confirmed: InboxMessage? = nil) async {
         guard !Task.isCancelled, let question = messages?.first(where: { $0.id == id }), question.isOpen,
               !submitting.contains(id), !needsRefresh.contains(id) else { return }
+        if question.isToolDecision, confirmed != question { return }
         let words = drafts[id, default: ""].trimmingCharacters(in: .whitespacesAndNewlines)
         guard choice != nil || !words.isEmpty else { return }
         submitting.insert(id)
@@ -70,7 +71,7 @@ struct InboxView: View {
     let agents: [Agent]
     let active: Bool
     let refresh: () async -> Void
-    let answer: (String, Int?) -> Void
+    let answer: (InboxMessage, Int?) -> Void
 
     var body: some View {
         ScrollView {
@@ -117,13 +118,24 @@ struct QuestionCard: View {
     let message: InboxMessage
     let inbox: InboxState
     let active: Bool
-    let answer: (String, Int?) -> Void
+    let answer: (InboxMessage, Int?) -> Void
+    @State private var decision: Int?
+    @State private var reviewed: InboxMessage?
+    @State private var confirming = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(message.text).font(.headline).textSelection(.enabled)
+            if message.isToolDecision {
+                Text("Requested by \(message.fromName) · \(message.projectId ?? "Standalone")").font(.caption).textSelection(.enabled)
+                Text(message.kind == "tool_review"
+                     ? "Review the source and scope shown by the server. Approval applies only to this version. Reject can remove that version."
+                     : "Allow Once applies to this agent’s next identical call. The server supplies an argument preview, which may be incomplete.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
             if let context = message.context, !context.isEmpty {
-                Text(context).font(.subheadline).foregroundStyle(.secondary).textSelection(.enabled)
+                if message.isToolDecision { TranscriptCode(text: context) }
+                else { Text(context).font(.subheadline).foregroundStyle(.secondary).textSelection(.enabled) }
             }
             if let saved = message.answer {
                 Text("Saved answer").font(.subheadline.bold())
@@ -133,19 +145,23 @@ struct QuestionCard: View {
                 let options = message.options ?? []
                 let words = inbox.drafts[message.id, default: ""].trimmingCharacters(in: .whitespacesAndNewlines)
                 let blocked = !active || inbox.submitting.contains(message.id) || inbox.needsRefresh.contains(message.id)
-                TextField(options.isEmpty ? "Your answer" : "Optional note, or your own answer", text: Binding(
+                TextField(message.isToolDecision ? "Optional note" : options.isEmpty ? "Your answer" : "Optional note, or your own answer", text: Binding(
                     get: { inbox.drafts[message.id, default: ""] },
                     set: { inbox.drafts[message.id] = $0 }
                 ), axis: .vertical)
                 .textFieldStyle(.roundedBorder)
                 .disabled(inbox.submitting.contains(message.id))
                 ForEach(options.indices, id: \.self) { index in
-                    Button { answer(message.id, index) } label: { Text(options[index]) }
+                    Button {
+                        if message.isToolDecision { reviewed = message; decision = index; confirming = true }
+                        else { answer(message, index) }
+                    } label: { Text(options[index]) }
                         .buttonStyle(.bordered)
-                        .disabled(blocked)
+                        .disabled(blocked || (message.isToolDecision && (options.count != 2 || message.context?.isEmpty != false)))
                 }
-                Button("Send Written Answer") { answer(message.id, nil) }
-                    .disabled(blocked || words.isEmpty)
+                if !message.isToolDecision {
+                    Button("Send Written Answer") { answer(message, nil) }.disabled(blocked || words.isEmpty)
+                }
                 if inbox.submitting.contains(message.id) { ProgressView("Saving answer…") }
                 if let error = inbox.answerErrors[message.id] { Label(error, systemImage: "exclamationmark.circle") }
                 if inbox.needsRefresh.contains(message.id) {
@@ -153,7 +169,24 @@ struct QuestionCard: View {
                 }
             }
         }
+        .alert("Confirm Tool Decision", isPresented: $confirming) {
+            if let decision, let reviewed, let title = reviewed.options?[decision] {
+                Button(title, role: decision == 1 && reviewed.kind == "tool_review" ? .destructive : nil) {
+                    clearDecision()
+                    guard active, reviewed == message else { return }
+                    answer(reviewed, decision)
+                }
+            }
+            Button("Cancel", role: .cancel, action: clearDecision)
+        } message: {
+            Text("Confirm your decision for the action and scope shown on this card.")
+        }
+        .onChange(of: message) { clearDecision() }
+        .onChange(of: active) { if !active { clearDecision() } }
+        .onDisappear { clearDecision() }
     }
+
+    private func clearDecision() { confirming = false; decision = nil; reviewed = nil }
 }
 
 struct InboxTime: View {

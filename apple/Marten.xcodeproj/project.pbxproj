@@ -27,6 +27,7 @@
 		9CA6F859AB2A9024A2BEB3B9 /* RichTranscript.swift in Sources */ = {isa = PBXBuildFile; fileRef = 504195C01908429552CF5CD0 /* RichTranscript.swift */; };
 		A40C0E19F2A5703B53062ECF /* Operations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39B4F8B9ABCF38ED1999593C /* Operations.swift */; };
 		A765567A3860572D2F0B8BC5 /* MartenApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F88394C5EA8FF4E026A7BC1 /* MartenApp.swift */; };
+		AFA7F7F72F06595FF42F4EED /* AgentSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D5B77581012182B5CE21966 /* AgentSettings.swift */; };
 		B25E14328507A741FC4D4DC6 /* Connections.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FF64C6D95C2712DCD5F203E /* Connections.swift */; };
 		B2D11A5E574174A955EB7A2C /* Pairing.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5610B571F9AB02248FE2F42 /* Pairing.swift */; };
 		B4EE9191BCBFE52AB6BD866A /* MartenApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F88394C5EA8FF4E026A7BC1 /* MartenApp.swift */; };
@@ -39,6 +40,7 @@
 		F210C421087F3C1FE5B7C0BB /* Pairing.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5610B571F9AB02248FE2F42 /* Pairing.swift */; };
 		F22070ABEBD1DC30FD6873CF /* Inbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26B0506E9E29AC99DFA612AE /* Inbox.swift */; };
 		F9EC220C55A866FB4A16D094 /* ProjectWorkspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = 710EAFECDF40B85F91489538 /* ProjectWorkspace.swift */; };
+		FD50C3D509048985E1E04C0C /* AgentSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D5B77581012182B5CE21966 /* AgentSettings.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -71,6 +73,7 @@
 		710EAFECDF40B85F91489538 /* ProjectWorkspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectWorkspace.swift; sourceTree = "<group>"; };
 		7309633EE2E13A8F89FB924A /* LiveEvents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveEvents.swift; sourceTree = "<group>"; };
 		7436B48633AF38F0900290F1 /* MartenTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MartenTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		7D5B77581012182B5CE21966 /* AgentSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSettings.swift; sourceTree = "<group>"; };
 		7E70246C11BAE9986E883FFA /* ClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientTests.swift; sourceTree = "<group>"; };
 		9F88394C5EA8FF4E026A7BC1 /* MartenApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MartenApp.swift; sourceTree = "<group>"; };
 		AB79A7B841A9E892C17E98A7 /* QR.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QR.swift; sourceTree = "<group>"; };
@@ -104,6 +107,7 @@
 		9333A5C200A70EAD051F4DD5 /* App */ = {
 			isa = PBXGroup;
 			children = (
+				7D5B77581012182B5CE21966 /* AgentSettings.swift */,
 				13EA62427E8B256347FC0858 /* Client.swift */,
 				1FF64C6D95C2712DCD5F203E /* Connections.swift */,
 				26B0506E9E29AC99DFA612AE /* Inbox.swift */,
@@ -249,6 +253,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FD50C3D509048985E1E04C0C /* AgentSettings.swift in Sources */,
 				05CEFCF0AE2C7E8586FB8B4C /* Client.swift in Sources */,
 				B25E14328507A741FC4D4DC6 /* Connections.swift in Sources */,
 				F22070ABEBD1DC30FD6873CF /* Inbox.swift in Sources */,
@@ -279,6 +284,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AFA7F7F72F06595FF42F4EED /* AgentSettings.swift in Sources */,
 				23A905C67BC47A823017DA6C /* Client.swift in Sources */,
 				584D35746983352495BAF27B /* Connections.swift in Sources */,
 				9282BA520E0A8129370A981A /* Inbox.swift in Sources */,
