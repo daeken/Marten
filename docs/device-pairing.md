@@ -42,7 +42,7 @@ The QR contains raw UTF-8 JSON, **not a URL or deep link**. Example (illustrativ
 
 A paired device is an **operator**, not an outside agent, read-only client, or sandbox. It can view private transcripts, run or approve tools, rerun notebook cells, change credentials/settings, control agents and projects, and pair additional devices. These powers may allow host code execution or access to local files/secrets as the Marten user. No pairing response returns the shared operator token, any other device token, or a consumed invitation. Use private transport and pair only devices you would trust with direct web UI access.
 
-The API opts in individual UI endpoints. A paired token cannot claim an outside-agent identity (`/api/ext/*`) or automatically reach a new API route. The native pairing authority rejects the root and static shell; those retain their existing Host/Origin behavior on localhost and other configured web aliases. Current UI API inventory (paths relative to `/api`):
+The API opts in individual UI endpoints. A paired token is accepted only at the canonical HTTPS authority, including for device management; localhost and legacy web aliases do not accept it. A paired token cannot claim an outside-agent identity (`/api/ext/*`) or automatically reach a new API route. The native pairing authority rejects the root and static shell; those retain their existing Host/Origin behavior on localhost and other configured web aliases. Current UI API inventory (paths relative to `/api`):
 
 | Surface | Methods and routes |
 |---|---|

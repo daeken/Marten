@@ -45,7 +45,8 @@ public class DevicePairingTests {
 		var home = new Home(dir.File("home"));
 		var origin = new Uri("https://marten.example");
 		var pairing = new DevicePairing(home);
-		var sec = new Security(home, new Config { PairingOrigin = origin.AbsoluteUri }) {
+		const string legacy = "legacy-web.example";
+		var sec = new Security(home, new Config { PairingOrigin = origin.AbsoluteUri, RemoteHosts = [legacy] }) {
 			Pairing = pairing, ClientAuth = s => s == "outside" ? "client" : null,
 		};
 		var hub = new EventHub();
@@ -123,6 +124,7 @@ public class DevicePairingTests {
 		await Expect(HttpStatusCode.Forbidden, HttpMethod.Get, "/api/ext/status", remote, token);
 		await Expect(HttpStatusCode.Forbidden, HttpMethod.Get, "/api/ext/status", remote, "outside");
 		await Expect(HttpStatusCode.OK, HttpMethod.Get, "/api/ext/status", local, "outside");
+		await Expect(HttpStatusCode.OK, HttpMethod.Get, "/api/ext/status", legacy, "outside");
 		await Expect(HttpStatusCode.Unauthorized, HttpMethod.Get, "/api/status", remote, sec.Token);
 		await Expect(HttpStatusCode.Unauthorized, HttpMethod.Get, "/api/status", remote, "outside");
 		await Expect(HttpStatusCode.Forbidden, HttpMethod.Get, "/", remote);

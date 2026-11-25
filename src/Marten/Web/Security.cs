@@ -117,10 +117,12 @@ public sealed class Security {
 			return;
 		}
 		var bearer = Bearer(ctx);
+		// A paired bearer is accepted only at the current canonical pairing origin, never at a web alias.
+		var pairedRevocation = atPairingOrigin ? Pairing?.Authenticate(bearer) : null;
 		if(policy == OperatorRoute.Management) {
 			ctx.Response.Headers.CacheControl = "no-store";
 			// The original operator has to bootstrap locally. Already-paired devices have full UI authority.
-			if(Pairing?.Authenticate(bearer) is null && (atPairingOrigin || !LocalOperatorOrigin(ctx) || !IsOperator(bearer))) {
+			if(pairedRevocation is null && (atPairingOrigin || !LocalOperatorOrigin(ctx) || !IsOperator(bearer))) {
 				ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
 				return;
 			}
@@ -133,7 +135,7 @@ public sealed class Security {
 				return;
 			}
 		} else if(atPairingOrigin || (ctx.Request.Path.StartsWithSegments("/api") && !TokenValid(ctx))) {
-			if(Pairing?.Authenticate(bearer) is { } revoked) {
+			if(pairedRevocation is { } revoked) {
 				ctx.Response.Headers.CacheControl = "no-store";
 				if(policy != OperatorRoute.Action) {
 					ctx.Response.StatusCode = StatusCodes.Status403Forbidden;

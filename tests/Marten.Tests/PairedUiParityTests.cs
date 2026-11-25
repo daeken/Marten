@@ -19,12 +19,13 @@ public class PairedUiParityTests {
 		var home = new Home(dir.File("home"));
 		var host = embedded ? "marten.scratch.ts.net" : "pairing-test.example";
 		const string ignored = "ignored.example";
+		const string legacyHost = "legacy-web.example";
 		using var port = new TcpListener(IPAddress.Loopback, 0);
 		port.Start();
 		var listenPort = ((IPEndPoint) port.LocalEndpoint).Port;
 		port.Stop();
 		var config = new Config { Port = listenPort, PairingOrigin = $"https://{(embedded ? ignored : host)}",
-			Tailnet = embedded ? new() { Host = host } : null, RemoteHosts = new() { $"{host}:443", $"{host}." },
+			Tailnet = embedded ? new() { Host = host } : null, RemoteHosts = new() { $"{host}:443", $"{host}.", legacyHost },
 			Backup = new() { IntervalMinutes = 0 } };
 		config.Save(home);
 		var webRoot = dir.File("dist");
@@ -80,8 +81,8 @@ public class PairedUiParityTests {
 			shell.Headers.Host = local;
 			using var localResponse = await http.SendAsync(shell, timeout.Token);
 			Assert.Equal("scratch UI", await localResponse.Content.ReadAsStringAsync(timeout.Token));
+			var op = await File.ReadAllTextAsync(Path.Combine(home.Secrets, "ui-token"), timeout.Token);
 			if(embedded) {
-				var op = await File.ReadAllTextAsync(Path.Combine(home.Secrets, "ui-token"), timeout.Token);
 				async Task<HttpResponseMessage> Pair(HttpMethod method, string path, string authority, string? bearer = null, object? body = null) {
 					using var req = new HttpRequestMessage(method, path);
 					req.Headers.Host = authority;
@@ -145,6 +146,17 @@ public class PairedUiParityTests {
 				}
 			}
 
+			// Same device Bearer as the canonical requests, at an independently allowed web alias.
+			await Check(HttpMethod.Get, "/api/status", [HttpStatusCode.OK]);
+			await Check(HttpMethod.Get, "/api/pair/devices", [HttpStatusCode.OK]);
+			await Check(HttpMethod.Get, "/api/status", [HttpStatusCode.Unauthorized], authority: legacyHost);
+			await Check(HttpMethod.Get, "/api/pair/devices", [HttpStatusCode.Forbidden], authority: legacyHost);
+			await Check(HttpMethod.Post, "/api/pair/create", [HttpStatusCode.Forbidden],
+				embedded ? new { tsAuthKey = key } : null, authority: legacyHost);
+			await Check(HttpMethod.Delete, $"/api/pair/devices/{Guid.Empty}", [HttpStatusCode.Forbidden], authority: legacyHost);
+			await Check(HttpMethod.Get, "/api/status", [HttpStatusCode.OK], authority: legacyHost, bearer: op);
+			await Check(HttpMethod.Get, "/api/pair/devices", [HttpStatusCode.OK], authority: local, bearer: op);
+
 			using var create = await http.PostAsJsonAsync("/api/agents", new { name = "Parity" }, timeout.Token);
 			Assert.Equal(HttpStatusCode.OK, create.StatusCode);
 			var id = (await create.Content.ReadFromJsonAsync<JsonElement>(timeout.Token)).GetProperty("id").GetString();
@@ -194,8 +206,11 @@ public class PairedUiParityTests {
 			Assert.False(logs.Any(l => l.Contains(key) || (code != null && l.Contains(code))), "Pairing material appeared in server logs.");
 		}
 
-		async Task Check(HttpMethod method, string path, HttpStatusCode[] allowed, object? json = null) {
+		async Task Check(HttpMethod method, string path, HttpStatusCode[] allowed, object? json = null,
+			string? authority = null, string? bearer = null) {
 			using var request = new HttpRequestMessage(method, path);
+			if(authority != null) request.Headers.Host = authority;
+			if(bearer != null) request.Headers.Authorization = new("Bearer", bearer);
 			if(json != null) request.Content = JsonContent.Create(json);
 			using var response = await http.SendAsync(request, timeout.Token);
 			Assert.True(allowed.Contains(response.StatusCode), $"{method} {path}: got {response.StatusCode}");
