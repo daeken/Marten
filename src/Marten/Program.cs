@@ -124,6 +124,11 @@ var security = new Security(home, config) { ClientAuth = manager.Outside.Authent
 
 var builder = WebApplication.CreateSlimBuilder(args);
 builder.WebHost.UseUrls($"http://127.0.0.1:{config.Port}");
+if(config.Tailnet != null) builder.WebHost.ConfigureKestrel(kestrel => {
+	// Ignore configured Kestrel endpoints in embedded mode. Only the helper listens on the tailnet.
+	kestrel.Configure(new ConfigurationBuilder().Build());
+	kestrel.Listen(System.Net.IPAddress.Loopback, config.Port);
+});
 builder.Logging.SetMinimumLevel(LogLevel.Warning);
 builder.Services.ConfigureHttpJsonOptions(o => {
 	o.SerializerOptions.PropertyNamingPolicy = JsonIO.Options.PropertyNamingPolicy;
@@ -131,6 +136,10 @@ builder.Services.ConfigureHttpJsonOptions(o => {
 	foreach(var c in JsonIO.Options.Converters) o.SerializerOptions.Converters.Add(c);
 });
 var app = builder.Build();
+if(config.Tailnet?.CanonicalHost() is { } tailnetHost) {
+	app.UseRouting();
+	app.Use(next => TailnetTransport.RequireNativeEndpoint(tailnetHost, next));
+}
 app.Use(security.Middleware);
 app.UseWebSockets();
 
@@ -475,8 +484,16 @@ Console.WriteLine($"Backups: {backups.Directory}{(backups.Encrypting ? " (encryp
 Console.WriteLine(webRoot == null
 	? "No built UI found (web/dist). Run `npm run build` in web/, or set MARTEN_WEB_ROOT."
 	: $"Marten UI: http://127.0.0.1:{config.Port}/ (paste the token from the Marten home's secrets/ui-token into the page)");
+Task? tailnetRun = null;
+using var onStarted = app.Lifetime.ApplicationStarted.Register(() => {
+	if(config.Tailnet != null) tailnetRun = Task.Run(() => TailnetTransport.RunAsync(home, config,
+		Console.Error.WriteLine, app.Lifetime.ApplicationStopping));
+});
 try { await app.RunAsync(); }
-finally { await drain.Value; }
+finally {
+	if(tailnetRun != null) await tailnetRun;
+	await drain.Value;
+}
 
 static string? Blank(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
 
