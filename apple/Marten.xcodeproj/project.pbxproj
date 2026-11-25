@@ -15,11 +15,13 @@
 		47F95AF728200D8996673317 /* QR.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB79A7B841A9E892C17E98A7 /* QR.swift */; };
 		480D9F1EE4B0159774C13F1E /* ClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E70246C11BAE9986E883FFA /* ClientTests.swift */; };
 		4840A29B12CC0D8540F1CA87 /* Operations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39B4F8B9ABCF38ED1999593C /* Operations.swift */; };
+		535526E45D48C8AF3A4E4BE8 /* Notebook.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FD59F4AC4F947B3F9984D71 /* Notebook.swift */; };
 		56322259F308F31D088F6C3E /* Timeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC4FEA88791C90D0E5315E22 /* Timeline.swift */; };
 		584D35746983352495BAF27B /* Connections.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FF64C6D95C2712DCD5F203E /* Connections.swift */; };
 		724A3E0D31209666CEC2652A /* Workspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7425BD4A106FDE0A234CC40 /* Workspace.swift */; };
 		8A7216E96170AAC9585274FE /* Timeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC4FEA88791C90D0E5315E22 /* Timeline.swift */; };
 		9282BA520E0A8129370A981A /* Inbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26B0506E9E29AC99DFA612AE /* Inbox.swift */; };
+		996D45C0A3EF134A28D2E99E /* Notebook.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FD59F4AC4F947B3F9984D71 /* Notebook.swift */; };
 		9A6E50D3F978ADB551378FB8 /* Workspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7425BD4A106FDE0A234CC40 /* Workspace.swift */; };
 		9CA6F859AB2A9024A2BEB3B9 /* RichTranscript.swift in Sources */ = {isa = PBXBuildFile; fileRef = 504195C01908429552CF5CD0 /* RichTranscript.swift */; };
 		A40C0E19F2A5703B53062ECF /* Operations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39B4F8B9ABCF38ED1999593C /* Operations.swift */; };
@@ -57,6 +59,7 @@
 /* Begin PBXFileReference section */
 		00C68D4A98BF181D3CE88355 /* MartenTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = MartenTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		13EA62427E8B256347FC0858 /* Client.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Client.swift; sourceTree = "<group>"; };
+		1FD59F4AC4F947B3F9984D71 /* Notebook.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Notebook.swift; sourceTree = "<group>"; };
 		1FF64C6D95C2712DCD5F203E /* Connections.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Connections.swift; sourceTree = "<group>"; };
 		26B0506E9E29AC99DFA612AE /* Inbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Inbox.swift; sourceTree = "<group>"; };
 		33414BAA3A0D9F1A66305699 /* TailnetTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TailnetTransport.swift; sourceTree = "<group>"; };
@@ -104,6 +107,7 @@
 				7309633EE2E13A8F89FB924A /* LiveEvents.swift */,
 				9F88394C5EA8FF4E026A7BC1 /* MartenApp.swift */,
 				52B596FD73CE03FE5810A97B /* Messages.swift */,
+				1FD59F4AC4F947B3F9984D71 /* Notebook.swift */,
 				39B4F8B9ABCF38ED1999593C /* Operations.swift */,
 				C5610B571F9AB02248FE2F42 /* Pairing.swift */,
 				AB79A7B841A9E892C17E98A7 /* QR.swift */,
@@ -247,6 +251,7 @@
 				C8A1FCFC8656D59C6F56FE67 /* LiveEvents.swift in Sources */,
 				B4EE9191BCBFE52AB6BD866A /* MartenApp.swift in Sources */,
 				C478B7E89E54ECBB840212F7 /* Messages.swift in Sources */,
+				535526E45D48C8AF3A4E4BE8 /* Notebook.swift in Sources */,
 				4840A29B12CC0D8540F1CA87 /* Operations.swift in Sources */,
 				B2D11A5E574174A955EB7A2C /* Pairing.swift in Sources */,
 				C126AB3F7D6FC3F8C4159EF7 /* QR.swift in Sources */,
@@ -275,6 +280,7 @@
 				2260B0B328F51E58556275E6 /* LiveEvents.swift in Sources */,
 				A765567A3860572D2F0B8BC5 /* MartenApp.swift in Sources */,
 				0DD8586BD854D7794F711551 /* Messages.swift in Sources */,
+				996D45C0A3EF134A28D2E99E /* Notebook.swift in Sources */,
 				A40C0E19F2A5703B53062ECF /* Operations.swift in Sources */,
 				F210C421087F3C1FE5B7C0BB /* Pairing.swift in Sources */,
 				47F95AF728200D8996673317 /* QR.swift in Sources */,

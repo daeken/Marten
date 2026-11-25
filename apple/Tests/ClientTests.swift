@@ -950,6 +950,139 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(finalRequests.map(\.httpMethod), ["GET", "DELETE", "GET"])
     }
 
+    private static let notebookCell = #"{"id":8,"at":"2026-01-01T10:00:00Z","command":"Write-Output 'fixture'","workingDirectory":"/fixture","stateIn":{"count":9007199254740993,"flag":true,"nested":[null,"value"]},"stateOut":[1,"changed"],"output":"recorded","isError":false,"durationMs":20}"#
+    private static let rerunCell = #"{"id":0,"at":"2026-01-01T10:01:00Z","command":"Write-Output 'fixture'","workingDirectory":"/fixture","stateOut":false,"output":"different","isError":true,"durationMs":32}"#
+    private static let notebookFile = #"{"nbformat":4,"nbformat_minor":5,"cells":[{"cell_type":"code","source":["fixture"]}],"metadata":{}}"#
+
+    @MainActor func testNotebookConfirmationConsumesOnceAndDecodesRecordedAndReplayState() async throws {
+        let endpoint = try Endpoint(Self.fixtureOrigin)
+        let listing = "[\(Self.notebookCell)]"
+        let reply = #"{"run":\#(Self.rerunCell),"sameOutput":false,"sameState":false}"#
+        let fixture = StubTransport([.init(200, listing), .init(200, reply), .init(200, listing)])
+        let api = API(endpoint: endpoint, token: "fixture-bearer", transport: try TailnetTransport(endpoint: endpoint, transport: fixture))
+        let state = NotebookState()
+        let route = UUID()
+        await state.refresh(using: api, agent: "agent-1", route: route)
+        let cell = try XCTUnwrap(state.cells?.first)
+        XCTAssertEqual(cell.id, 8)
+        XCTAssertEqual(cell.command, "Write-Output 'fixture'")
+        XCTAssertEqual(cell.workingDirectory, "/fixture")
+        XCTAssertEqual(cell.at, "2026-01-01T10:00:00Z")
+        XCTAssertEqual(cell.output, "recorded")
+        XCTAssertEqual(cell.durationMs, 20)
+        XCTAssertFalse(cell.isError)
+        let input = try XCTUnwrap(cell.stateIn?.display)
+        XCTAssertTrue(input.contains("9007199254740993"))
+        XCTAssertTrue(input.contains("true"))
+        XCTAssertTrue(input.contains("null"))
+        XCTAssertTrue(try XCTUnwrap(cell.stateOut?.display).contains("changed"))
+        state.prepare(8, route: route)
+        XCTAssertEqual(state.pending?.id, 8)
+        state.cancelConfirmation()
+        XCTAssertNil(state.confirm(8, using: api, agent: "agent-1", route: route))
+        let cancelled = await fixture.requests
+        XCTAssertEqual(cancelled.map(\.httpMethod), ["GET"])
+        state.prepare(8, route: route)
+        XCTAssertNil(state.confirm(8, using: api, agent: "agent-1", route: UUID()))
+        state.prepare(8, route: route)
+        let run = try XCTUnwrap(state.confirm(8, using: api, agent: "agent-1", route: route))
+        XCTAssertNil(state.confirm(8, using: api, agent: "agent-1", route: route))
+        await run.value
+        await state.refresh(using: api, agent: "agent-1", route: route)
+        guard case .result(let replay) = state.outcomes[8] else { return XCTFail("Missing rerun result") }
+        XCTAssertFalse(replay.sameOutput)
+        XCTAssertFalse(replay.sameState)
+        XCTAssertEqual(replay.run.output, "different")
+        XCTAssertNil(replay.run.stateIn)
+        XCTAssertEqual(replay.run.stateOut?.display, "false")
+        XCTAssertTrue(replay.run.isError)
+        XCTAssertEqual(replay.run.durationMs, 32)
+        let requests = await fixture.requests
+        XCTAssertEqual(requests.map(\.httpMethod), ["GET", "POST", "GET"])
+        XCTAssertEqual(requests.compactMap { $0.url?.absoluteString }, [
+            "/api/agents/agent-1/notebook?limit=300", "/api/agents/agent-1/notebook/8/rerun", "/api/agents/agent-1/notebook?limit=300"
+        ].map { endpoint.origin + $0 })
+        XCTAssertGreaterThan(requests[1].timeoutInterval, 120)
+        XCTAssertTrue(requests.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-bearer" && $0.httpBody == nil })
+    }
+
+    @MainActor func testNotebookCancelledAndFailedRerunsRequireReadAndNeverReplayOnReconnect() async throws {
+        let endpoint = try Endpoint(Self.fixtureOrigin)
+        let listing = "[\(Self.notebookCell)]"
+        let fixture = StubTransport([.init(200, listing), .init(failure: .cancelled)])
+        let replacement = StubTransport([.init(503), .init(200, listing), .init(502, "private detail"), .init(200, listing)])
+        let original = API(endpoint: endpoint, token: "fixture-bearer", transport: fixture)
+        let reconnected = API(endpoint: endpoint, token: "fixture-bearer", transport: replacement)
+        let state = NotebookState()
+        let firstRoute = UUID()
+        await state.refresh(using: original, agent: "agent-1", route: firstRoute)
+        state.prepare(8, route: firstRoute)
+        await state.confirm(8, using: original, agent: "agent-1", route: firstRoute)?.value
+        XCTAssertFalse(state.canPrepare(route: firstRoute))
+        guard case .unconfirmed(let cancellation) = state.outcomes[8] else { return XCTFail("Missing cancellation warning") }
+        XCTAssertTrue(cancellation.contains("cancelled"))
+        XCTAssertTrue(cancellation.contains("side effects"))
+        let route = UUID()
+        await state.refresh(using: reconnected, agent: "agent-1", route: route)
+        XCTAssertEqual(state.cells?.map(\.id), [8])
+        XCTAssertNotNil(state.readError)
+        state.prepare(8, route: route)
+        XCTAssertNil(state.pending)
+        await state.refresh(using: reconnected, agent: "agent-1", route: route)
+        let reads = await replacement.requests
+        XCTAssertEqual(reads.map(\.httpMethod), ["GET", "GET"])
+        state.prepare(8, route: route)
+        await state.confirm(8, using: reconnected, agent: "agent-1", route: route)?.value
+        guard case .unconfirmed(let failure) = state.outcomes[8] else { return XCTFail("Missing error warning") }
+        XCTAssertTrue(failure.contains("502"))
+        XCTAssertFalse(failure.contains("private detail"))
+        await state.refresh(using: reconnected, agent: "agent-1", route: route)
+        let initial = await fixture.requests
+        let final = await replacement.requests
+        XCTAssertEqual(initial.map(\.httpMethod), ["GET", "POST"])
+        XCTAssertEqual(final.map(\.httpMethod), ["GET", "GET", "POST", "GET"])
+    }
+
+    func testNotebookExportPinnedAuthorizationValidationAndCancellation() async throws {
+        let endpoint = try Endpoint(Self.fixtureOrigin)
+        let mime = "application/x-ipynb+json"
+        let fixture = StubTransport([.init(200, Self.notebookFile, mime: mime), .init(307), .init(401), .init(403),
+                                     .init(200, Self.notebookFile, mime: "text/html"), .init(200, "{}", mime: mime), .init(failure: .cancelled)])
+        let transport = try TailnetTransport(endpoint: endpoint, transport: fixture)
+        let api = API(endpoint: endpoint, token: "fixture-bearer", transport: transport)
+        let bytes = try await api.notebookFile("agent-1")
+        XCTAssertEqual(bytes, Data(Self.notebookFile.utf8))
+        for expected in [ClientError.response(307), .unauthorized, .unauthorized, .malformed, .malformed] {
+            do { _ = try await api.notebookFile("agent-1"); XCTFail("Accepted rejected export") }
+            catch { XCTAssertEqual(error as? ClientError, expected) }
+        }
+        do { _ = try await api.notebookFile("agent-1"); XCTFail("Accepted cancelled download") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        let cancelled = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await api.notebookFile("agent-1")
+        }
+        do { _ = try await cancelled.value; XCTFail("Cancelled download should not start") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        let unauthenticated = API(endpoint: endpoint, transport: transport)
+        do { _ = try await unauthenticated.notebook("agent-1"); XCTFail("Listed without Bearer") }
+        catch { XCTAssertEqual(error as? ClientError, .unauthorized) }
+        do { _ = try await unauthenticated.rerunCell("agent-1", 8); XCTFail("Reran without Bearer") }
+        catch { XCTAssertEqual(error as? ClientError, .unauthorized) }
+        do { _ = try await unauthenticated.notebookFile("agent-1"); XCTFail("Exported without Bearer") }
+        catch { XCTAssertEqual(error as? ClientError, .unauthorized) }
+        do { _ = try await api.notebookFile("../other"); XCTFail("Accepted unsafe agent") }
+        catch { XCTAssertEqual(error as? ClientError, .malformed) }
+        do { _ = try await api.rerunCell("agent-1", 0); XCTFail("Accepted unsafe cell number") }
+        catch { XCTAssertEqual(error as? ClientError, .malformed) }
+        let requests = await fixture.requests
+        XCTAssertEqual(requests.count, 7)
+        XCTAssertTrue(requests.allSatisfy {
+            $0.httpMethod == "GET" && $0.url?.absoluteString == endpoint.origin + "/api/agents/agent-1/notebook.ipynb" &&
+            $0.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-bearer" && $0.value(forHTTPHeaderField: "Accept") == mime
+        })
+    }
+
     private static func body(_ request: URLRequest) throws -> [String: String] {
         let body = try XCTUnwrap(request.httpBody)
         return try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])
@@ -961,7 +1094,13 @@ private actor StubTransport: Transport {
         let code: Int
         let body: String
         let mime: String?
-        init(_ code: Int, _ body: String = "", mime: String? = nil) { self.code = code; self.body = body; self.mime = mime }
+        let failure: URLError.Code?
+        init(_ code: Int, _ body: String = "", mime: String? = nil) {
+            self.code = code; self.body = body; self.mime = mime; self.failure = nil
+        }
+        init(failure: URLError.Code) {
+            self.code = 0; self.body = ""; self.mime = nil; self.failure = failure
+        }
     }
     var requests: [URLRequest] = []
     var replies: [Reply]
@@ -972,6 +1111,7 @@ private actor StubTransport: Transport {
         requests.append(request)
         guard !replies.isEmpty else { throw URLError(.badServerResponse) }
         let reply = replies.removeFirst()
+        if let failure = reply.failure { throw URLError(failure) }
         return (Data(reply.body.utf8), HTTPURLResponse(url: request.url!, statusCode: reply.code,
                                                        httpVersion: "HTTP/1.1", headerFields: reply.mime.map { ["Content-Type": $0] })!)
     }

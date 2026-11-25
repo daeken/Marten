@@ -13,6 +13,19 @@
         <key>NSAllowsLocalNetworking</key><true/>
     </dict>
     <key>NSCameraUsageDescription</key><string>Scan a Marten pairing QR inside the app.</string>
+    <key>UTImportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key><string>dev.marten.jupyter-notebook</string>
+            <key>UTTypeDescription</key><string>Jupyter Notebook</string>
+            <key>UTTypeConformsTo</key><array><string>public.json</string></array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key><array><string>ipynb</string></array>
+                <key>public.mime-type</key><array><string>application/x-ipynb+json</string></array>
+            </dict>
+        </dict>
+    </array>
     <key>UILaunchScreen</key><dict/>
     <key>UISupportedInterfaceOrientations</key>
     <array>

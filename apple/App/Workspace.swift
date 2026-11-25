@@ -102,6 +102,11 @@ struct WorkspaceView: View {
                 case .messages:
                     MessagesView(state: messages, projects: status?.projects ?? [], agents: status?.agents ?? [],
                                  active: networkActive, refresh: refreshMessages)
+                case .notebook(let id):
+                    if let agent = status?.agents.first(where: { $0.id == id }) {
+                        NotebookView(api: api, agent: agent, route: routeID, active: networkActive && path.last == destination, hint: eventHint)
+                            .id(id)
+                    } else { ContentUnavailableView("Agent Unavailable", systemImage: "book.closed") }
                 case .operations(let id, let task):
                     if let agent = status?.agents.first(where: { $0.id == id }) {
                         AgentOperationsView(api: api, agent: agent, agents: status?.agents ?? [], targetTask: task,
@@ -239,7 +244,7 @@ struct WorkspaceView: View {
 
 enum WorkspaceDestination: Hashable {
     case inbox, messages, agent(String)
-    case operations(String, task: Int?), processes(String?), processLog(AgentProcess.Key)
+    case notebook(String), operations(String, task: Int?), processes(String?), processLog(AgentProcess.Key)
 }
 
 private struct MessagesRefresh: Equatable {
@@ -295,6 +300,9 @@ private struct ConversationView: View {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     NavigationLink(value: WorkspaceDestination.operations(agent.id, task: nil)) {
                         Label("Tasks, Schedules & Processes", systemImage: "checklist")
+                    }.buttonStyle(.borderless)
+                    NavigationLink(value: WorkspaceDestination.notebook(agent.id)) {
+                        Label("PowerShell Notebook", systemImage: "book.closed")
                     }.buttonStyle(.borderless)
                     Text(agentStatus(agent)).font(.footnote).foregroundStyle(.secondary)
                     if agent.pausedEffective && !agent.paused {
@@ -352,6 +360,9 @@ private struct ConversationView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Menu("Agent Actions", systemImage: "ellipsis.circle") {
+                    NavigationLink(value: WorkspaceDestination.notebook(agent.id)) {
+                        Label("PowerShell Notebook", systemImage: "book.closed")
+                    }
                     NavigationLink(value: WorkspaceDestination.operations(agent.id, task: nil)) {
                         Label("Tasks, Schedules & Processes", systemImage: "checklist")
                     }

@@ -80,7 +80,7 @@ enum ClientError: LocalizedError, Equatable {
     case origin, unauthorized, response(Int), malformed, network, tls, keychain
     case pairOffer, pairExpired, enrollmentUnavailable, deviceName, tailnetState, tailnetNotReady, image
     case pairingAlreadySaved, forgetPending, nodeCloseFailed
-    case attachment, processLog
+    case attachment, processLog, notebookTooLarge
 
     var errorDescription: String? {
         switch self {
@@ -91,6 +91,7 @@ enum ClientError: LocalizedError, Equatable {
         case .image: "Could not read one pairing QR. Try scanning again or importing a different image."
         case .attachment: "This attachment is not a supported image or exceeds the preview limit."
         case .processLog: "The process log is not plain text or exceeds the display limit."
+        case .notebookTooLarge: "The notebook response exceeds the 32 MiB limit."
         case .enrollmentUnavailable: "Embedded Tailscale enrollment is unavailable in this build."
         case .tailnetState: "Could not access private Tailscale device state."
         case .pairingAlreadySaved: "This server is already saved. To pair again, forget it first and get a new pairing QR."
@@ -132,6 +133,8 @@ protocol EventTransport: Transport {
 
 struct URLSessionTransport: EventTransport {
     private let session: URLSession
+    private let notebookSession: URLSession
+    static let notebookRerunTimeout: TimeInterval = 180
 
     init(configuration config: URLSessionConfiguration = .ephemeral) {
         config.urlCache = nil
@@ -140,6 +143,11 @@ struct URLSessionTransport: EventTransport {
         config.timeoutIntervalForRequest = 15
         config.timeoutIntervalForResource = 30
         self.session = URLSession(configuration: config, delegate: NoRedirects(), delegateQueue: nil)
+        // Same proxy/trust/redirect policy, with room for the server's default 120-second run.
+        let longer = config.copy() as! URLSessionConfiguration
+        longer.timeoutIntervalForRequest = Self.notebookRerunTimeout
+        longer.timeoutIntervalForResource = Self.notebookRerunTimeout
+        self.notebookSession = URLSession(configuration: longer, delegate: NoRedirects(), delegateQueue: nil)
     }
 
     func events(for request: URLRequest) throws -> EventStream {
@@ -176,7 +184,8 @@ struct URLSessionTransport: EventTransport {
     }
 
     func boundedData(for request: URLRequest, limit: Int) async throws -> (Data, HTTPURLResponse) {
-        let (bytes, response) = try await session.bytes(for: request)
+        let route = request.timeoutInterval == Self.notebookRerunTimeout ? notebookSession : session
+        let (bytes, response) = try await route.bytes(for: request)
         defer { bytes.task.cancel() }
         guard let http = response as? HTTPURLResponse else { throw ClientError.malformed }
         guard (200..<300).contains(http.statusCode) else { return (Data(), http) }
@@ -189,7 +198,10 @@ struct URLSessionTransport: EventTransport {
         return (data, http)
     }
 
-    func invalidate() { session.invalidateAndCancel() }
+    func invalidate() {
+        session.invalidateAndCancel()
+        notebookSession.invalidateAndCancel()
+    }
 
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         // Default URLSession trust evaluation (ATS, chain, expiry, hostname); no trust override.
@@ -391,6 +403,38 @@ struct API: Sendable {
         }
     }
 
+    func notebook(_ agent: String) async throws -> [NotebookCell] {
+        let (data, _) = try await notebookResponse("GET", route(agent, "notebook"), query: [.init(name: "limit", value: "300")])
+        return try decode([NotebookCell].self, data)
+    }
+
+    func rerunCell(_ agent: String, _ cell: Int) async throws -> NotebookReplay {
+        guard cell > 0 else { throw ClientError.malformed }
+        let (data, _) = try await notebookResponse("POST", route(agent, "notebook/\(cell)/rerun"), timeout: URLSessionTransport.notebookRerunTimeout)
+        return try decode(NotebookReplay.self, data)
+    }
+
+    func notebookFile(_ agent: String) async throws -> Data {
+        let mime = "application/x-ipynb+json"
+        let (data, reply) = try await notebookResponse("GET", route(agent, "notebook.ipynb"), accept: mime)
+        guard reply.mimeType == mime else { throw ClientError.malformed }
+        _ = try decode(NotebookFileHeader.self, data)
+        return data
+    }
+
+    private func notebookResponse(_ method: String, _ path: String, query: [URLQueryItem] = [],
+                                  accept: String = "application/json", timeout: TimeInterval? = nil) async throws -> (Data, HTTPURLResponse) {
+        try requireBearer()
+        try Task.checkCancellation()
+        do {
+            let result = try await response(method, path, query: query, accept: accept, limit: 32 * 1024 * 1024, timeout: timeout)
+            try Task.checkCancellation()
+            return result
+        } catch ClientError.attachment {
+            throw ClientError.notebookTooLarge
+        }
+    }
+
     private func requireBearer() throws {
         guard let token, Self.validToken(token) else { throw ClientError.unauthorized }
     }
@@ -466,13 +510,14 @@ struct API: Sendable {
     }
 
     private func response(_ method: String, _ path: String, body: Data? = nil, query: [URLQueryItem] = [],
-                          accept: String = "application/json", limit: Int? = nil) async throws -> (Data, HTTPURLResponse) {
+                          accept: String = "application/json", limit: Int? = nil, timeout: TimeInterval? = nil) async throws -> (Data, HTTPURLResponse) {
         var url = URLComponents(url: endpoint.url, resolvingAgainstBaseURL: false)!
         url.path = path
         if !query.isEmpty { url.queryItems = query }
         var request = URLRequest(url: url.url!)
         request.httpMethod = method
         request.httpBody = body
+        if let timeout { request.timeoutInterval = timeout }
         request.setValue(accept, forHTTPHeaderField: "Accept")
         if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
