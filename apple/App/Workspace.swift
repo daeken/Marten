@@ -71,6 +71,9 @@ struct WorkspaceView: View {
                         }
                     }
                 }
+                NavigationLink(value: WorkspaceDestination.providers) {
+                    Label("Providers & Account", systemImage: "person.crop.circle")
+                }
                 NavigationLink(value: WorkspaceDestination.inbox) {
                     HStack {
                         Label("Inbox", systemImage: "tray")
@@ -136,6 +139,16 @@ struct WorkspaceView: View {
                 case .messages:
                     MessagesView(state: messages, projects: status?.projects ?? [], agents: status?.agents ?? [],
                                  active: networkActive, refresh: refreshMessages)
+                case .providers:
+                    ProvidersView(status: status, active: networkActive && path.last == .providers,
+                                  ready: controlsReady && path.last == .providers, busy: controls.busy, route: routeID,
+                                  statusError: statusError, refresh: refresh, logout: {
+                        guard networkActive, path.last == .providers else { return }
+                        controls.signOutProvider(using: api, route: routeID)
+                    }, update: { provider, key in
+                        guard networkActive, path.last == .providers else { return }
+                        controls.updateProvider(provider, key: key, using: api, route: routeID)
+                    }).id(routeID)
                 case .memory(let id):
                     if let project = status?.projects.first(where: { $0.id == id }) {
                         ProjectMemoryView(api: api, project: project, agents: status?.agents ?? [], route: routeID,
@@ -342,7 +355,7 @@ struct WorkspaceView: View {
 }
 
 enum WorkspaceDestination: Hashable {
-    case inbox, messages, agent(String)
+    case inbox, messages, providers, agent(String)
     case createChat, createProject, memory(String)
     case settings(String)
     case notebook(String), operations(String, task: Int?), processes(String?), processLog(AgentProcess.Key)

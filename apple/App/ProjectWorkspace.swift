@@ -160,6 +160,25 @@ final class WorkspaceControls {
         }) { _ in }
     }
 
+    @discardableResult
+    func signOutProvider(using api: API, route: UUID) -> Task<Void, Never>? {
+        guard ready(route), status?.auth?.connected == true else { return nil }
+        return run(using: api, route: route, label: "Sign Out of ChatGPT", request: {
+            try await api.signOutProviderAccount()
+        }) { _ in }
+    }
+
+    @discardableResult
+    func updateProvider(_ id: String, key: String?, using api: API, route: UUID) -> Task<Void, Never>? {
+        guard ready(route), let provider = status?.backends?.first(where: { $0.id == id }), key != nil || provider.hasSavedKey else { return nil }
+        var input = key
+        return run(using: api, route: route, label: key == nil ? "Remove Provider Key" : "Save Provider Key", request: {
+            let value = input
+            input = nil
+            try await api.setProviderKey(id, key: value)
+        }) { _ in }
+    }
+
     func create(_ draft: ProjectCreation, using api: API, route: UUID, completion: @escaping (String?) -> Void) {
         guard draft.isValid, ready(route) else { return }
         run(using: api, route: route, label: "Create Project", request: {

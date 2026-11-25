@@ -1309,6 +1309,76 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(reconnect.map(\.httpMethod), ["GET"])
     }
 
+    private static let providerStatus = #"{"projects":[],"agents":[],"auth":{"connected":true,"email":"fixture@example.test","signingIn":false,"lastError":"synthetic-private-upstream-detail"},"backends":[{"provider":"fixture","label":"Fixture API","connected":true,"keySource":"saved","spentToday":1.50,"budget":1.50},{"provider":"environment","label":"Fixture Environment","connected":true,"keySource":"FIXTURE_API_KEY","envVar":"FIXTURE_API_KEY","spentToday":0}]}"#
+
+    func testProviderMetadataAndPinnedCredentialRoutes() async throws {
+        let endpoint = try Endpoint(Self.fixtureOrigin)
+        let fixture = StubTransport([.init(200, Self.providerStatus), .init(200), .init(200), .init(200)])
+        let transport = try TailnetTransport(endpoint: endpoint, transport: fixture)
+        let api = API(endpoint: endpoint, token: "fixture-bearer", transport: transport)
+        let status = try await api.status()
+        XCTAssertEqual(status.auth?.email, "fixture@example.test")
+        XCTAssertEqual(status.auth?.connected, true)
+        XCTAssertEqual(status.auth?.signInFailed, true)
+        XCTAssertFalse(String(reflecting: status.auth).contains("synthetic-private-upstream-detail"))
+        XCTAssertEqual(status.backends?.first?.hasSavedKey, true)
+        XCTAssertEqual(status.backends?.first?.exhaustedBudget, true)
+        XCTAssertEqual(status.backends?.last?.hasSavedKey, false)
+        XCTAssertEqual(status.backends?.last?.connectionLabel, "Server environment (FIXTURE_API_KEY)")
+        try await api.setProviderKey("fixture", key: "  synthetic-key  ")
+        try await api.setProviderKey("fixture", key: nil)
+        try await api.signOutProviderAccount()
+        do { try await api.setProviderKey("fixture", key: " \n"); XCTFail("Accepted an empty replacement") }
+        catch { XCTAssertEqual(error as? ClientError, .malformed) }
+        do { try await api.setProviderKey("fixture/other", key: nil); XCTFail("Accepted an unsafe provider ID") }
+        catch { XCTAssertEqual(error as? ClientError, .malformed) }
+        let guest = API(endpoint: endpoint, transport: transport)
+        do { try await guest.setProviderKey("fixture", key: nil); XCTFail("Accepted a key mutation without Bearer") }
+        catch { XCTAssertEqual(error as? ClientError, .unauthorized) }
+        do { try await guest.signOutProviderAccount(); XCTFail("Accepted sign-out without Bearer") }
+        catch { XCTAssertEqual(error as? ClientError, .unauthorized) }
+        let requests = await fixture.requests
+        XCTAssertEqual(requests.map(\.httpMethod), ["GET", "PUT", "PUT", "POST"])
+        XCTAssertEqual(requests.compactMap { $0.url?.absoluteString }, [
+            "/api/status", "/api/backends/fixture/key", "/api/backends/fixture/key", "/api/auth/logout"
+        ].map { endpoint.origin + $0 })
+        XCTAssertTrue(requests.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-bearer" })
+        let saved = try Self.body(requests[1])
+        XCTAssertTrue(saved == ["key": "synthetic-key"], "Expected only the trimmed synthetic value in the request body")
+        let removed = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(requests[2].httpBody)) as? [String: Any])
+        XCTAssertTrue(removed["key"] is NSNull)
+        XCTAssertNil(requests[3].httpBody)
+    }
+
+    @MainActor func testProviderMutationFailureIsRedactedAndReconnectOnlyReads() async throws {
+        let endpoint = try Endpoint(Self.fixtureOrigin)
+        let fixture = StubTransport([.init(200, Self.providerStatus), .init(502, "synthetic-key echoed by upstream"), .init(503)])
+        let replacement = StubTransport([.init(200, Self.providerStatus), .init(200), .init(200, Self.providerStatus)])
+        let api = API(endpoint: endpoint, token: "fixture-bearer", transport: fixture)
+        let next = API(endpoint: endpoint, token: "fixture-bearer", transport: replacement)
+        let controls = WorkspaceControls()
+        let route = UUID()
+        await controls.refresh(using: api, route: route)
+        XCTAssertNil(controls.updateProvider("environment", key: nil, using: api, route: route))
+        await controls.updateProvider("fixture", key: "synthetic-key", using: api, route: route)?.value
+        XCTAssertFalse(controls.ready(route))
+        let notice = try XCTUnwrap(controls.notice)
+        XCTAssertTrue(notice.contains("502"))
+        XCTAssertFalse(notice.contains("synthetic-key"))
+        XCTAssertNil(controls.updateProvider("fixture", key: "synthetic-key", using: api, route: route))
+        XCTAssertNil(controls.signOutProvider(using: api, route: route))
+        let newRoute = UUID()
+        await controls.refresh(using: next, route: newRoute)
+        XCTAssertTrue(controls.ready(newRoute))
+        let reconnect = await replacement.requests
+        XCTAssertEqual(reconnect.map(\.httpMethod), ["GET"])
+        await controls.signOutProvider(using: next, route: newRoute)?.value
+        let initial = await fixture.requests
+        let final = await replacement.requests
+        XCTAssertEqual(initial.map(\.httpMethod), ["GET", "PUT", "GET"])
+        XCTAssertEqual(final.map(\.httpMethod), ["GET", "POST", "GET"])
+    }
+
     private static func body(_ request: URLRequest) throws -> [String: String] {
         let body = try XCTUnwrap(request.httpBody)
         return try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])

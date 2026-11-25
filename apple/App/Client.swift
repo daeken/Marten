@@ -222,6 +222,8 @@ private final class NoRedirects: NSObject, URLSessionTaskDelegate {
 struct ServerStatus: Decodable, Sendable {
     struct Config: Decodable, Sendable { let model: String?; let defaultModel: String?; let effort: String? }
     let config: Config?
+    let auth: ProviderAccount?
+    let backends: [ProviderBackend]?
     let projects: [Project]
     let agents: [Agent]
     let inbox: Int?
@@ -535,6 +537,30 @@ struct API: Sendable {
         try requireBearer()
         try Self.checkRouteID(id)
         return try decode([ReviewedTool].self, await call("GET", "/api/tools", query: [.init(name: "projectId", value: id)]))
+    }
+
+    func signOutProviderAccount() async throws {
+        try requireBearer()
+        try Task.checkCancellation()
+        _ = try await call("POST", "/api/auth/logout")
+    }
+
+    func setProviderKey(_ provider: String, key: String?) async throws {
+        struct Input: Encodable {
+            let key: String?
+            enum CodingKeys: String, CodingKey { case key }
+            func encode(to encoder: any Encoder) throws {
+                var body = encoder.container(keyedBy: CodingKeys.self)
+                try body.encode(key, forKey: .key)
+            }
+        }
+        try requireBearer()
+        try Self.checkRouteID(provider)
+        let value = key?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let value, value.isEmpty { throw ClientError.malformed }
+        try Task.checkCancellation()
+        // Ignore the mutation response body. Neither it nor a server error body is rendered.
+        _ = try await call("PUT", "/api/backends/\(provider)/key", body: JSONEncoder().encode(Input(key: value)))
     }
 
     func models() async throws -> [String] {
