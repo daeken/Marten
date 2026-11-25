@@ -20,22 +20,31 @@ public sealed class EventHub {
 		// A slow client drops its oldest events rather than stalling agents; it resyncs on reconnect.
 		var channel = Channel.CreateBounded<string>(new BoundedChannelOptions(10_000) { FullMode = BoundedChannelFullMode.DropOldest });
 		clients[id] = channel;
+		using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(ct);
+		var reader = ReadUntilClosed();
 		try {
-			var reader = Task.Run(async () => {
-				var buffer = new byte[1024];
-				while(socket.State == WebSocketState.Open) {
-					var r = await socket.ReceiveAsync(buffer, ct);
-					if(r.MessageType == WebSocketMessageType.Close) break;
-				}
-			}, ct);
-			await foreach(var json in channel.Reader.ReadAllAsync(ct)) {
+			await foreach(var json in channel.Reader.ReadAllAsync(lifetime.Token)) {
 				if(socket.State != WebSocketState.Open) break;
-				await socket.SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, true, ct);
-				if(reader.IsCompleted) break;
+				await socket.SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, true, lifetime.Token);
 			}
 		} catch(Exception e) when(e is OperationCanceledException or WebSocketException) {
 		} finally {
 			clients.TryRemove(id, out _);
+			lifetime.Cancel();
+			await reader;
+		}
+
+		async Task ReadUntilClosed() {
+			try {
+				var buffer = new byte[1024];
+				while(socket.State == WebSocketState.Open) {
+					var r = await socket.ReceiveAsync(buffer, lifetime.Token);
+					if(r.MessageType == WebSocketMessageType.Close) break;
+				}
+			} catch(Exception e) when(e is OperationCanceledException or WebSocketException) {
+			} finally {
+				lifetime.Cancel();
+			}
 		}
 	}
 }

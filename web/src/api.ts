@@ -190,6 +190,9 @@ export function takeToken(): string | null {
   try { return localStorage.getItem(TOKEN_KEY); } catch { return null; }
 }
 
+export interface Device { id: string; name: string; createdAt: string }
+export interface PairStatus { configured: boolean; valid: boolean; ready: boolean; enrollmentAvailable: boolean; devices: Device[] }
+
 export const transcriptPageSize = 80;
 export type TranscriptPage = { entries: Entry[]; hasOlder: boolean };
 
@@ -213,6 +216,8 @@ export class Api {
 
   startFreshContext = (id: string) => this.call<void>('POST', `/agents/${id}/start-fresh-context`);
   status = () => this.call<Status_>('GET', '/status');
+  pairStatus = () => this.call<PairStatus>('GET', '/pair/devices');
+  revokeDevice = (id: string) => this.call<void>('DELETE', `/pair/devices/${id}`);
   login = () => this.call<{ url: string }>('POST', '/auth/login');
   logout = () => this.call<void>('POST', '/auth/logout');
   models = () => this.call<string[]>('GET', '/models');

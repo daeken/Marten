@@ -76,7 +76,8 @@ Marten's UI is an installable web app. Opening a conversation shows the latest 8
 Use **Start fresh context** in the agent header and confirm to start over between turns. The next turn uses current instructions and project memory without earlier messages, tool results, or compaction summaries. The transcript keeps a visible divider and all earlier pages. The agent’s identity, children, tasks, schedules, and queued input are unchanged; the action itself does not wake it. Resume any agent, project, or global pause first, and wait for any active turn to finish or stop it.
 
 - **Desktop:** open the printed URL in Chrome or Edge and choose **Install Marten**, or in Safari choose **File → Add to Dock**. It opens in its own window and keeps working across Marten restarts.
-- **Phone:** Marten listens only on 127.0.0.1, so reach it through an HTTPS proxy on the Mac. [Tailscale](https://tailscale.com) is the easy one:
+- **Native app (integration preview):** The private embedded [tailnet transport](docs/embedded-tailnet.md) supports native operator API access with individually revocable paired credentials. [Device pairing](docs/device-pairing.md) describes the contract and the remaining one-scan enrollment work.
+- **Phone (web app):** Marten listens only on 127.0.0.1, so reach it through an HTTPS proxy on the Mac. [Tailscale](https://tailscale.com) is the easy one:
   1. On the Mac, run `tailscale serve --bg 7450`. It prints a URL like `https://your-mac.your-tailnet.ts.net`.
   2. Add `"remoteHosts": ["your-mac.your-tailnet.ts.net"]` to `~/.marten/config.json` and restart Marten.
   3. On the phone, which must be on the same tailnet, open that URL. Paste the token from `~/.marten/secrets/ui-token` into the box, then use **Add to Home Screen**.

@@ -33,7 +33,7 @@ Use a secret-file editor or your normal secret-management workflow to create `$M
 }
 ```
 
-Choose the exact lowercase FQDN, with no scheme, path, port, or trailing dot. The helper requests the first DNS label as the device name. If there is a collision and Tailscale assigns a different name (e.g. `marten-1`), startup is refused; reconcile the enrolled device's actual name in the admin console and Marten configuration before trying again. Restart Marten to apply changes. The server logs the canonical HTTPS URL only after connecting, verifying the actual device name, obtaining a certificate, and opening the private listener. Finish native pairing using the local bootstrap instructions.
+Choose the exact lowercase FQDN, with no scheme, path, port, or trailing dot. The helper requests the first DNS label as the device name. If there is a collision and Tailscale assigns a different name (e.g. `marten-1`), startup is refused; reconcile the enrolled device's actual name in the admin console and Marten configuration before trying again. Restart Marten to apply changes. The server logs the canonical HTTPS URL only after connecting, verifying the actual device name, obtaining a certificate, and opening the private listener. See [device pairing](device-pairing.md) for the current enrollment status; listener readiness alone does not enable one-scan bootstrap.
 
 ## State and operations
 

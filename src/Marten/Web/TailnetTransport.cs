@@ -17,7 +17,7 @@ public static class TailnetTransport {
 		return next(ctx);
 	};
 
-	public static async Task RunAsync(Home home, Config config, Action<string> log, CancellationToken stopping) {
+	public static async Task RunAsync(Home home, Config config, Action<string> log, CancellationToken stopping, Action<bool>? readiness = null) {
 		if(config.Tailnet == null || stopping.IsCancellationRequested) return;
 		if(!OperatingSystem.IsMacOS() && !OperatingSystem.IsLinux()) {
 			log("Tailnet transport requires macOS or Linux.");
@@ -41,7 +41,7 @@ public static class TailnetTransport {
 			start.ArgumentList.Add(arg);
 		try {
 			using var process = Process.Start(start)!;
-			var output = DrainOutputAsync(process.StandardOutput.BaseStream, host, log, stopping);
+			var output = DrainOutputAsync(process.StandardOutput.BaseStream, host, log, stopping, readiness);
 			var errors = process.StandardError.BaseStream.CopyToAsync(Stream.Null, stopping);
 			try {
 				await process.WaitForExitAsync(stopping);
@@ -62,14 +62,17 @@ public static class TailnetTransport {
 			}
 		} catch(Exception e) when(e is Win32Exception or IOException or UnauthorizedAccessException or InvalidOperationException) {
 			log("Tailnet helper could not run. Check the executable at MARTEN_HOME/bin/marten-tsnet and its permissions.");
-		}
+		} finally { readiness?.Invoke(false); }
 	}
 
-	static async Task DrainOutputAsync(Stream stream, string host, Action<string> log, CancellationToken stopping) {
+	static async Task DrainOutputAsync(Stream stream, string host, Action<string> log, CancellationToken stopping, Action<bool>? readiness) {
 		// Protocol is one fixed-size marker, never echo text from the child.
 		var ready = new byte[6];
 		if(await stream.ReadAtLeastAsync(ready, ready.Length, false, stopping) == ready.Length
-			&& ready.AsSpan().SequenceEqual("READY\n"u8)) log($"Native tailnet transport ready: https://{host}");
+			&& ready.AsSpan().SequenceEqual("READY\n"u8) && !stopping.IsCancellationRequested) {
+			readiness?.Invoke(true);
+			log($"Native tailnet transport ready: https://{host}");
+		}
 		await stream.CopyToAsync(Stream.Null, stopping);
 	}
 
