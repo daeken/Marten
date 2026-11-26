@@ -136,6 +136,10 @@ public sealed class MessagesBackend(MessagesProvider provider, Home home, Func<s
 			AnthropicBadRequestException when message.Contains("prompt is too long", StringComparison.OrdinalIgnoreCase)
 				|| message.Contains("context", StringComparison.OrdinalIgnoreCase) && message.Contains("exceed", StringComparison.OrdinalIgnoreCase)
 				=> new ContextFullException(),
+			// A moderation block is not a failure of the request: another provider may answer it.
+			AnthropicBadRequestException when message.Contains("content filtering", StringComparison.OrdinalIgnoreCase)
+				|| message.Contains("blocked by content", StringComparison.OrdinalIgnoreCase)
+				=> new ModelRefusedException($"{provider.Label} blocked the request.", Trim(message), "content_filter"),
 			AnthropicIOException or AnthropicSseException or HttpRequestException or IOException
 				=> new TransientModelException($"Could not reach {provider.Label}.", e),
 			AnthropicApiException when message.Contains("overloaded", StringComparison.OrdinalIgnoreCase)
@@ -298,6 +302,8 @@ public sealed class MessagesBackend(MessagesProvider provider, Home home, Func<s
 		readonly SortedDictionary<long, Block> blocks = new();
 		long inputTokens, cacheCreate, cacheRead, outputTokens;
 		string? stopReason;
+		/// <summary>The provider's own account of a safety stop: a category and an explanation.</summary>
+		string? refusalCategory, refusalExplanation;
 		bool stopped;
 
 		public string? Feed(RawMessageStreamEvent ev) {
@@ -325,7 +331,10 @@ public sealed class MessagesBackend(MessagesProvider provider, Home home, Func<s
 				else if(d.TryPickThinking(out var th)) b.Text.Append(th.Thinking);
 				else if(d.TryPickSignature(out var s)) b.Signature = (b.Signature ?? "") + s.Signature;
 			} else if(ev.TryPickDelta(out var md)) {
-				stopReason = md.Delta.StopReason?.ToString();
+				// ApiEnum.ToString() keeps the wire quotes; the enum name is the stable reading.
+				stopReason = md.Delta.StopReason?.Value().ToString();
+				refusalCategory = md.Delta.StopDetails?.Category?.ToString().Trim('"').ToLowerInvariant();
+				refusalExplanation = md.Delta.StopDetails?.Explanation;
 				outputTokens = md.Usage.OutputTokens;
 				if(md.Usage.InputTokens is { } i) inputTokens = i;
 				if(md.Usage.CacheCreationInputTokens is { } cc) cacheCreate = cc;
@@ -362,8 +371,13 @@ public sealed class MessagesBackend(MessagesProvider provider, Home home, Func<s
 						break;
 				}
 			}
-			if(stopReason == "refusal" && !items.Any(i => i.Kind == EntryKind.Assistant))
-				items.Add(new Entry { Kind = EntryKind.Assistant, Text = "(The model declined to continue.)", Provider = providerName, Model = model });
+			// Anthropic's own safety layer, or the model's: either way the request was blocked, not failed.
+			if(string.Equals(stopReason, nameof(StopReason.Refusal), StringComparison.OrdinalIgnoreCase)) {
+				var said = string.Join("\n\n", items.Where(i => i.Kind == EntryKind.Assistant && !string.IsNullOrWhiteSpace(i.Text)).Select(i => i.Text));
+				var why = string.Join(": ", new[] { refusalCategory, refusalExplanation }.Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s!));
+				if(why.Length == 0) why = said;
+				throw new ModelRefusedException($"{providerName} refused the request.", why.Length > 0 ? why : null, "refusal");
+			}
 			// input_tokens counts only uncached input; the context size is the sum.
 			var usage = JsonSerializer.SerializeToElement(new Dictionary<string, object?> {
 				["input_tokens"] = inputTokens + cacheCreate + cacheRead,

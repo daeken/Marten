@@ -123,6 +123,18 @@ public sealed partial class AgentManager {
 		Publish(new { type = "config" });
 	}
 
+	/// <summary>
+	/// The model an agent falls back to when a provider refuses its request on policy grounds, or null when
+	/// there is nowhere to go: no fallback is configured, it is the model that just refused, or its backend
+	/// isn't connected. A refusal is answered by another model, never by retrying the same one.
+	/// </summary>
+	public string? RefusalFallback(string refusedModel) {
+		var model = Config.RefusalFallbackModel;
+		if(string.IsNullOrWhiteSpace(model) || string.Equals(model, refusedModel, StringComparison.OrdinalIgnoreCase)) return null;
+		var connected = Backend is BackendRouter router ? router.Resolve(model).Backend.Connected : Backend.Connected;
+		return connected ? model : null;
+	}
+
 	/// <summary>The default model if known without a network call.</summary>
 	public string? KnownDefaultModel => Config.Model ?? resolvedDefaultModel;
 

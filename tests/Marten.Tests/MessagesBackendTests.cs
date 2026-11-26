@@ -184,6 +184,38 @@ public class MessagesBackendTests {
 	}
 
 	[Fact]
+	public async Task AContentFilteredOutputIsARefusalNotAFailure() {
+		using var dir = new TempDir();
+		using var server = new FakeMessagesServer("""{"type":"error","error":{"type":"invalid_request_error","message":"Output blocked by content filtering policy"}}""", 400, "application/json");
+		var backend = new MessagesBackend(MessagesProvider.Anthropic with { Name = "test", BaseUrl = server.Url, EnvVar = null }, new Home(dir.File("home")));
+		backend.SetKey("k");
+		var e = await Assert.ThrowsAsync<ModelRefusedException>(() =>
+			backend.CompleteAsync(new ModelRequest("claude-opus-5-5", null, "x", [E(EntryKind.Message, "hi")], [], "c"), _ => { }, default));
+		Assert.Equal("content_filter", e.Code);
+	}
+
+	[Theory]
+	// The provider's own category beats the model's sentence; without one, the sentence is the reason.
+	[InlineData("""{"type":"refusal","category":"cyber","explanation":"Requests that enable cyber harm."}""", "cyber: Requests that enable cyber harm.")]
+	[InlineData("null", "I can't help with that.")]
+	public async Task ARefusalStopReasonIsARefusalWithAReason(string details, string reason) {
+		using var dir = new TempDir();
+		using var server = new FakeMessagesServer(Sse(
+			("message_start", """{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}}"""),
+			("content_block_start", """{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"""),
+			("content_block_delta", """{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I can't help with that."}}"""),
+			("content_block_stop", """{"type":"content_block_stop","index":0}"""),
+			("message_delta", """{"type":"message_delta","delta":{"stop_reason":"refusal","stop_sequence":null,"stop_details":DETAILS},"usage":{"output_tokens":5}}""".Replace("DETAILS", details)),
+			("message_stop", """{"type":"message_stop"}""")));
+		var backend = new MessagesBackend(MessagesProvider.Anthropic with { Name = "test", BaseUrl = server.Url, EnvVar = null }, new Home(dir.File("home")));
+		backend.SetKey("k");
+		var e = await Assert.ThrowsAsync<ModelRefusedException>(() =>
+			backend.CompleteAsync(new ModelRequest("claude-opus-5-5", null, "x", [E(EntryKind.Message, "hi")], [], "c"), _ => { }, default));
+		Assert.Equal("refusal", e.Code);
+		Assert.Equal(reason, e.Reason);
+	}
+
+	[Fact]
 	public async Task TheProvidersOwnListWinsAndConfigExtrasComeFirst() {
 		using var dir = new TempDir();
 		using var server = new FakeMessagesServer(

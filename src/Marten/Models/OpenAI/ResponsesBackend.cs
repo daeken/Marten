@@ -15,6 +15,8 @@ public sealed class ResponsesBackend(ChatGptAuth auth, HttpClient http) : IModel
 	public const string ToolNamespace = "marten";
 	static readonly HashSet<string> ContextCodes = ["context_length_exceeded", "context_window_exceeded", "too_many_tokens"];
 	static readonly HashSet<string> QuotaCodes = ["subscription_sharing_usage_limit_exceeded", "subscription_sharing_usage_unavailable", "rate_limit_exceeded", "usage_limit_reached"];
+	// OpenAI blocks the request itself (a moderation hit) rather than failing: retrying can't help.
+	static readonly HashSet<string> RefusalCodes = ["content_policy_violation", "content_filter", "policy_violation", "invalid_prompt"];
 	const string ModelNotFoundCode = "model_not_found";
 	static InvalidOperationException ModelNotFound() => new("The selected model is unavailable or not accessible (model_not_found). Check the agent's model settings.");
 
@@ -53,6 +55,7 @@ public sealed class ResponsesBackend(ChatGptAuth auth, HttpClient http) : IModel
 		if(status == 413 || (code != null && ContextCodes.Contains(code))) return new ContextFullException();
 		if(status == 429 || (code != null && QuotaCodes.Contains(code)))
 			return new RateLimitedException($"ChatGPT usage limit reached ({code ?? "429"}).", response.Headers.RetryAfter?.Delta);
+		if(code != null && RefusalCodes.Contains(code)) return new ModelRefusedException($"OpenAI blocked the request ({code}).", null, code);
 		if(status is 401 or 403) return new NotConnectedException("ChatGPT rejected Marten's access. Sign in again.");
 		if(status >= 500) return new TransientModelException($"OpenAI returned {status}.");
 		// Keep only safe atoms from error bodies: never echo prompts or HTML back into a transcript.
@@ -173,6 +176,8 @@ public sealed class ResponsesBackend(ChatGptAuth auth, HttpClient http) : IModel
 	public sealed class ResponseStream(string provider = ProviderName) {
 		readonly List<JsonObject> output = new();
 		readonly StringBuilder text = new();
+		// A refusal arrives either as its own delta events or as a content part of type "refusal".
+		readonly StringBuilder refusal = new();
 		bool completed;
 		JsonNode? usage;
 		internal ResponseCompletedMetadata? Metadata { get; private set; }
@@ -197,6 +202,10 @@ public sealed class ResponsesBackend(ChatGptAuth auth, HttpClient http) : IModel
 					var delta = ev["delta"]?.GetValue<string>();
 					text.Append(delta);
 					return delta;
+				case "response.refusal.delta":
+					// Not streamed to the UI: a fallback model answers instead.
+					refusal.Append(ev["delta"]?.GetValue<string>());
+					break;
 				case "response.output_item.added":
 				case "response.output_item.done":
 					Put(ev["item"]);
@@ -224,6 +233,7 @@ public sealed class ResponsesBackend(ChatGptAuth auth, HttpClient http) : IModel
 					if(code == ModelNotFoundCode) throw ModelNotFound();
 					if(code != null && ContextCodes.Contains(code)) throw new ContextFullException();
 					if(code != null && QuotaCodes.Contains(code)) throw new RateLimitedException($"ChatGPT usage limit reached ({code}).");
+					if(code != null && RefusalCodes.Contains(code)) throw new ModelRefusedException($"OpenAI blocked the request ({code}).", null, code);
 					throw new TransientModelException($"The model response {(ev["type"]!.GetValue<string>() == "response.incomplete" ? "was incomplete" : "failed")}{(code != null ? $" ({code})" : "")}.");
 			}
 			return null;
@@ -231,6 +241,15 @@ public sealed class ResponsesBackend(ChatGptAuth auth, HttpClient http) : IModel
 
 		public ModelResult Finish(string model) {
 			if(!completed) throw new TransientModelException("The model stream ended before completion.");
+			// Refusals can arrive only as content parts, with no refusal delta events at all; the completed
+			// item holds the whole sentence, so it wins over the deltas when both are present.
+			var wholeRefusal = new StringBuilder();
+			foreach(var item in output.Where(i => i["type"]?.GetValue<string>() == "message"))
+				if(item["content"] is JsonArray parts)
+					foreach(var part in parts.Where(p => p?["type"]?.GetValue<string>() == "refusal"))
+						wholeRefusal.Append(part?["refusal"]?.GetValue<string>());
+			var refused = wholeRefusal.Length > 0 ? wholeRefusal.ToString() : refusal.ToString();
+			if(refused.Length > 0) throw new ModelRefusedException("The model refused the request.", refused, "refusal");
 			var items = new List<Entry>();
 			foreach(var item in output) {
 				var raw = JsonSerializer.Deserialize<JsonElement>(item.ToJsonString());

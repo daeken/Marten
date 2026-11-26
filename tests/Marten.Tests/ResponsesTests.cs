@@ -43,6 +43,39 @@ public class ResponsesTests {
 		Assert.Throws<Marten.Models.TransientModelException>(() => s.Finish("m"));
 	}
 
+	[Theory]
+	[InlineData("content_filter")]
+	[InlineData("content_policy_violation")]
+	public void PolicyBlocksAreRefusalsNotFailures(string code) {
+		var s = new ResponsesBackend.ResponseStream();
+		var e = Assert.Throws<Marten.Models.ModelRefusedException>(() => s.Feed(new JsonObject {
+			["type"] = "response.failed", ["response"] = new JsonObject { ["error"] = new JsonObject { ["code"] = code } },
+		}));
+		Assert.Equal(code, e.Code);
+	}
+
+	[Fact]
+	public void AContentFilteredCompletionIsARefusal() {
+		var s = new ResponsesBackend.ResponseStream();
+		Assert.Throws<Marten.Models.ModelRefusedException>(() => s.Feed(Ev(
+			"""{"type":"response.incomplete","response":{"incomplete_details":{"reason":"content_filter"}}}""")));
+	}
+
+	[Theory]
+	[InlineData(true)]
+	// delta: refusal as delta events, or only as the completed item's content part.
+	[InlineData(false)]
+	public void ARefusalBecomesARefusalWithItsOwnWords(bool delta) {
+		var s = new ResponsesBackend.ResponseStream();
+		if(delta) s.Feed(Ev("""{"type":"response.refusal.delta","delta":"I can't help with that."}"""));
+		s.Feed(Ev(delta
+			? """{"type":"response.completed","response":{"output":[]}}"""
+			: """{"type":"response.completed","response":{"output":[{"id":"m1","type":"message","role":"assistant","content":[{"type":"refusal","refusal":"I can't help with that."}]}]}}"""));
+		var e = Assert.Throws<Marten.Models.ModelRefusedException>(() => s.Finish("m"));
+		Assert.Equal("refusal", e.Code);
+		Assert.Equal("I can't help with that.", e.Reason);
+	}
+
 	[Fact]
 	public void QuotaFailuresWaitRatherThanFail() {
 		var s = new ResponsesBackend.ResponseStream();
