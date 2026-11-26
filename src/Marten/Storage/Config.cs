@@ -46,7 +46,7 @@ public sealed record Config {
 	public int DirectToolLimit { get; init; } = 12;
 	/// <summary>How long a task's completion check may run before it counts as failed.</summary>
 	public int CheckTimeoutSeconds { get; init; } = 900;
-	/// <summary>Loop breaker: two agents exchanging this many messages within LoopWindowMinutes, without Sera, are both paused. 0 turns it off.</summary>
+	/// <summary>Loop breaker: at this threshold within LoopWindowMinutes, hold the send for an internal loop check (outside clients still trigger a pause). 0 turns it off.</summary>
 	public int LoopMessages { get; init; } = 20;
 	public double LoopWindowMinutes { get; init; } = 10;
 	/// <summary>Snapshots of ~/.marten: where, how often, how many to keep.</summary>
