@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Net;
+using System.Net.Security;
 using System.Text.Json.Nodes;
 using Marten.Agents;
 using Marten.Models;
@@ -9,14 +11,14 @@ using Marten.Tools;
 namespace Marten.Tests;
 
 public class ModelCallTests {
-	sealed class Backend(Func<ModelRequest, CancellationToken, Task<ModelResult>> complete) : IModelBackend {
-		public string Provider => "fake";
+	sealed class Backend(Func<ModelRequest, CancellationToken, Task<ModelResult>> complete, string provider = "fake") : IModelBackend {
+		public string Provider => provider;
 		public bool Connected => true;
 		public Task<IReadOnlyList<string>> ListModelsAsync(CancellationToken ct) => throw new Exception("Explicit settings shouldn't need the catalog.");
 		public Task<ModelResult> CompleteAsync(ModelRequest request, Action<string> onTextDelta, CancellationToken ct) => complete(request, ct);
 	}
 
-	static AgentManager Manager(TempDir dir, Backend backend, Func<TimeSpan, CancellationToken, Task>? delay = null) =>
+	static AgentManager Manager(TempDir dir, IModelBackend backend, Func<TimeSpan, CancellationToken, Task>? delay = null) =>
 		new(new Home(dir.File("home")), new Config { Model = "good" }, backend, new ToolRegistry()) {
 			ModelRetryDelay = delay ?? Task.Delay,
 		};
@@ -82,6 +84,71 @@ public class ModelCallTests {
 		foreach(var pair in calls.Chunk(2)) AssertAttempt(pair, ModelCallOutcome.Failed);
 	}
 
+	[Theory]
+	[InlineData(null)]
+	[InlineData("AwaitingHeaders")]
+	[InlineData("ReadingBody")]
+	public async Task DisposalRemainsTerminalAndDurableWithoutRetainingRequestData(string? phaseName) {
+		ModelTransportPhase? phase = phaseName == null ? null : Enum.Parse<ModelTransportPhase>(phaseName);
+		using var dir = new TempDir();
+		const string marker = "diagnostic-redaction-test-only";
+		using var tls = new SslStream(new MemoryStream());
+		using var http = ModelHttp.CreateClient(new FailureHandler(phase, tls, marker), TimeSpan.FromSeconds(5), () => TimeSpan.FromSeconds(5));
+		var attempts = 0;
+		var backend = new Backend(async (_, ct) => {
+			Interlocked.Increment(ref attempts);
+			if(phase == null) throw new ObjectDisposedException(marker);
+			using var request = new HttpRequestMessage(HttpMethod.Get, $"https://example.invalid/{marker}");
+			request.Headers.Add("X-Test", marker);
+			using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+			using var body = await response.Content.ReadAsStreamAsync(ct);
+			tls.Dispose();
+			try {
+				await body.ReadExactlyAsync(new byte[1], ct);
+			} catch(ObjectDisposedException e) {
+				// The transport annotation should still be visible through a backend wrapper.
+				throw new InvalidOperationException(marker, e);
+			}
+			throw new InvalidOperationException("Expected disposal.");
+		}, "openai");
+		var manager = Manager(dir, new BackendRouter(new Backend((_, _) => throw new Exception("wrong route")), [(backend, [])]));
+		var agent = manager.CreateChat("redaction", dir.Path);
+		agent.UpdateSettings($"openai/{marker}", null);
+		agent.Send(new Inbound("Sera", marker, SendMode.Queued));
+		await Wait.Until(() => agent.Status == AgentStatus.Error);
+		Assert.Equal(1, attempts);
+		var path = Path.Combine(agent.Directory, Agent.ModelFailureFile);
+		var json = File.ReadAllText(path);
+		Assert.DoesNotContain(marker, json);
+		var record = JsonIO.Deserialize<ModelAttemptFailure>(json)!;
+		Assert.Equal(agent.ModelCall!.Id, record.AttemptId);
+		Assert.Equal(agent.ModelCall.StartedAt, record.StartedAt);
+		Assert.Equal(agent.ModelCall.EndedAt, record.EndedAt);
+		Assert.Equal("openai", record.Backend);
+		Assert.Equal(phase, record.TransportPhase);
+		Assert.False(record.AttemptCancelled || record.TurnCancelled || record.ShuttingDown);
+		Assert.Contains(record.Causes, c => c.Kind == nameof(ObjectDisposedException));
+		Assert.Equal(phase == ModelTransportPhase.ReadingBody, record.Causes.Any(c => c.SslStreamDisposed && c.SslStreamFrame));
+		Assert.Single(agent.Transcript.Entries, e => e.Kind == EntryKind.Error);
+	}
+
+	sealed class FailureHandler(ModelTransportPhase? phase, SslStream tls, string marker) : HttpMessageHandler {
+		protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
+			phase == ModelTransportPhase.AwaitingHeaders ? throw new ObjectDisposedException(marker)
+				: Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(tls) });
+	}
+
+	[Fact]
+	public async Task DiagnosticWriteFailureDoesNotReplaceTheOriginalFailure() {
+		using var dir = new TempDir();
+		var manager = Manager(dir, new Backend((_, _) => throw new ObjectDisposedException("original")));
+		var agent = manager.CreateChat("broken sidecar", dir.Path);
+		Directory.CreateDirectory(Path.Combine(agent.Directory, Agent.ModelFailureFile));
+		Wake(agent);
+		await Wait.Until(() => agent.Status == AgentStatus.Error);
+		Assert.Equal(new ObjectDisposedException("original").Message, agent.StatusDetail);
+	}
+
 	static Task<ModelResult> MissingModel() {
 		var stream = new ResponsesBackend.ResponseStream();
 		stream.Feed((JsonObject) JsonNode.Parse("""{"type":"response.failed","response":{"error":{"code":"model_not_found"}}}""")!);
@@ -117,6 +184,7 @@ public class ModelCallTests {
 		Assert.DoesNotContain(worker.Transcript.Entries, e => e.Kind == EntryKind.Error);
 		Assert.Empty(manager.AgentMessages(worker.Info.Id));
 		AssertAttempt(calls.ToArray(), inBackoff ? ModelCallOutcome.Failed : ModelCallOutcome.Cancelled);
+		Assert.Equal(inBackoff, File.Exists(Path.Combine(worker.Directory, Agent.ModelFailureFile)));
 	}
 
 	[Fact]
@@ -148,6 +216,11 @@ public class ModelCallTests {
 			p => AssertAttempt(p, ModelCallOutcome.Succeeded, ModelCallKind.Compaction),
 			p => AssertAttempt(p, ModelCallOutcome.Succeeded, ModelCallKind.Reply));
 		Assert.Equal(attempts[^1][1].Call, agent.ModelCall);
+		var failure = JsonIO.Load<ModelAttemptFailure?>(Path.Combine(agent.Directory, Agent.ModelFailureFile), () => null);
+		Assert.NotNull(failure);
+		Assert.Equal(attempts[1][1].Call.Id, failure.AttemptId);
+		Assert.Equal(ModelCallKind.Compaction, failure.Kind);
+		Assert.Equal(nameof(RateLimitedException), Assert.Single(failure.Causes).Kind);
 		Assert.Empty(manager.AgentMessages(agent.Info.Id));
 	}
 
