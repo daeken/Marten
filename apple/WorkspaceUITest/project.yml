@@ -12,7 +12,7 @@ targets:
     sources: [App]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.marten.sidebar.fixture
+        PRODUCT_BUNDLE_IDENTIFIER: dev.marten.workspace.fixture
         GENERATE_INFOPLIST_FILE: YES
   SidebarFixtureUITests:
     type: bundle.ui-testing
@@ -22,7 +22,7 @@ targets:
       - target: SidebarFixture
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.marten.sidebar.fixture.tests
+        PRODUCT_BUNDLE_IDENTIFIER: dev.marten.workspace.fixture.tests
         GENERATE_INFOPLIST_FILE: YES
 schemes:
   SidebarFixture:

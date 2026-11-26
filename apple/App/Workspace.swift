@@ -9,8 +9,22 @@ struct WorkspaceView: View {
     @State private var controls = WorkspaceControls()
     @State private var showClosedChats = false
     @State private var confirmLifecycle = false
-    @State private var expandedProjects: Set<String> = []
-    @State private var seenProjects: Set<String> = []
+    @AppStorage("workspace.collapsedProjects.v1") private var projectPreferences = Data()
+
+    private var collapsedByOrigin: [String: Set<String>] {
+        (try? JSONDecoder().decode([String: Set<String>].self, from: projectPreferences)) ?? [:]
+    }
+
+    private func projectExpansion(_ id: String) -> Binding<Bool> {
+        Binding(get: { collapsedByOrigin[api.endpoint.origin]?.contains(id) != true }, set: { expanded in
+            var preferences = collapsedByOrigin
+            let origin = api.endpoint.origin
+            if expanded { preferences[origin]?.remove(id) }
+            else { preferences[origin, default: []].insert(id) }
+            if preferences[origin]?.isEmpty == true { preferences.removeValue(forKey: origin) }
+            if let encoded = try? JSONEncoder().encode(preferences) { projectPreferences = encoded }
+        })
+    }
     @State private var eventHint = UUID()
     @State private var activity: [String: LiveActivity] = [:]
     @State private var socketID = UUID()
@@ -125,9 +139,7 @@ struct WorkspaceView: View {
         Section("Projects") {
             sidebarLink(.createProject) { Label("New Project", systemImage: "folder.badge.plus") }
             ForEach(directory.projects) { project in
-                DisclosureGroup(isExpanded: Binding(get: { expandedProjects.contains(project.id) }, set: { open in
-                    if open { expandedProjects.insert(project.id) } else { expandedProjects.remove(project.id) }
-                })) {
+                DisclosureGroup(isExpanded: projectExpansion(project.id)) {
                     sidebarLink(.memory(project.id)) { Label("Memory", systemImage: "doc.text") }
                     ForEach(directory.members[project.id] ?? []) { agentRow($0) }
                 } label: {
@@ -138,7 +150,7 @@ struct WorkspaceView: View {
         Section("Standalone") {
             sidebarLink(.createChat) { Label("New Chat", systemImage: "plus.bubble") }
             if directory.hasClosedChats {
-                Toggle("Show Closed Chats", isOn: $showClosedChats)
+                Toggle("Show Closed Conversations", isOn: $showClosedChats)
             }
             if status == nil && statusError == nil { ProgressView("Loading conversations…") }
             if status != nil && directory.standalone.isEmpty { Text("No standalone conversations.").foregroundStyle(.secondary) }
@@ -308,12 +320,6 @@ struct WorkspaceView: View {
         .onDisappear { cancelLifecycle() }
         .onChange(of: status?.projects.map(\.id)) { _, ids in
             if let ids, let project = messages.projectID, !ids.contains(project) { messages.select(nil) }
-            if let ids {
-                let current = Set(ids)
-                expandedProjects.formIntersection(current)
-                expandedProjects.formUnion(current.subtracting(seenProjects))
-                seenProjects = current
-            }
         }
     }
 
@@ -432,9 +438,9 @@ struct WorkspaceDirectory {
     init(projects: [Project], agents: [Agent], showClosed: Bool, selected: WorkspaceDestination?) {
         self.projects = projects.sorted { Self.inOrder($0.name, $0.id, $1.name, $1.id) }
         let projectIDs = Set(projects.map(\.id))
-        hasClosedChats = agents.contains { $0.kind == "chat" && $0.closed == true }
+        hasClosedChats = agents.contains { $0.closed == true }
         let visible = agents.filter {
-            showClosed || $0.kind != "chat" || $0.closed != true || selected == .agent($0.id)
+            showClosed || $0.closed != true || selected == .agent($0.id)
         }.sorted { Self.inOrder($0.name, $0.id, $1.name, $1.id) }
         var members: [String: [Agent]] = [:]
         var standalone: [Agent] = []
