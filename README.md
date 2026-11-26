@@ -71,6 +71,8 @@ Use Ctrl-C or send SIGTERM and wait for Marten to exit before starting it again.
 
 On startup, Marten tells existing agents that it restarted and records interruptions it can infer from disk. It does not automatically repeat interrupted calls. A forced kill or power loss skips cleanup; results or queued messages can be lost even when a command changed files or external state. Check the transcript, logs, and actual state before retrying.
 
+For a planned single-host macOS release on port 7450, use the [detached cutover runbook](docs/release-cutover.md).
+
 ## Linked project memory
 
 Keep standing rules and short pointers in `MEMORY.md` (16 KiB by default). Link longer notes as `[Topic](memory/topic.md)`. Agents see the index and topic filenames, not topic contents; they use `read_file` when they need the details. Both the index and topics use `edit_file` with the same audit history and protections for cited entries. Read an empty index before initializing it with one `replace` using `"anchor": ""`; use `create` for a missing topic file. See [Project memory](SPEC.md#project-memory).
