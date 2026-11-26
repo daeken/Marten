@@ -53,6 +53,71 @@ public sealed class ServerShutdownTests(ITestOutputHelper output) {
 	}
 
 	[Fact]
+	public async Task ExternalSigtermReportsTimedOutHttpDrainAsNonzero() {
+		if(!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) return;
+		using var dir = new TempDir();
+		var home = new Home(dir.File("home"));
+		var port = FreePort();
+		new Config { Port = port, Backup = new() { IntervalMinutes = 0 } }.Save(home);
+		await using var server = new Server(home, port, output);
+		await server.Ready();
+		using var client = new TcpClient();
+		using var connect = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+		await client.ConnectAsync(IPAddress.Loopback, port, connect.Token);
+		var stream = client.GetStream();
+		var request = $"POST /api/agents HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {server.Token}\r\n" +
+			"Content-Type: application/json\r\nContent-Length: 1024\r\nExpect: 100-continue\r\n\r\n";
+		await stream.WriteAsync(Encoding.ASCII.GetBytes(request), connect.Token);
+		using var reader = new StreamReader(stream, Encoding.ASCII, leaveOpen: true);
+		// The response proves the authenticated handler started reading the body. Do not finish it.
+		Assert.Equal("HTTP/1.1 100 Continue", await reader.ReadLineAsync(connect.Token));
+		var elapsed = Stopwatch.StartNew();
+		Posix.Terminate(server.Pid, group: false);
+		await server.Exited.WaitAsync(TimeSpan.FromSeconds(8));
+		output.WriteLine($"SIGTERM exit after {elapsed.ElapsedMilliseconds}ms (incomplete HTTP body)");
+		Assert.Equal(1, server.ExitCode);
+		var phases = await server.ShutdownTimings();
+		Assert.Contains("host-stop timed out", phases);
+		Assert.Contains("exit incomplete", phases);
+	}
+
+	[Fact]
+	public async Task ExternalSigtermHonorsConfiguredToolGraceAboveTenSeconds() {
+		if(!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) return;
+		using var dir = new TempDir();
+		var home = new Home(dir.File("home"));
+		var port = FreePort();
+		var config = new Config { Port = port, StopGraceSeconds = 20, Backup = new() { IntervalMinutes = 0 } };
+		config.Save(home);
+		var manager = new AgentManager(home, config, new FakeBackend(), new ToolRegistry());
+		var agent = manager.CreateChat("grace fixture", dir.Path);
+		agent.AddSchedule("""
+			[IO.File]::WriteAllText((Join-Path $PWD 'started'), '1')
+			while(-not (Test-Path release)) { Start-Sleep -Milliseconds 50 }
+			[IO.File]::WriteAllText((Join-Path $PWD 'finished'), '1')
+			""", null, DateTimeOffset.UtcNow, null, 120);
+		await using var server = new Server(home, port, output);
+		await server.Ready();
+		await Wait.Until(() => File.Exists(dir.File("started")));
+		var elapsed = Stopwatch.StartNew();
+		Posix.Terminate(server.Pid, group: false);
+		await Task.Delay(TimeSpan.FromSeconds(11));
+		Assert.False(server.Exited.IsCompleted);
+		File.WriteAllText(dir.File("release"), "1");
+		await server.Exited.WaitAsync(TimeSpan.FromSeconds(6));
+		output.WriteLine($"SIGTERM exit after {elapsed.ElapsedMilliseconds}ms (configured 20s tool grace)");
+		Assert.Equal(0, server.ExitCode);
+		Assert.True(File.Exists(dir.File("finished")));
+		var persisted = Assert.Single(JsonIO.Load<List<Schedule>>(Path.Combine(agent.Directory, "schedules.json"), () => []));
+		Assert.True(persisted.Done);
+		Assert.False(persisted.InProgress);
+		Assert.Equal("no output", persisted.LastResult);
+		var phases = await server.ShutdownTimings();
+		Assert.Contains("tool-grace settled", phases);
+		Assert.DoesNotContain("tool-grace expired", phases);
+	}
+
+	[Fact]
 	public async Task ExternalSigtermExitsWithAbandonedPowerShell() {
 		if(!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) return;
 		using var dir = new TempDir();

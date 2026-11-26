@@ -42,32 +42,56 @@ internal sealed class RestartDrain {
 		var stopModels = stopping.CancelAsync();
 		return Task.Run(async () => {
 			phase?.Invoke("tool-grace begin");
-			var graceElapsed = await Task.WhenAny(settled, Task.Delay(grace)) != settled;
-			phase?.Invoke(graceElapsed ? "tool-grace expired" : "tool-grace settled");
+			try {
+				await WaitWithin(settled, grace);
+				phase?.Invoke("tool-grace settled");
+			} catch(TimeoutException) {
+				phase?.Invoke("tool-grace expired");
+			}
 			var stopTools = cancelTools.CancelAsync();
 			var stopped = Task.WhenAll(settled, stopModels, stopTools);
-			var sweep = Task.Run(() => {
-				phase?.Invoke("foreground sweep begin");
-				cleanForeground();
-				phase?.Invoke("foreground sweep end");
-			});
+			var sweep = Sweep("foreground sweep");
 			try {
-				await Task.WhenAll(stopped, sweep).WaitAsync(cleanup);
+				await WaitWithin(Task.WhenAll(stopped, sweep), cleanup);
 				phase?.Invoke("operations settled");
 			} catch(TimeoutException) {
-				phase?.Invoke("operations timed out");
+				if(!stopped.IsCompleted) phase?.Invoke("operations timed out");
+				if(!sweep.IsCompleted) phase?.Invoke("foreground sweep timed out");
 				throw;
 			} finally {
-				// A pipeline can fork while handling cancellation. Don't run the final sweep
-				// concurrently with the first, even if the first is stuck in OS cleanup.
-				var finalSweep = Task.Run(async () => {
-					try { await sweep; } catch { /* retry even if the first sweep failed */ }
-					phase?.Invoke("foreground final sweep begin");
-					cleanForeground();
-					phase?.Invoke("foreground final sweep end");
-				});
-				await finalSweep.WaitAsync(TimeSpan.FromSeconds(1));
+				// A pipeline can fork while handling cancellation. Don't queue a second
+				// sweep behind one that is still running after its deadline.
+				if(sweep.IsCompleted) {
+					try { await Sweep("foreground final sweep").WaitAsync(TimeSpan.FromSeconds(1)); }
+					catch(TimeoutException) {
+						phase?.Invoke("foreground final sweep timed out");
+						throw;
+					}
+				} else {
+					phase?.Invoke("foreground final sweep skipped");
+				}
 			}
 		});
+
+		Task Sweep(string name) => Task.Run(() => {
+			phase?.Invoke($"{name} begin");
+			try { cleanForeground(); }
+			catch {
+				phase?.Invoke($"{name} failed");
+				throw;
+			}
+			phase?.Invoke($"{name} end");
+		});
+	}
+
+	// CLR timer limits apply to one wait, not to the configured grace. Do not silently
+	// clamp large values (or throw before cancellation/cleanup ever starts).
+	static async Task WaitWithin(Task task, TimeSpan timeout) {
+		var maxTimer = TimeSpan.FromMilliseconds(uint.MaxValue - 1);
+		while(timeout > maxTimer) {
+			try { await task.WaitAsync(maxTimer); return; }
+			catch(TimeoutException) when(!task.IsCompleted) { timeout -= maxTimer; }
+		}
+		await task.WaitAsync(timeout);
 	}
 }

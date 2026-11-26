@@ -12,7 +12,7 @@ internal static class ServerShutdown {
 		var start = Stopwatch.GetTimestamp();
 		void Report(string phase) => Console.Error.WriteLine($"Marten shutdown +{Stopwatch.GetElapsedTime(start).TotalMilliseconds:0}ms {phase}");
 
-		async Task<bool> Phase(string name, Func<Task> work, TimeSpan timeout) {
+		async Task<(bool Ok, bool Finished)> Phase(string name, Func<Task> work, TimeSpan timeout) {
 			// Bound the caller's wait even when work blocks before returning its task.
 			var task = Task.Run(async () => {
 				Report($"{name} begin");
@@ -21,13 +21,13 @@ internal static class ServerShutdown {
 			try { await task.WaitAsync(timeout); }
 			catch(TimeoutException) {
 				Report($"{name} timed out");
-				return false;
+				return (false, task.IsCompleted);
 			} catch(Exception) {
 				Report($"{name} failed");
-				return false;
+				return (false, task.IsCompleted);
 			}
 			Report($"{name} end");
-			return true;
+			return (true, true);
 		}
 
 		using var registration = app.Lifetime.ApplicationStopping.Register(() => {
@@ -68,18 +68,25 @@ internal static class ServerShutdown {
 				Report("restart-drain failed");
 				drained = false;
 			}
-			return await Phase("mcp-stop", stopMcp, TimeSpan.FromSeconds(5)) && drained;
+			return (await Phase("mcp-stop", stopMcp, TimeSpan.FromSeconds(5))).Ok && drained;
 		}
 
-		Task<bool> Dispose() => Phase("host-dispose", () => app.DisposeAsync().AsTask(), TimeSpan.FromSeconds(3));
+		Task<(bool Ok, bool Finished)> Dispose() => Phase("host-dispose", () => app.DisposeAsync().AsTask(), TimeSpan.FromSeconds(3));
 
 		async Task<bool> StopHost() {
 			// Budget slightly more than HostOptions so Kestrel can finish aborting timed-out requests.
-			if(!await Phase("host-stop", () => app.StopAsync(), HostTimeout + TimeSpan.FromSeconds(1))) {
+			var stop = await Phase("host-stop", async () => {
+				using var deadline = new CancellationTokenSource(HostTimeout);
+				try { await app.StopAsync(deadline.Token); }
+				catch(OperationCanceledException) when(deadline.IsCancellationRequested) { throw new TimeoutException(); }
+				// Kestrel can abort connections and return normally when its drain deadline expires.
+				if(deadline.IsCancellationRequested) throw new TimeoutException();
+			}, HostTimeout + TimeSpan.FromSeconds(1));
+			if(!stop.Finished) {
 				Report("host-dispose skipped after incomplete stop"); // Don't race an in-progress stop.
 				return false;
 			}
-			return await Dispose();
+			return (await Dispose()).Ok && stop.Ok;
 		}
 	}
 }
