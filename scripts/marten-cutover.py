@@ -132,15 +132,18 @@ def probe(*argv):
     return p.stdout.rstrip('\n')
 
 
+def launch_forms(root):
+    return {(str(root / DLL.removesuffix('.dll')), str(root / 'src/Marten')),
+            (f'dotnet {DLL}', str(root))}
+
+
 def inspect(host, root, port):
     listeners = host.listeners(port)
     if len(listeners) != 1:
         raise CutoverError(f'Expected one listener on {port}; found {sorted(listeners)}')
     old = host.describe(next(iter(listeners)))
-    launch_forms = {(str(root / DLL.removesuffix('.dll')), str(root / 'src/Marten')),
-                    (f'dotnet {DLL}', str(root))}
     if (not old or old.birth.uid != os.getuid() or old.birth.ruid != os.getuid()
-            or (old.command, old.cwd) not in launch_forms or host.listeners(port) != {old.pid}):
+            or (old.command, old.cwd) not in launch_forms(root) or host.listeners(port) != {old.pid}):
         raise CutoverError('Listener is not one unambiguous Marten generation from this checkout')
     return old
 

@@ -291,10 +291,13 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(self.events, ['check_port', 'check_port', 'launch', 'healthy'])
         self.assertEqual(self.result()['state'], 'ok')
 
-
-    def test_resume_rejects_modified_server_or_ui_before_launch(self):
-        for relative in (cutover.DLL, f'{cutover.BUILD_DIR}/dependency.dll', f'{cutover.WEB_DIST}/assets/app.js'):
-            with self.subTest(relative=relative):
+    def test_resume_rejects_modified_or_missing_server_and_ui(self):
+        changes = ((cutover.DLL, False), (f'{cutover.BUILD_DIR}/dependency.dll', False),
+                   (f'{cutover.WEB_DIST}/assets/app.js', False),
+                   (f'{cutover.BUILD_DIR}/Marten.runtimeconfig.json', True),
+                   (f'{cutover.WEB_DIST}/index.html', True))
+        for relative, missing in changes:
+            with self.subTest(relative=relative, missing=missing):
                 self.args.mode = 'release'
                 self.h.generation = self.old
                 self.timeout = True
@@ -306,8 +309,11 @@ class ReleaseTests(unittest.TestCase):
                 self.events.clear()
                 artifact = self.root / relative
                 original = artifact.read_bytes()
-                artifact.write_bytes(original.replace(original[:1], b'_', 1))
-                with self.assertRaisesRegex(cutover.CutoverError, 'artifacts changed'):
+                if missing:
+                    artifact.unlink()
+                else:
+                    artifact.write_bytes(b'_' + original[1:])
+                with self.assertRaisesRegex(cutover.CutoverError, 'artifacts (changed|missing)'):
                     self.deploy()
                 self.assertEqual(self.events, ['check_port'])
                 self.assertEqual(self.result()['state'], 'failed')
@@ -395,7 +401,7 @@ class DarwinTests(unittest.TestCase):
             fixture = root / cutover.DLL
             fixture.parent.mkdir(parents=True)
             fixture.write_text(dedent('''\
-                import json, os, time
+                import os, signal, time
                 from pathlib import Path
                 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -411,6 +417,10 @@ class DarwinTests(unittest.TestCase):
                 with HTTPServer(('127.0.0.1', port), Handler) as server:
                     server.timeout = 0.1
                     if port == 0:
+                        def delay_term(sig, frame):
+                            time.sleep(1.35)
+                            raise SystemExit(0)
+                        signal.signal(signal.SIGTERM, delay_term)
                         print(server.server_port, flush=True)
                     print('scratch server ready', flush=True)
                     deadline = time.monotonic() + 12
@@ -422,30 +432,52 @@ class DarwinTests(unittest.TestCase):
             shim.chmod(0o700)
             env = dict(os.environ, PATH=f'{root}:/usr/bin:/bin', SCRATCH_PYTHON=sys.executable)
             env.pop('SCRATCH_PORT', None)
-            log = root / 'server.log'
+            home = root / 'scratch-home'
+            mounted = root / 'scratch-mounted'
+            job = root / 'job'
+            job.mkdir(mode=0o700)
+            home.mkdir()
+            (home / '.marten').symlink_to(mounted)
+            (mounted / 'secrets').mkdir(parents=True)
+            (mounted / 'secrets/ui-token').write_text('scratch-token')
+            env.update(HOME=str(home), MARTEN_HOME=str(mounted), MARTEN_WEB_ROOT='')
+            for name in ('Marten.runtimeconfig.json', 'Marten.deps.json'):
+                (fixture.parent / name).write_text('{}')
+            (root / cutover.WEB_DIST).mkdir(parents=True)
+            (root / cutover.WEB_DIST / 'index.html').write_text('<html>scratch</html>')
+            log = home / '.marten-server.log'
             log.touch(mode=0o640)
             initial_log_mode = log.stat().st_mode
             helper = Path(cutover.launch.__code__.co_filename).resolve()
             runner = dedent('''\
                 import os, runpy, sys
+                from dataclasses import asdict
                 from pathlib import Path
+                from types import SimpleNamespace
+
                 helper, old_pid, port = sys.argv[1:]
                 m = runpy.run_path(helper)
                 host = m['Darwin']()
                 root = Path.cwd()
                 port = int(port)
-                import signal
                 pid = int(old_pid)
                 assert host.listeners(port) == {pid}
                 old = host.describe(pid)
                 assert old and old.cwd == str(root) and old.birth.uid == os.getuid(), old
                 assert old.command.endswith(' ' + m['DLL']), old.command
-                assert host.signal(old, signal.SIGTERM)
-                assert m['wait_exit'](host, old, 3)
-                m['check_port'](host, port)
-                child = m['launch'](root, root / 'server.log', dict(os.environ, SCRATCH_PORT=str(port)))
-                m['healthy'](host, child, port, 'scratch-token')
-                print(child.pid)
+                job = root / 'job'
+                m['atomic_json'](job / 'generation.json', asdict(old))
+                # Only substitute the scratch fixture's build and command
+                # form, and keep all native identity/port/handoff checks.
+                m['deploy'].__globals__.update(
+                    PORT=port, LOCK_DIR=root, launch_forms=lambda _: {(old.command, str(root))},
+                    prebuild=lambda *_: None, check_tree=lambda *_: None,
+                )
+                os.environ['SCRATCH_PORT'] = str(port)
+                args = SimpleNamespace(mode='release', job=job, expected_home=root / 'scratch-mounted',
+                                       sha='a' * 40, notice_deadline=0, grace=1, late_wait=3,
+                                       kill_after_grace=False)
+                m['deploy'](args, host, root)
                 ''')
             with subprocess.Popen([str(shim), cutover.DLL], cwd=root, env=env, text=True,
                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as old:
@@ -455,8 +487,14 @@ class DarwinTests(unittest.TestCase):
                     finished = subprocess.run([sys.executable, '-B', '-c', runner, str(helper), str(old.pid), str(port)],
                                               cwd=root, env=env, text=True, capture_output=True, timeout=10)
                     self.assertEqual(finished.returncode, 0, finished.stderr)
-                    self.assertEqual(old.wait(2), -signal.SIGTERM)
-                    new_pid = int(finished.stdout)
+                    self.assertEqual(old.wait(2), 0)
+                    self.assertIn('exceeded TERM grace', finished.stdout)
+                    result_text = (job / 'result.json').read_text()
+                    self.assertNotIn('scratch-token', result_text)
+                    result = json.loads(result_text)
+                    self.assertEqual(result['state'], 'ok')
+                    self.assertEqual(result['artifacts'], cutover.launch_artifacts(root))
+                    new_pid = result['new_pid']
                     host = cutover.Darwin()
                     self.assertNotEqual(new_pid, old.pid)
                     self.assertEqual(host.listeners(port), {new_pid})
