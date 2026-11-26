@@ -125,6 +125,7 @@ var security = new Security(home, config) { ClientAuth = manager.Outside.Authent
 var builder = WebApplication.CreateSlimBuilder(args);
 builder.WebHost.UseUrls($"http://127.0.0.1:{config.Port}");
 builder.Logging.SetMinimumLevel(LogLevel.Warning);
+builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = ServerShutdown.HostTimeout);
 builder.Services.ConfigureHttpJsonOptions(o => {
 	o.SerializerOptions.PropertyNamingPolicy = JsonIO.Options.PropertyNamingPolicy;
 	o.SerializerOptions.DefaultIgnoreCondition = JsonIO.Options.DefaultIgnoreCondition;
@@ -447,8 +448,12 @@ api.Map("/events", async (HttpContext ctx) => {
 		ctx.Response.StatusCode = 400;
 		return;
 	}
+	if(restart.IsStopping) {
+		ctx.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+		return;
+	}
 	using var socket = await ctx.WebSockets.AcceptWebSocketAsync();
-	await hub.Serve(socket, ctx.RequestAborted);
+	await hub.Serve(socket, ctx.RequestAborted, restart.Stopping);
 });
 
 async Task RefreshMcp(bool force) {
@@ -458,14 +463,6 @@ async Task RefreshMcp(bool force) {
 	catch(OperationCanceledException) when(restart.IsStopping) { }
 }
 
-var drain = new Lazy<Task>(async () => {
-	var grace = TimeSpan.FromSeconds(Math.Max(0, manager.Config.StopGraceSeconds));
-	try { await restart.DrainAsync(grace, grace + TimeSpan.FromSeconds(2), childWatcher.CleanForeground); }
-	catch(Exception e) { Console.Error.WriteLine($"Restart drain: {e.Message}"); }
-	try { await mcp.StopAll().WaitAsync(TimeSpan.FromSeconds(5)); }
-	catch(Exception e) { Console.Error.WriteLine($"MCP shutdown: {e.Message}"); }
-});
-using var onStopping = app.Lifetime.ApplicationStopping.Register(() => { _ = drain.Value; });
 manager.LoadAll();
 new Scheduler(manager).Start(app.Lifetime.ApplicationStopping);
 backups.Start(app.Lifetime.ApplicationStopping, Console.Error.WriteLine);
@@ -475,8 +472,12 @@ Console.WriteLine($"Backups: {backups.Directory}{(backups.Encrypting ? " (encryp
 Console.WriteLine(webRoot == null
 	? "No built UI found (web/dist). Run `npm run build` in web/, or set MARTEN_WEB_ROOT."
 	: $"Marten UI: http://127.0.0.1:{config.Port}/ (paste the token from the Marten home's secrets/ui-token into the page)");
-try { await app.RunAsync(); }
-finally { await drain.Value; }
+await ServerShutdown.RunAsync(app, restart, () => manager.Config.StopGraceSeconds, childWatcher.CleanForeground, mcp.StopAll);
+modelHttp.Dispose();
+authHttp.Dispose();
+// PowerShell may leave a non-background pipeline thread after an abandoned runspace.
+// Main returning is not enough to exit the process. The graceful work is already done.
+Environment.Exit(Environment.ExitCode);
 
 static string? Blank(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
 

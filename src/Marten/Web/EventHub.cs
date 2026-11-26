@@ -15,27 +15,39 @@ public sealed class EventHub {
 		foreach(var client in clients.Values) client.Writer.TryWrite(json);
 	}
 
-	public async Task Serve(WebSocket socket, CancellationToken ct) {
+	public async Task Serve(WebSocket socket, CancellationToken requestAborted, CancellationToken stopping) {
+		using var session = CancellationTokenSource.CreateLinkedTokenSource(requestAborted, stopping);
+		var ct = session.Token;
 		var id = Guid.NewGuid();
 		// A slow client drops its oldest events rather than stalling agents; it resyncs on reconnect.
 		var channel = Channel.CreateBounded<string>(new BoundedChannelOptions(10_000) { FullMode = BoundedChannelFullMode.DropOldest });
 		clients[id] = channel;
+		var reader = Read();
+		var writer = Write();
 		try {
-			var reader = Task.Run(async () => {
-				var buffer = new byte[1024];
-				while(socket.State == WebSocketState.Open) {
-					var r = await socket.ReceiveAsync(buffer, ct);
-					if(r.MessageType == WebSocketMessageType.Close) break;
-				}
-			}, ct);
-			await foreach(var json in channel.Reader.ReadAllAsync(ct)) {
-				if(socket.State != WebSocketState.Open) break;
-				await socket.SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, true, ct);
-				if(reader.IsCompleted) break;
-			}
+			await Task.WhenAny(reader, writer);
+			// Either loop can end first. Abort instead of waiting on a peer's close handshake.
+			socket.Abort();
+			await session.CancelAsync();
+			await Task.WhenAll(reader, writer);
 		} catch(Exception e) when(e is OperationCanceledException or WebSocketException) {
 		} finally {
 			clients.TryRemove(id, out _);
+		}
+
+		async Task Read() {
+			var buffer = new byte[1024];
+			while(!ct.IsCancellationRequested && socket.State == WebSocketState.Open) {
+				var r = await socket.ReceiveAsync(buffer, ct);
+				if(r.MessageType == WebSocketMessageType.Close) break;
+			}
+		}
+
+		async Task Write() {
+			await foreach(var json in channel.Reader.ReadAllAsync(ct)) {
+				if(socket.State != WebSocketState.Open) break;
+				await socket.SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, true, ct);
+			}
 		}
 	}
 }
