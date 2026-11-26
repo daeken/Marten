@@ -472,12 +472,14 @@ Console.WriteLine($"Backups: {backups.Directory}{(backups.Encrypting ? " (encryp
 Console.WriteLine(webRoot == null
 	? "No built UI found (web/dist). Run `npm run build` in web/, or set MARTEN_WEB_ROOT."
 	: $"Marten UI: http://127.0.0.1:{config.Port}/ (paste the token from the Marten home's secrets/ui-token into the page)");
-await ServerShutdown.RunAsync(app, restart, () => manager.Config.StopGraceSeconds, childWatcher.CleanForeground, mcp.StopAll);
+var cleanStop = await ServerShutdown.RunAsync(app, restart, () => manager.Config.StopGraceSeconds, childWatcher.CleanForeground, mcp.StopAll);
 modelHttp.Dispose();
 authHttp.Dispose();
 // PowerShell may leave a non-background pipeline thread after an abandoned runspace.
-// Main returning is not enough to exit the process. The graceful work is already done.
-Environment.Exit(Environment.ExitCode);
+// Main returning is not enough to exit the process. This is the host's signal-driven
+// stop path, after the bounded cleanup and persistence waits. Startup failures throw above.
+if(System.Reflection.Assembly.GetEntryAssembly() == typeof(Program).Assembly)
+	Environment.Exit(!cleanStop && Environment.ExitCode == 0 ? 1 : Environment.ExitCode);
 
 static string? Blank(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
 

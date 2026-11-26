@@ -67,9 +67,9 @@ Sometimes a provider blocks the request itself instead of failing it: OpenAI rep
 
 ## Stopping and restarting
 
-Use Ctrl-C or send SIGTERM and wait for Marten to exit before starting it again. The UI's event WebSockets disconnect immediately; an open UI doesn't delay a restart. Marten stops new model calls, gives active tools `stopGraceSeconds` (5 by default, capped at 10 for server shutdown), then cancels unfinished tools and makes bounded attempts to clean up tracked foreground children and MCP servers. Detached `process_start` jobs survive a Marten restart, not a machine reboot.
+Use Ctrl-C or send SIGTERM and wait for Marten to exit before starting it again. The UI's event WebSockets disconnect immediately; an open UI doesn't delay a restart. Marten stops new model calls, gives active tools `stopGraceSeconds` (5 by default), then cancels unfinished tools and makes bounded attempts to clean up tracked foreground children and MCP servers. Detached `process_start` jobs survive a Marten restart, not a machine reboot.
 
-Look for `Marten shutdown +…ms` in stderr to see which phase is still running. These lines contain elapsed times and phase names, not tool or exception text. If the server is still alive 30 seconds after shutdown was requested, it force-exits without signaling detached jobs.
+Look for `Marten shutdown +…ms` in stderr to see which phase is still running. These lines contain elapsed times and phase names, not tool or exception text. A shutdown phase that fails or exceeds its wait budget is reported as incomplete and yields a nonzero exit code. The runtime does not impose a separate hard-kill deadline.
 
 On startup, Marten tells existing agents that it restarted and records interruptions it can infer from disk. It does not automatically repeat interrupted calls. A forced kill or power loss skips cleanup; results or queued messages can be lost even when a command changed files or external state. Check the transcript, logs, and actual state before retrying.
 

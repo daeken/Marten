@@ -51,24 +51,22 @@ internal sealed class RestartDrain {
 				cleanForeground();
 				phase?.Invoke("foreground sweep end");
 			});
-			// Reserve time for a second sweep: a pipeline can fork while handling cancellation.
-			var settleBudget = cleanup > TimeSpan.FromSeconds(1) ? cleanup - TimeSpan.FromSeconds(1) : cleanup / 2;
-			var first = Task.WhenAll(stopped, sweep);
 			try {
-				await first.WaitAsync(settleBudget);
+				await Task.WhenAll(stopped, sweep).WaitAsync(cleanup);
 				phase?.Invoke("operations settled");
 			} catch(TimeoutException) {
 				phase?.Invoke("operations timed out");
+				throw;
 			} finally {
-				// Don't run two process sweeps concurrently. The first may be stuck in OS cleanup.
+				// A pipeline can fork while handling cancellation. Don't run the final sweep
+				// concurrently with the first, even if the first is stuck in OS cleanup.
 				var finalSweep = Task.Run(async () => {
 					try { await sweep; } catch { /* retry even if the first sweep failed */ }
 					phase?.Invoke("foreground final sweep begin");
 					cleanForeground();
 					phase?.Invoke("foreground final sweep end");
 				});
-				// Observe faults if the work outlives the bounded wait.
-				await Task.WhenAll(first, finalSweep).WaitAsync(cleanup - settleBudget);
+				await finalSweep.WaitAsync(TimeSpan.FromSeconds(1));
 			}
 		});
 	}

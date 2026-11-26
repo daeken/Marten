@@ -6,7 +6,7 @@ namespace Marten.Web;
 internal static class ServerShutdown {
 	public static readonly TimeSpan HostTimeout = TimeSpan.FromSeconds(3);
 
-	public static async Task RunAsync(WebApplication app, RestartDrain restart, Func<int> stopGraceSeconds,
+	public static async Task<bool> RunAsync(WebApplication app, RestartDrain restart, Func<int> stopGraceSeconds,
 		Action cleanForeground, Func<Task> stopMcp) {
 		var signalled = new TaskCompletionSource<Task>(TaskCreationOptions.RunContinuationsAsynchronously);
 		var start = Stopwatch.GetTimestamp();
@@ -32,13 +32,7 @@ internal static class ServerShutdown {
 
 		using var registration = app.Lifetime.ApplicationStopping.Register(() => {
 			start = Stopwatch.GetTimestamp();
-			// A stuck ProcessExit handler, synchronous callback or logger cannot keep this
-			// process alive forever. A dedicated background thread doesn't need a pool worker.
-			new Thread(() => {
-				Thread.Sleep(TimeSpan.FromSeconds(30));
-				Process.GetCurrentProcess().Kill(); // This process only; never detached jobs.
-			}) { IsBackground = true, Name = "Marten shutdown deadline" }.Start();
-			var grace = TimeSpan.FromSeconds(Math.Clamp(stopGraceSeconds(), 0, 10));
+			var grace = TimeSpan.FromSeconds(Math.Max(stopGraceSeconds(), 0));
 			// Close admission and signal cancellation here. No logging, process I/O or drain waits
 			// in this callback: they would delay Kestrel closing the listener.
 			signalled.TrySetResult(restart.DrainAsync(grace, grace + TimeSpan.FromSeconds(2), cleanForeground, Report));
@@ -53,20 +47,39 @@ internal static class ServerShutdown {
 		}
 
 		await signalled.Task;
-		await Task.WhenAll(Drain(), StopHost());
-		Report("exit");
+		var results = await Task.WhenAll(Drain(), StopHost());
+		var clean = results.All(ok => ok);
+		Report(clean ? "exit" : "exit incomplete");
+		return clean;
 
-		async Task Drain() {
-			await Phase("restart-drain", () => signalled.Task.Unwrap(), TimeSpan.FromSeconds(23));
-			await Phase("mcp-stop", stopMcp, TimeSpan.FromSeconds(5));
+		async Task<bool> Drain() {
+			// RestartDrain owns the configured grace and its cleanup wait; don't impose a second,
+			// shorter deadline here. MCP gets its own deadline after the drain attempt finishes.
+			Report("restart-drain begin");
+			bool drained;
+			try {
+				await signalled.Task.Unwrap();
+				Report("restart-drain end");
+				drained = true;
+			} catch(TimeoutException) {
+				Report("restart-drain timed out");
+				drained = false;
+			} catch(Exception) {
+				Report("restart-drain failed");
+				drained = false;
+			}
+			return await Phase("mcp-stop", stopMcp, TimeSpan.FromSeconds(5)) && drained;
 		}
 
-		Task Dispose() => Phase("host-dispose", () => app.DisposeAsync().AsTask(), TimeSpan.FromSeconds(3));
+		Task<bool> Dispose() => Phase("host-dispose", () => app.DisposeAsync().AsTask(), TimeSpan.FromSeconds(3));
 
-		async Task StopHost() {
+		async Task<bool> StopHost() {
 			// Budget slightly more than HostOptions so Kestrel can finish aborting timed-out requests.
-			if(await Phase("host-stop", () => app.StopAsync(), HostTimeout + TimeSpan.FromSeconds(1)))
-				await Dispose(); // Don't race disposal against an in-progress stop.
+			if(!await Phase("host-stop", () => app.StopAsync(), HostTimeout + TimeSpan.FromSeconds(1))) {
+				Report("host-dispose skipped after incomplete stop"); // Don't race an in-progress stop.
+				return false;
+			}
+			return await Dispose();
 		}
 	}
 }

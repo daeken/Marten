@@ -2,7 +2,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Sockets;
-using System.Net.WebSockets;
+using System.Text;
 using Marten.Agents;
 using Marten.Mcp;
 using Marten.Storage;
@@ -12,10 +12,48 @@ using Xunit.Abstractions;
 namespace Marten.Tests;
 
 public sealed class ServerShutdownTests(ITestOutputHelper output) {
-	[Theory]
-	[InlineData(false)]
-	[InlineData(true)]
-	public async Task ExternalSigtermDropsWebSocketAndExitsWithoutReplayingWork(bool loaded) {
+	[Fact]
+	public async Task ExternalSigtermDropsPassiveAuthenticatedWebSocket() {
+		if(!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) return;
+		using var dir = new TempDir();
+		var home = new Home(dir.File("home"));
+		var port = FreePort();
+		new Config { Port = port, Backup = new() { IntervalMinutes = 0 } }.Save(home);
+		await using var server = new Server(home, port, output);
+		await server.Ready();
+
+		using var client = new TcpClient();
+		using var connect = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+		await client.ConnectAsync(IPAddress.Loopback, port, connect.Token);
+		var stream = client.GetStream();
+		var key = Convert.ToBase64String(Guid.NewGuid().ToByteArray());
+		var upgrade = $"GET /api/events HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {server.Token}\r\n" +
+			$"Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\n\r\n";
+		await stream.WriteAsync(Encoding.ASCII.GetBytes(upgrade), connect.Token);
+		using var reader = new StreamReader(stream, Encoding.ASCII, leaveOpen: true);
+		Assert.Equal("HTTP/1.1 101 Switching Protocols", await reader.ReadLineAsync(connect.Token));
+		while(await reader.ReadLineAsync(connect.Token) is { Length: > 0 }) { }
+
+		var elapsed = Stopwatch.StartNew();
+		Posix.Terminate(server.Pid, group: false);
+		// This is raw TCP: the client sends nothing after the upgrade, not even a close reply.
+		using var wsDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+		try { await reader.ReadToEndAsync(wsDeadline.Token); }
+		catch(IOException e) when(e.InnerException is SocketException { SocketErrorCode: SocketError.ConnectionReset }) { }
+		output.WriteLine($"Passive authenticated WS disconnected after {elapsed.ElapsedMilliseconds}ms");
+		await server.Exited.WaitAsync(TimeSpan.FromSeconds(3));
+		output.WriteLine($"SIGTERM exit after {elapsed.ElapsedMilliseconds}ms (passive WS)");
+		Assert.InRange(elapsed.ElapsedMilliseconds, 0, 3000);
+		Assert.Equal(0, server.ExitCode);
+		var phases = await server.ShutdownTimings();
+		output.WriteLine(phases);
+		Assert.Contains("host-stop end", phases);
+		Assert.Contains("host-dispose end", phases);
+		Assert.DoesNotContain("exit incomplete", phases);
+	}
+
+	[Fact]
+	public async Task ExternalSigtermExitsWithAbandonedPowerShell() {
 		if(!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) return;
 		using var dir = new TempDir();
 		var home = new Home(dir.File("home"));
@@ -23,51 +61,40 @@ public sealed class ServerShutdownTests(ITestOutputHelper output) {
 		var config = new Config { Port = port, StopGraceSeconds = 1, Backup = new() { IntervalMinutes = 0 } };
 		var manager = new AgentManager(home, config, new FakeBackend(), new ToolRegistry());
 		var agent = manager.CreateChat("fixture", dir.Path);
-		if(loaded) {
-			// No model calls are needed to seed a durable one-shot. Its runspace ignores
-			// cancellation while in a managed call, and has both kinds of child process.
-			agent.AddSchedule("""
-				$null = process_start -command 'exec /bin/sleep 90' -name fixture
-				$p = [System.Diagnostics.Process]::Start('/bin/sleep', '90')
-				[IO.File]::AppendAllText((Join-Path $PWD 'runs'), "1`n")
-				[IO.File]::WriteAllText((Join-Path $PWD 'foreground.pid'), [string]$p.Id)
-				[Threading.Thread]::Sleep(90000)
-				""", null, DateTimeOffset.UtcNow, null, 120);
-			config.Mcp["stubborn"] = new McpServerConfig {
-				Command = "/bin/sh", Cwd = dir.Path,
-				Args = ["-c", "echo $$ > mcp.pid; exec /bin/sleep 90"],
-			};
-		}
+		// No model calls are needed to seed a durable one-shot. Its runspace ignores
+		// cancellation while in a managed call, and has both kinds of child process.
+		agent.AddSchedule("""
+			$null = process_start -command 'exec /bin/sleep 90' -name fixture
+			$p = [System.Diagnostics.Process]::Start('/bin/sleep', '90')
+			[IO.File]::AppendAllText((Join-Path $PWD 'runs'), "1`n")
+			[IO.File]::WriteAllText((Join-Path $PWD 'foreground.pid'), [string]$p.Id)
+			[Threading.Thread]::Sleep(90000)
+			""", null, DateTimeOffset.UtcNow, null, 120);
+		config.Mcp["stubborn"] = new McpServerConfig {
+			Command = "/bin/sh", Cwd = dir.Path,
+			Args = ["-c", "echo $$ > mcp.pid; exec /bin/sleep 90"],
+		};
 		config.Save(home);
 		try {
 			await using(var server = new Server(home, port, output)) {
 				await server.Ready();
-				using var events = new ClientWebSocket();
-				using var connect = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-				events.Options.SetRequestHeader("Authorization", "Bearer " + server.Token);
-				await events.ConnectAsync(new Uri($"ws://127.0.0.1:{port}/api/events"), connect.Token);
-				if(loaded)
-					await Wait.Until(() => FixturePid("foreground.pid") > 0 && FixturePid("mcp.pid") > 0 && DetachedPid() > 0);
+				// No WebSocket: this independently exercises PID exit with a stranded runspace.
+				await Wait.Until(() => FixturePid("foreground.pid") > 0 && FixturePid("mcp.pid") > 0 && DetachedPid() > 0);
 				var elapsed = Stopwatch.StartNew();
 				Posix.Terminate(server.Pid, group: false);
-				// Do not acknowledge any close frame. A passive peer must not hold the host open.
-				using var wsDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-				try {
-					while((await events.ReceiveAsync(new byte[4096], wsDeadline.Token)).MessageType != WebSocketMessageType.Close) { }
-				} catch(WebSocketException) when(!wsDeadline.IsCancellationRequested) { }
-				output.WriteLine($"WS ended after {elapsed.ElapsedMilliseconds}ms");
 				await server.Exited.WaitAsync(TimeSpan.FromSeconds(9));
-				output.WriteLine($"SIGTERM exit after {elapsed.ElapsedMilliseconds}ms (loaded={loaded})");
-				Assert.InRange(elapsed.ElapsedMilliseconds, 0, loaded ? 9000 : 3000);
-				Assert.Equal(0, server.ExitCode);
+				output.WriteLine($"SIGTERM exit after {elapsed.ElapsedMilliseconds}ms (in-flight PowerShell and MCP)");
+				Assert.InRange(elapsed.ElapsedMilliseconds, 1000, 9000);
 				var phases = await server.ShutdownTimings();
 				output.WriteLine(phases);
 				foreach(var phase in new[] { "host-stop end", "host-dispose end", "mcp-stop end", "exit" })
 					Assert.Contains(phase, phases);
-				if(loaded) Assert.Matches("restart-drain (end|timed out)", phases);
-				else Assert.Contains("restart-drain end", phases);
+				// When the stubborn work outlasts the bounded cleanup, a nonzero exit and
+				// diagnostics are required; finishing/abandoning inside the budget is normal.
+				var timedOut = phases.Contains("restart-drain timed out", StringComparison.Ordinal);
+				Assert.Equal(timedOut ? 1 : 0, server.ExitCode);
+				Assert.Contains(timedOut ? "exit incomplete" : "restart-drain end", phases);
 			}
-			if(!loaded) return;
 			await Wait.Until(() => !Posix.Alive(FixturePid("foreground.pid")) && !Posix.Alive(FixturePid("mcp.pid")), 2000);
 			Assert.True(Posix.Alive(DetachedPid()));
 			// Don't start a second MCP child: the interrupted schedule is the recovery target.
