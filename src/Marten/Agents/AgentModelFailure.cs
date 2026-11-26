@@ -58,7 +58,8 @@ public sealed partial class Agent {
 			var record = new ModelAttemptFailure(modelFailureRunId, call.Id, call.Kind, backend, model,
 				call.StartedAt, call.EndedAt!.Value, elapsedMilliseconds, phase, cancelled, turnCancelled, stopping, causes);
 			var path = Path.Combine(Directory, ModelFailureFile);
-			// One writer per agent; a fixed staging file bounds residue even after a crash.
+			// One writer per agent. Reserve one staging name for this sidecar, so even if
+			// cleanup fails or the process crashes, repeated attempts cannot accumulate files.
 			var temp = path + ".tmp";
 			try {
 				using(var stream = new FileStream(temp, FileMode.Create, FileAccess.Write)) {
@@ -67,7 +68,8 @@ public sealed partial class Agent {
 				}
 				File.Move(temp, path, overwrite: true);
 			} finally {
-				File.Delete(temp);
+				// Clean up only this sidecar's staging file; never sweep other storage temps.
+				try { File.Delete(temp); } catch(IOException) { } catch(UnauthorizedAccessException) { }
 			}
 		} catch(Exception) {
 			// Diagnostics are best effort; do not mask the original exception or log storage exception text.

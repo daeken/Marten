@@ -168,15 +168,29 @@ public class ModelCallTests {
 	}
 
 	[Fact]
-	public async Task DiagnosticWriteFailureDoesNotReplaceTheOriginalFailure() {
+	public async Task RepeatedDiagnosticWriteFailuresLeaveNoTempsAndPreserveTheOriginalFailure() {
 		using var dir = new TempDir();
-		var manager = Manager(dir, new Backend((_, _) => throw new ObjectDisposedException("original")));
+		var attempts = 0;
+		var manager = Manager(dir, new Backend((_, _) => throw new ObjectDisposedException($"original-{++attempts}")));
 		var agent = manager.CreateChat("broken sidecar", dir.Path);
-		Directory.CreateDirectory(Path.Combine(agent.Directory, Agent.ModelFailureFile));
+		var path = Path.Combine(agent.Directory, Agent.ModelFailureFile);
+		// A directory at the destination permits staging writes but forces the final rename to fail.
+		Directory.CreateDirectory(path);
+		var unrelatedTemp = Path.Combine(agent.Directory, "unrelated.tmp");
+		File.WriteAllText(unrelatedTemp, "unrelated");
+		for(var attempt = 1; attempt <= 4; attempt++) {
+			var detail = new ObjectDisposedException($"original-{attempt}").Message;
+			Wake(agent);
+			await Wait.Until(() => agent.Status == AgentStatus.Error && agent.StatusDetail == detail);
+			Assert.True(Directory.Exists(path));
+			Assert.Equal(new[] { unrelatedTemp }, Directory.GetFiles(agent.Directory, "*.tmp"));
+		}
+		Directory.Delete(path);
 		Wake(agent);
-		await Wait.Until(() => agent.Status == AgentStatus.Error);
-		Assert.Equal(new ObjectDisposedException("original").Message, agent.StatusDetail);
-		Assert.False(File.Exists(Path.Combine(agent.Directory, Agent.ModelFailureFile + ".tmp")));
+		await Wait.Until(() => agent.Status == AgentStatus.Error && agent.StatusDetail == new ObjectDisposedException("original-5").Message);
+		var recovered = JsonIO.Deserialize<ModelAttemptFailure>(File.ReadAllText(path))!;
+		Assert.Equal(5, recovered.AttemptId);
+		Assert.Equal(new[] { unrelatedTemp }, Directory.GetFiles(agent.Directory, "*.tmp"));
 	}
 
 	static Task<ModelResult> MissingModel() {
