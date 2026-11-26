@@ -6,6 +6,7 @@ import ctypes as C
 from dataclasses import asdict, dataclass
 import errno
 import fcntl
+import hashlib
 import http.client
 import json
 import os
@@ -22,6 +23,8 @@ import time
 PORT = 7450
 LOCK_DIR = Path('/private/tmp')
 DLL = 'src/Marten/bin/Debug/net10.0/Marten.dll'
+BUILD_DIR = str(Path(DLL).parent)
+WEB_DIST = 'web/dist'
 PATH_PREFIX = '/opt/homebrew/bin:/usr/local/share/dotnet:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:'
 UNSET = ('MSBuildSDKsPath', 'MSBuildExtensionsPath', 'DOTNET_HOST_PATH',
          'MSBUILDFAILONDRIVEENUMERATINGWILDCARD')
@@ -291,6 +294,57 @@ def prebuild(root, sha, env):
     check_tree(root, sha)
 
 
+def launch_artifacts(root):
+    """Hash paths, permissions and bytes of the prebuilt server and UI files."""
+    required = {DLL, f'{BUILD_DIR}/Marten.deps.json', f'{BUILD_DIR}/Marten.runtimeconfig.json',
+                f'{WEB_DIST}/index.html'}
+    hashes = {}
+    for tree in (BUILD_DIR, WEB_DIST):
+        directory = root
+        for part in Path(tree).parts:
+            directory = directory / part
+            if directory.is_symlink() or not directory.is_dir():
+                raise CutoverError(f'Prebuilt artifact directory missing or unsafe: {tree}')
+        digest = hashlib.sha256()
+        pending = [directory]
+        while pending:
+            current = pending.pop()
+            for path in sorted(current.iterdir()):
+                rel = path.relative_to(root).as_posix()
+                mode = path.lstat().st_mode
+                if stat.S_ISDIR(mode):
+                    pending.append(path)
+                    continue
+                if not stat.S_ISREG(mode):
+                    raise CutoverError(f'Prebuilt artifact is not a regular file: {rel}')
+                content = hashlib.sha256()
+                with path.open('rb') as f:
+                    for chunk in iter(lambda: f.read(1024 * 1024), b''):
+                        content.update(chunk)
+                required.discard(rel)
+                digest.update(os.fsencode(rel) + b'\0')
+                digest.update(f'{stat.S_IMODE(mode):o}:{content.hexdigest()}\n'.encode())
+        hashes[tree] = digest.hexdigest()
+    if required:
+        raise CutoverError(f'Required prebuilt artifacts missing: {", ".join(sorted(required))}')
+    return hashes
+
+
+def verify_artifacts(root, expected):
+    if not expected:
+        raise CutoverError('Missing artifact seal; cannot verify the original prebuild')
+    actual = launch_artifacts(root)
+    if actual != expected:
+        raise CutoverError('Prebuilt launch artifacts changed since prebuild; not starting')
+
+
+def launch(root, log, env):
+    with log.open('w') as output:
+        return subprocess.Popen(['nohup', 'dotnet', DLL], cwd=root, env=env,
+                                stdin=subprocess.DEVNULL, stdout=output,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+
+
 def private_dir(path):
     st = path.stat()
     if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
@@ -340,6 +394,7 @@ def deploy(args, host, root):
                 raise CutoverError('Resume requires this exact job and snapshot to have timed out draining')
             if not exited(host, old):
                 raise CutoverError('Old generation has not exited; leaving timeout result intact')
+            base['artifacts'] = prior.get('artifacts')
         elif result.exists():
             raise CutoverError('Job already used; create a new job or resume a drain timeout')
         stage = 'preflight'
@@ -350,6 +405,9 @@ def deploy(args, host, root):
                 raise CutoverError('Marten home is not the expected mounted symlink target')
             if 'MARTEN_HOME' in os.environ and Path(os.environ['MARTEN_HOME']).resolve() != expected_home:
                 raise CutoverError('Inherited MARTEN_HOME would launch against different state')
+            web_override = env.get('MARTEN_WEB_ROOT')
+            if web_override and (root / web_override).resolve() != root / WEB_DIST:
+                raise CutoverError('MARTEN_WEB_ROOT would bypass the prebuilt UI')
             if args.mode == 'release' and inspect(host, root, PORT) != old:
                 raise CutoverError('Listener did not match the reviewed old generation')
             if args.mode == 'resume':
@@ -363,12 +421,7 @@ def deploy(args, host, root):
             stage = 'prebuild'
             if args.mode == 'release':
                 prebuild(root, args.sha, env)
-            else:
-                # The recorded drain timeout was after prebuild. Use that exact
-                # checkout even if origin/main has advanced or is unreachable.
-                check_tree(root, args.sha)
-            if not (root / DLL).is_file():
-                raise CutoverError('Prebuilt Marten DLL missing')
+                base['artifacts'] = launch_artifacts(root)
             stage = 'drain'
             if args.mode == 'release':
                 wait = max(0, args.notice_deadline - time.monotonic())
@@ -376,16 +429,16 @@ def deploy(args, host, root):
                     print(f'Waiting {wait:.0f}s for advance notice', flush=True)
                     time.sleep(wait)
                 check_tree(root, args.sha)
+                verify_artifacts(root, base['artifacts'])
                 stop(host, root, PORT, old, args.grace, args.late_wait, args.kill_after_grace)
             stage = 'startup'
             if not exited(host, old):
                 raise CutoverError('Old generation still running; not starting')
+            # For resume, use the original build even if origin/main has moved.
             check_tree(root, args.sha)
+            verify_artifacts(root, base.get('artifacts'))
             check_port(host, PORT)
-            with log.open('w') as output:
-                child = subprocess.Popen(['nohup', 'dotnet', DLL], cwd=root, env=env,
-                                         stdin=subprocess.DEVNULL, stdout=output,
-                                         stderr=subprocess.STDOUT, start_new_session=True)
+            child = launch(root, log, env)
             healthy(host, child, PORT, token)
         except Exception as e:
             state = 'drain-timeout' if isinstance(e, DrainTimeout) else 'failed'

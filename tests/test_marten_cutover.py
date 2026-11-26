@@ -6,12 +6,15 @@ import json
 import os
 from pathlib import Path
 import runpy
+import select
 import signal
 import socket
 import subprocess
 import sys
 import tempfile
+from textwrap import dedent
 import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -158,7 +161,14 @@ class ReleaseTests(unittest.TestCase):
         self.root = self.home / 'checkout'
         dll = self.root / cutover.DLL
         dll.parent.mkdir(parents=True)
-        dll.touch()
+        dll.write_bytes(b'compiled server')
+        (dll.parent / 'Marten.runtimeconfig.json').write_text('{}')
+        (dll.parent / 'Marten.deps.json').write_text('{}')
+        (dll.parent / 'dependency.dll').write_bytes(b'compiled dependency')
+        self.ui = self.root / cutover.WEB_DIST
+        (self.ui / 'assets').mkdir(parents=True)
+        (self.ui / 'index.html').write_text('<html>scratch</html>')
+        (self.ui / 'assets/app.js').write_bytes(b'built UI')
         self.old = replace(OLD, cwd=str(self.root))
         cutover.atomic_json(self.job / 'generation.json', asdict(self.old))
         self.args = SimpleNamespace(mode='release', job=self.job, expected_home=self.mounted,
@@ -174,7 +184,8 @@ class ReleaseTests(unittest.TestCase):
         self.timeout = False
         self.addCleanup(patch.stopall)
         patch.object(Path, 'home', return_value=self.home).start()
-        patch.dict(os.environ, {'MARTEN_HOME': str(self.mounted), **dict.fromkeys(cutover.UNSET, 'stale')}).start()
+        patch.dict(os.environ, {'MARTEN_HOME': str(self.mounted), 'MARTEN_WEB_ROOT': '',
+                                **dict.fromkeys(cutover.UNSET, 'stale')}).start()
         patch.dict(cutover.deploy.__globals__, LOCK_DIR=self.home, prebuild=self.prebuild, stop=self.stop,
                    check_tree=self.check_tree, check_port=self.check_port, healthy=self.healthy).start()
         patch.object(subprocess, 'Popen', side_effect=self.launch).start()
@@ -281,6 +292,50 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(self.result()['state'], 'ok')
 
 
+    def test_resume_rejects_modified_server_or_ui_before_launch(self):
+        for relative in (cutover.DLL, f'{cutover.BUILD_DIR}/dependency.dll', f'{cutover.WEB_DIST}/assets/app.js'):
+            with self.subTest(relative=relative):
+                self.args.mode = 'release'
+                self.h.generation = self.old
+                self.timeout = True
+                with self.assertRaises(cutover.DrainTimeout):
+                    self.deploy()
+                self.assertEqual(self.result()['artifacts'], cutover.launch_artifacts(self.root))
+                self.args.mode = 'resume'
+                self.h.generation = None
+                self.events.clear()
+                artifact = self.root / relative
+                original = artifact.read_bytes()
+                artifact.write_bytes(original.replace(original[:1], b'_', 1))
+                with self.assertRaisesRegex(cutover.CutoverError, 'artifacts changed'):
+                    self.deploy()
+                self.assertEqual(self.events, ['check_port'])
+                self.assertEqual(self.result()['state'], 'failed')
+                self.assertEqual(self.log.read_text(), 'old log')
+                artifact.write_bytes(original)
+                (self.job / 'result.json').unlink()
+
+    def test_resume_without_artifact_seal_refuses_legacy_timeout(self):
+        self.timeout = True
+        with self.assertRaises(cutover.DrainTimeout):
+            self.deploy()
+        prior = self.result()
+        del prior['artifacts']
+        cutover.atomic_json(self.job / 'result.json', prior)
+        self.args.mode = 'resume'
+        self.h.generation = None
+        self.events.clear()
+        with self.assertRaisesRegex(cutover.CutoverError, 'Missing artifact seal'):
+            self.deploy()
+        self.assertEqual(self.events, ['check_port'])
+
+    def test_prebuild_rejects_symlink_artifact_before_term(self):
+        (self.ui / 'assets/untracked.js').symlink_to(self.ui / 'index.html')
+        with self.assertRaisesRegex(cutover.CutoverError, 'not a regular file'):
+            self.deploy()
+        self.assertEqual(self.events, ['prebuild'])
+
+
 class HealthTests(unittest.TestCase):
     def test_loopback_ui_and_authenticated_status(self):
         paths = []
@@ -332,6 +387,92 @@ class PrebuildTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == 'darwin' and os.getuid() != 0, 'requires unprivileged macOS')
 class DarwinTests(unittest.TestCase):
+    def test_real_handoff_survives_helper_exit(self):
+        # The same nohup/dotnet argv and detached Popen path, but a scratch
+        # dotnet shim and a Python listener with an OS-assigned loopback port.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            fixture = root / cutover.DLL
+            fixture.parent.mkdir(parents=True)
+            fixture.write_text(dedent('''\
+                import json, os, time
+                from pathlib import Path
+                from http.server import BaseHTTPRequestHandler, HTTPServer
+
+                class Handler(BaseHTTPRequestHandler):
+                    def do_GET(self):
+                        ok = self.path == '/' or self.headers.get('Authorization') == 'Bearer scratch-token'
+                        self.send_response(200 if ok else 401)
+                        self.end_headers()
+                        if ok:
+                            self.wfile.write(b'{}')
+
+                port = int(os.environ.get('SCRATCH_PORT', '0'))
+                with HTTPServer(('127.0.0.1', port), Handler) as server:
+                    server.timeout = 0.1
+                    if port == 0:
+                        print(server.server_port, flush=True)
+                    print('scratch server ready', flush=True)
+                    deadline = time.monotonic() + 12
+                    while time.monotonic() < deadline and not Path('fixture.stop').exists():
+                        server.handle_request()
+                '''))
+            shim = root / 'dotnet'
+            shim.write_text('#!/bin/bash\nexec -a dotnet "$SCRATCH_PYTHON" "$@"\n')
+            shim.chmod(0o700)
+            env = dict(os.environ, PATH=f'{root}:/usr/bin:/bin', SCRATCH_PYTHON=sys.executable)
+            env.pop('SCRATCH_PORT', None)
+            log = root / 'server.log'
+            log.touch(mode=0o640)
+            initial_log_mode = log.stat().st_mode
+            helper = Path(cutover.launch.__code__.co_filename).resolve()
+            runner = dedent('''\
+                import os, runpy, sys
+                from pathlib import Path
+                helper, old_pid, port = sys.argv[1:]
+                m = runpy.run_path(helper)
+                host = m['Darwin']()
+                root = Path.cwd()
+                port = int(port)
+                import signal
+                pid = int(old_pid)
+                assert host.listeners(port) == {pid}
+                old = host.describe(pid)
+                assert old and old.cwd == str(root) and old.birth.uid == os.getuid(), old
+                assert old.command.endswith(' ' + m['DLL']), old.command
+                assert host.signal(old, signal.SIGTERM)
+                assert m['wait_exit'](host, old, 3)
+                m['check_port'](host, port)
+                child = m['launch'](root, root / 'server.log', dict(os.environ, SCRATCH_PORT=str(port)))
+                m['healthy'](host, child, port, 'scratch-token')
+                print(child.pid)
+                ''')
+            with subprocess.Popen([str(shim), cutover.DLL], cwd=root, env=env, text=True,
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as old:
+                try:
+                    self.assertTrue(select.select([old.stdout], [], [], 3)[0], 'scratch old not ready')
+                    port = int(old.stdout.readline())
+                    finished = subprocess.run([sys.executable, '-B', '-c', runner, str(helper), str(old.pid), str(port)],
+                                              cwd=root, env=env, text=True, capture_output=True, timeout=10)
+                    self.assertEqual(finished.returncode, 0, finished.stderr)
+                    self.assertEqual(old.wait(2), -signal.SIGTERM)
+                    new_pid = int(finished.stdout)
+                    host = cutover.Darwin()
+                    self.assertNotEqual(new_pid, old.pid)
+                    self.assertEqual(host.listeners(port), {new_pid})
+                    self.assertEqual(os.getsid(new_pid), new_pid)
+                    self.assertTrue(cutover.http_check(port, 'scratch-token', 1))
+                    self.assertEqual(log.stat().st_mode, initial_log_mode)
+                    self.assertIn('scratch server ready', log.read_text())
+                finally:
+                    (root / 'fixture.stop').touch()
+                    if old.poll() is None:
+                        old.terminate()  # only our unreaped child
+                    if 'port' in locals():
+                        deadline = time.monotonic() + 2
+                        while time.monotonic() < deadline and cutover.Darwin().listeners(port):
+                            time.sleep(0.05)
+
     def test_kernel_refuses_mismatched_pidversion(self):
         h = cutover.Darwin()
         with subprocess.Popen(['/bin/sleep', '10']) as p:

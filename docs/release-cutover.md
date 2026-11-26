@@ -47,6 +47,9 @@ instance or run another deploy/start command alongside it.
    **before** advancing via fast-forward, then runs `npm run build` in `web/`
    and `dotnet build src/Marten`. The .NET build uses an existing `global.json`
    or temporarily pins SDK `10.0.101` and removes only the pin it created.
+   It records SHA-256 fingerprints of the built server and UI trees (paths,
+   file modes and bytes) and checks them before TERM and startup. A
+   `MARTEN_WEB_ROOT` override must point to this checkout's `web/dist`.
    The helper won't signal before the supplied time or within three minutes of
    its own launch. Do not edit the checkout/build outputs, config, or generation
    snapshot midway through the job.
@@ -88,8 +91,10 @@ instance or run another deploy/start command alongside it.
   `resume` instead of `release`, the **same** job/checkout/home/SHA, and omit
   `--not-before` and escalation options. It checks the original timeout and
   generation, refuses while the old PID is alive or changed, checks the port,
-  revalidates the same SHA and existing prebuild, and tries one startup without
-  signaling. It does not fetch or adopt a newer release during recovery.
+  revalidates the same SHA and stored artifact fingerprints, and tries one
+  startup without signaling. It does not fetch or adopt a newer release during
+  recovery. Missing or changed artifacts, including a timeout result that
+  predates artifact fingerprints, require manual review rather than a launch.
 - On identity ambiguity, an occupied port, or an unhealthy new build, inspect
   the recorded stage, PID, listeners and logs before any manual recovery.
   The helper won't kill an unexpected process or auto-start a fallback. This
