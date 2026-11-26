@@ -68,19 +68,21 @@ public class RestartTests {
 	public async Task ABlockedForegroundSweepDoesNotHoldTheDrainOpen() {
 		var restart = new RestartDrain();
 		using var release = new ManualResetEventSlim();
-		var finalSweep = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-		var calls = 0;
+		var finished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+		var phases = new System.Collections.Concurrent.ConcurrentQueue<string>();
 		var drain = restart.DrainAsync(TimeSpan.Zero, TimeSpan.FromMilliseconds(150), () => {
-			if(Interlocked.Increment(ref calls) == 1) release.Wait();
-			else finalSweep.TrySetResult();
-		});
+			release.Wait();
+			finished.TrySetResult();
+		}, phases.Enqueue);
 		try {
 			Assert.Null(restart.Enter());
 			await Assert.ThrowsAsync<TimeoutException>(async () => await drain.WaitAsync(TimeSpan.FromSeconds(3)));
 			Assert.True(drain.IsFaulted); // Not the outer test deadline.
+			Assert.Contains("foreground sweep timed out", phases);
+			Assert.Contains("foreground final sweep skipped", phases);
 		} finally {
 			release.Set();
-			await finalSweep.Task.WaitAsync(TimeSpan.FromSeconds(3));
+			await finished.Task.WaitAsync(TimeSpan.FromSeconds(3));
 		}
 	}
 
