@@ -24,7 +24,8 @@ final class CompactWorkspaceTests: XCTestCase {
             }
         }
         func back() {
-            app.navigationBars.buttons.firstMatch.tap()
+            // Duo can place Back in a separate floating toolbar.
+            app.buttons["BackButton"].firstMatch.tap()
             XCTAssertTrue(app.navigationBars["Marten"].waitForExistence(timeout: 5))
         }
         func entry(_ text: String) -> XCUIElement {
