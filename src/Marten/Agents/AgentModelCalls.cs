@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Marten.Models;
 using Marten.Storage;
 
@@ -22,13 +23,23 @@ public sealed partial class Agent {
 		var call = new ModelCallStatus(Interlocked.Increment(ref modelCallId), request.Model, kind, DateTimeOffset.UtcNow);
 		modelCall = call;
 		var outcome = ModelCallOutcome.Failed;
+		var started = Stopwatch.GetTimestamp();
+		Exception? failure = null;
+		(ModelFailureBackend Backend, string? Model) dispatch = default;
+		void ObserveDispatch(IModelBackend backend, string model) => dispatch = DescribeDispatch(backend, model);
 		try {
 			manager.Publish(new { type = "model_call_start", agentId = Info.Id, modelCall = call });
-			var pending = manager.Backend.CompleteAsync(request, delta => {
+			void OnDelta(string delta) {
 				lock(gate) {
 					if(!turnToken.IsCancellationRequested && !ct.IsCancellationRequested && !IsPaused) onDelta(delta);
 				}
-			}, ct);
+			}
+			Task<ModelResult> pending;
+			if(manager.Backend is BackendRouter router) pending = router.CompleteAsync(request, OnDelta, ct, ObserveDispatch);
+			else {
+				ObserveDispatch(manager.Backend, request.Model);
+				pending = manager.Backend.CompleteAsync(request, OnDelta, ct);
+			}
 			ModelResult result;
 			try {
 				result = await pending.WaitAsync(ct);
@@ -42,10 +53,14 @@ public sealed partial class Agent {
 			ct.ThrowIfCancellationRequested();
 			outcome = ModelCallOutcome.Succeeded;
 			return result;
+		} catch(Exception e) {
+			failure = e;
+			throw;
 		} finally {
 			if(outcome == ModelCallOutcome.Failed && (ct.IsCancellationRequested || turnToken.IsCancellationRequested)) outcome = ModelCallOutcome.Cancelled;
 			var ended = call with { EndedAt = DateTimeOffset.UtcNow, Outcome = outcome };
 			modelCall = ended;
+			if(failure != null) SaveModelFailure(ended, dispatch.Backend, dispatch.Model, (long) Stopwatch.GetElapsedTime(started).TotalMilliseconds, failure, ct, turnToken);
 			manager.Publish(new { type = "model_call_end", agentId = Info.Id, modelCall = ended });
 		}
 	}

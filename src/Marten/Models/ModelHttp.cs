@@ -50,7 +50,10 @@ internal static class ModelHttp {
 				response = await base.SendAsync(request, deadline.Token);
 			} catch(OperationCanceledException e) {
 				ct.ThrowIfCancellationRequested();
-				throw new TransientModelException("Timed out waiting for model response headers.", e);
+				throw ModelTransportFailure.Mark(new TransientModelException("Timed out waiting for model response headers.", e), ModelTransportPhase.AwaitingHeaders);
+			} catch(Exception e) {
+				ModelTransportFailure.Mark(e, ModelTransportPhase.AwaitingHeaders);
+				throw;
 			}
 			response.Content = new IdleContent(response.Content, idle);
 			return response;
@@ -75,8 +78,14 @@ internal static class ModelHttp {
 		}
 
 		protected override Task<Stream> CreateContentReadStreamAsync() => CreateContentReadStreamAsync(CancellationToken.None);
-		protected override async Task<Stream> CreateContentReadStreamAsync(CancellationToken ct) =>
-			new IdleStream(await inner.ReadAsStreamAsync(ct), idle);
+		protected override async Task<Stream> CreateContentReadStreamAsync(CancellationToken ct) {
+			try {
+				return new IdleStream(await inner.ReadAsStreamAsync(ct), idle);
+			} catch(Exception e) {
+				ModelTransportFailure.Mark(e, ModelTransportPhase.ReadingBody);
+				throw;
+			}
+		}
 
 		protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
 			SerializeToStreamAsync(stream, context, CancellationToken.None);
@@ -99,7 +108,10 @@ internal static class ModelHttp {
 				return await inner.ReadAsync(buffer, deadline.Token);
 			} catch(OperationCanceledException e) when(deadline.IsCancellationRequested) {
 				ct.ThrowIfCancellationRequested();
-				throw new TransientModelException("Timed out waiting for bytes from the model provider.", e);
+				throw ModelTransportFailure.Mark(new TransientModelException("Timed out waiting for bytes from the model provider.", e), ModelTransportPhase.ReadingBody);
+			} catch(Exception e) {
+				ModelTransportFailure.Mark(e, ModelTransportPhase.ReadingBody);
+				throw;
 			}
 		}
 
