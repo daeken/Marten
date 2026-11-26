@@ -511,7 +511,10 @@ private struct ConversationView: View {
                         Label("PowerShell Notebook", systemImage: "book.closed")
                     }
                     NavigationLink(value: WorkspaceDestination.operations(agent.id, task: nil)) {
-                        Label("Tasks, Schedules & Processes", systemImage: "checklist")
+                        Label("Tasks & Schedules", systemImage: "checklist")
+                    }
+                    NavigationLink(value: WorkspaceDestination.processes(agent.id)) {
+                        Label("Background Processes", systemImage: "terminal")
                     }
                     Button("Refresh", systemImage: "arrow.clockwise") {
                         Task { await refresh(); await refreshStatus() }
@@ -567,7 +570,10 @@ private struct ConversationView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     LazyVStack(alignment: .leading, spacing: 12) {
                         NavigationLink(value: WorkspaceDestination.operations(agent.id, task: nil)) {
-                            Label("Tasks, Schedules & Processes", systemImage: "checklist")
+                            Label("Tasks & Schedules", systemImage: "checklist")
+                        }.buttonStyle(.borderless)
+                        NavigationLink(value: WorkspaceDestination.processes(agent.id)) {
+                            Label("Background Processes", systemImage: "terminal")
                         }.buttonStyle(.borderless)
                         NavigationLink(value: WorkspaceDestination.notebook(agent.id)) {
                             Label("PowerShell Notebook", systemImage: "book.closed")

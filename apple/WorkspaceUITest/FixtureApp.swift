@@ -64,6 +64,34 @@ actor Fixture: Transport {
                 #"{"kind":"assistant","seq":\#(i),"text":"\#(id.uppercased()) fixture entry \#(i)"}"#
             }.joined(separator: ",")
             body = #"{"entries":[\#(entries)],"hasOlder":\#(!archived)}"#
+        } else if path == "/api/agents/a/tasks" {
+            body = #"""
+            [{"id":1,"title":"Fixture active task","state":"open","assignedBy":"fixture","updated":"2026-01-01T10:00:00Z"},
+             {"id":2,"title":"Fixture waiting task","state":"waiting","waitingOn":{"agentId":"b","taskId":9},"assignedBy":"fixture","updated":"2026-01-01T10:00:00Z"},
+             {"id":3,"title":"Fixture completed task","state":"done","assignedBy":"fixture","updated":"2026-01-01T10:00:00Z"}]
+            """#
+        } else if path == "/api/agents/b/tasks" {
+            body = #"""
+            [{"id":9,"title":"Fixture dependency","state":"done","assignedBy":"fixture","updated":"2026-01-01T10:00:00Z","check":"fixture check","lastCheck":{"at":"2026-01-01T10:00:00Z","passed":true,"exitCode":0,"output":"fixture check output"}}]
+            """#
+        } else if path == "/api/agents/a/schedules" {
+            body = #"[{"id":1,"description":"Fixture schedule","created":"2026-01-01T10:00:00Z","nextRun":"2026-01-01T11:00:00Z","command":"fixture schedule"}]"#
+        } else if path == "/api/processes" || path == "/api/agents/a/processes" {
+            func process(_ id: Int, _ name: String, _ state: String) -> String {
+                #"{"id":\#(id),"agentId":"a","agentName":"Standalone Alpha","name":"\#(name)","state":"\#(state)","pid":100,"started":"2026-01-01T10:00:00Z","command":"fixture worker","workingDirectory":"/fixture"}"#
+            }
+            let marker = ProcessInfo.processInfo.environment["MARTEN_FIXTURE_EXIT_MARKER"]
+            let exited = marker.map { FileManager.default.fileExists(atPath: $0) } ?? false
+            var rows = [process(1, "Fixture transitioning worker", exited ? "exited" : "running"),
+                        process(2, "Fixture exited worker", "exited")]
+            if path == "/api/processes" || url.query == "includeStopped=true" {
+                rows.append(process(3, "Fixture stopped worker", "stopped"))
+            }
+            if path == "/api/processes" { rows.append(process(4, "Fixture global worker", "running")) }
+            body = "[\(rows.joined(separator: ","))]"
+        } else if path == "/api/agents/a/processes/1/log" {
+            return (Data("fixture retained process log".utf8), HTTPURLResponse(url: url, statusCode: 200,
+                    httpVersion: nil, headerFields: ["Content-Type": "text/plain"])!)
         }
         return (Data(body.utf8), HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!)
     }

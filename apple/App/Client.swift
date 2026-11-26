@@ -440,10 +440,11 @@ struct API: Sendable {
         return try await decode([AgentSchedule].self, call("GET", route(agent, "schedules")))
     }
 
-    func processes(_ agent: String? = nil) async throws -> [AgentProcess] {
+    func processes(_ agent: String? = nil, includeStopped: Bool = false) async throws -> [AgentProcess] {
         try requireBearer()
         let path = try agent.map { try route($0, "processes") } ?? "/api/processes"
-        return try await decode([AgentProcess].self, call("GET", path))
+        let query: [URLQueryItem] = agent != nil && includeStopped ? [.init(name: "includeStopped", value: "true")] : []
+        return try await decode([AgentProcess].self, call("GET", path, query: query))
     }
 
     func removeSchedule(_ agent: String, _ id: Int) async throws {

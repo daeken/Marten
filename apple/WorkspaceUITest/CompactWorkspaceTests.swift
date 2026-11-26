@@ -129,6 +129,108 @@ final class CompactWorkspaceTests: XCTestCase {
         attach(app, name: "Compact latest on re-entry")
     }
 
+    @MainActor func testOperationDisclosures() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        let marker = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: marker) }
+        app.launchEnvironment["MARTEN_FIXTURE_RESET"] = "1"
+        app.launchEnvironment["MARTEN_FIXTURE_EXIT_MARKER"] = marker.path
+        app.launch()
+        defer { app.terminate() }
+
+        func item(_ label: String) -> XCUIElement { app.staticTexts[label].firstMatch }
+        func show(_ element: XCUIElement, down: Bool = true, file: StaticString = #filePath, line: UInt = #line) {
+            XCTAssertTrue(element.waitForExistence(timeout: 10), app.debugDescription, file: file, line: line)
+            for _ in 0..<4 where !element.isHittable {
+                if down { app.swipeUp() } else { app.swipeDown() }
+            }
+            XCTAssertTrue(element.isHittable, app.debugDescription, file: file, line: line)
+        }
+        func tap(_ label: String, down: Bool = true, file: StaticString = #filePath, line: UInt = #line) {
+            let element = item(label)
+            show(element, down: down, file: file, line: line)
+            element.tap()
+        }
+        func back() { app.buttons["BackButton"].firstMatch.tap() }
+
+        XCTAssertTrue(app.navigationBars["Marten"].waitForExistence(timeout: 10))
+        let alpha = item("Standalone Alpha")
+        for _ in 0..<4 where !alpha.exists || !alpha.isHittable { app.swipeUp() }
+        tap("Standalone Alpha")
+        let actions = app.buttons["Agent Actions"].firstMatch
+        XCTAssertTrue(actions.waitForExistence(timeout: 10))
+        actions.tap()
+        app.buttons["Tasks & Schedules"].firstMatch.tap()
+        show(item("Agent Tasks (2 active, 1 done)"))
+        show(item("#1 · Fixture schedule"))
+        XCTAssertFalse(item("#1 Fixture active task").exists)
+        XCTAssertFalse(item("#3 Fixture completed task").exists)
+        tap("Agent Tasks (2 active, 1 done)", down: false)
+        show(item("#1 Fixture active task"))
+        show(item("Done (1)"))
+        XCTAssertFalse(item("#3 Fixture completed task").exists)
+        tap("Done (1)")
+        show(item("#3 Fixture completed task"))
+        tap("Waiting for Project Beta #9", down: false)
+        let dependency = item("#9 Fixture dependency")
+        XCTAssertTrue(dependency.waitForExistence(timeout: 10))
+        XCTAssertTrue(dependency.isHittable, app.debugDescription)
+        tap("Completion Check")
+        show(item("Passed"))
+        back()
+        back()
+        show(actions)
+        actions.tap()
+        app.buttons["Background Processes"].firstMatch.tap()
+
+        let running = item("Fixture transitioning worker")
+        let stopped = item("Fixture stopped worker")
+        let exited = item("Fixture exited worker")
+        show(item("Running processes (1)"))
+        show(item("Process history (2)"))
+        XCTAssertFalse(running.exists)
+        XCTAssertFalse(stopped.exists)
+        XCTAssertFalse(exited.exists)
+        tap("Running processes (1)")
+        show(running)
+        XCTAssertFalse(stopped.exists)
+        XCTAssertFalse(exited.exists)
+        try Data().write(to: marker)
+        show(item("Running processes (0)"))
+        show(item("No running processes."))
+        XCTAssertTrue(running.waitForNonExistence(timeout: 2))
+        XCTAssertFalse(stopped.exists)
+        tap("Process history (3)")
+        show(running)
+        let log = app.buttons["process-log-a-1"].firstMatch
+        show(log)
+        log.tap()
+        XCTAssertTrue(app.navigationBars["Process #1 Log"].waitForExistence(timeout: 5), app.debugDescription)
+        show(item("fixture retained process log"))
+        back()
+        show(stopped)
+        back()
+        back()
+
+        XCTAssertTrue(app.navigationBars["Marten"].waitForExistence(timeout: 5))
+        let background = item("Background Processes")
+        for _ in 0..<4 where !background.exists || !background.isHittable { app.swipeDown() }
+        tap("Background Processes", down: false)
+        let global = item("Fixture global worker")
+        show(item("Running processes (1)"))
+        show(item("Process history (3)"))
+        XCTAssertFalse(global.exists)
+        XCTAssertFalse(stopped.exists)
+        tap("Running processes (1)")
+        show(global)
+        XCTAssertFalse(stopped.exists)
+        tap("Process history (3)")
+        show(stopped)
+        XCTAssertTrue(item("MCP Servers").exists)
+        attach(app, name: "Global running processes and expanded history")
+    }
+
     @MainActor private func attach(_ app: XCUIApplication, name: String) {
         let evidence = XCTAttachment(screenshot: app.screenshot())
         evidence.name = name

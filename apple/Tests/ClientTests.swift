@@ -857,7 +857,8 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
         let running = #"{"agentId":"agent-1","agentName":"Fixture One","id":3,"name":"fixture","command":"fixture server","workingDirectory":"/fixture","pid":100,"started":"2026-01-01T10:00:00Z","logPath":"/fixture/private.log","state":"running"}"#
         let stopped = #"{"agentId":"agent-2","agentName":"Fixture Two","id":3,"name":"old","command":"fixture server","workingDirectory":"/fixture","pid":101,"started":"2026-01-01T09:00:00Z","stopped":"2026-01-01T10:00:00Z","state":"stopped"}"#
         let fixture = StubTransport([.init(200, tasks), .init(200, schedules), .init(200, "[\(running),\(stopped)]"),
-                                     .init(200, "[\(running)]"), .init(200), .init(200, stopped)])
+                                     .init(200, "[\(running)]"), .init(200, "[\(running),\(stopped)]"),
+                                     .init(200, "[\(running),\(stopped)]"), .init(200), .init(200, stopped)])
         let api = API(endpoint: endpoint, token: "fixture-bearer", transport: try TailnetTransport(endpoint: endpoint, transport: fixture))
         let taskList = try await api.tasks("agent-1")
         let task = try XCTUnwrap(taskList.first)
@@ -878,6 +879,10 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(scheduleList.last?.inProgress, true)
         let global = try await api.processes()
         let scoped = try await api.processes("agent-1")
+        let scopedHistory = try await api.processes("agent-2", includeStopped: true)
+        let globalHistory = try await api.processes(includeStopped: true)
+        XCTAssertEqual(ProcessGroups(scopedHistory).history.map(\.state), ["stopped"])
+        XCTAssertEqual(globalHistory.map(\.id), global.map(\.id))
         XCTAssertEqual(scoped.map(\.id), [.init(agent: "agent-1", number: 3)])
         XCTAssertEqual(Set(global.map(\.id)).count, 2)
         XCTAssertEqual(global.map(\.canStop), [true, false])
@@ -885,12 +890,47 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
         try await api.removeSchedule("agent-1", 1)
         try await api.stopProcess(try XCTUnwrap(scoped.first).id)
         let requests = await fixture.requests
-        XCTAssertEqual(requests.map(\.httpMethod), ["GET", "GET", "GET", "GET", "DELETE", "POST"])
+        XCTAssertEqual(requests.map(\.httpMethod), ["GET", "GET", "GET", "GET", "GET", "GET", "DELETE", "POST"])
         XCTAssertEqual(requests.compactMap { $0.url?.absoluteString }, [
             "/api/agents/agent-1/tasks", "/api/agents/agent-1/schedules", "/api/processes", "/api/agents/agent-1/processes",
+            "/api/agents/agent-2/processes?includeStopped=true", "/api/processes",
             "/api/agents/agent-1/schedules/1", "/api/agents/agent-1/processes/3/stop"
         ].map { endpoint.origin + $0 })
         XCTAssertTrue(requests.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-bearer" && $0.httpBody == nil })
+    }
+
+    func testTaskGroupsKeepAllActiveStatesSeparateFromDone() throws {
+        let items = ["open", "waiting", "blocked", "done", "unknown"].enumerated().map { id, state in
+            AgentTask(id: id, title: "Task", state: state, waitingOn: nil, reason: nil, assignedBy: "fixture",
+                      updated: "2026-01-01T10:00:00Z", check: nil, lastCheck: nil)
+        }
+        let groups = TaskGroups(items)
+        XCTAssertEqual(groups.active.map(\.state), ["open", "waiting", "blocked"])
+        XCTAssertEqual(groups.done.map(\.id), [3])
+        XCTAssertTrue(TaskGroups([]).active.isEmpty)
+        XCTAssertTrue(TaskGroups([]).done.isEmpty)
+    }
+
+    @MainActor func testProcessRefreshMovesTerminalRowsIntoHistory() async throws {
+        func process(_ id: Int, _ state: String) throws -> AgentProcess {
+            let json = #"{"agentId":"agent-1","agentName":"Fixture","id":\#(id),"name":"job","command":"job","workingDirectory":"/fixture","pid":100,"started":"2026-01-01T10:00:00Z","state":"\#(state)"}"#
+            return try JSONDecoder().decode(AgentProcess.self, from: Data(json.utf8))
+        }
+        let list = OperationList<AgentProcess>()
+        let running = try process(1, "running")
+        let stopped = try process(2, "stopped")
+        let unknown = try process(3, "starting")
+        let wrongCase = try process(4, "Running")
+        await list.refresh { [running, stopped, unknown, wrongCase] }
+        let before = ProcessGroups(try XCTUnwrap(list.items))
+        XCTAssertEqual(before.running.map(\.id), [running.id])
+        XCTAssertEqual(before.history.map(\.id), [stopped.id])
+        let exited = try process(1, "exited")
+        await list.refresh { [exited, stopped, unknown, wrongCase] }
+        let after = ProcessGroups(try XCTUnwrap(list.items))
+        XCTAssertTrue(after.running.isEmpty)
+        XCTAssertEqual(after.history.map(\.id), [running.id, stopped.id])
+        XCTAssertEqual(after.history.map(\.canStop), [true, false])
     }
 
     func testProcessLogUsesBoundedPlainTextAndRejectsUnsafeRequests() async throws {
