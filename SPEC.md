@@ -205,10 +205,10 @@ The UI is how Sera watches and steers the system, so it has to show everything t
 **Shows**
 
 - Every message between agents, and messages from orchestrators to Sera.
-- Each agent's task list, with blocked tasks and their reasons, in a height-capped panel that scrolls separately from the conversation.
+- The web conversation header has an initially collapsed **Agent Tasks** disclosure with active and done counts. Open, waiting and blocked tasks (with their reasons and dependencies) stay in the main list; completed tasks are retained under a nested, initially collapsed **Done** disclosure. The header's task and process area is height-capped and scrolls separately from the conversation.
 - Each agent's schedules in a separate height-capped, scrollable panel.
 - An abandoned runspace, and an agent whose nudges have stopped.
-- Background processes, and which agent owns each.
+- Detached background processes are separate from agent tasks and schedules. The web conversation header (for an agent with process records) and the global **Background processes** screen have initially collapsed **Running processes** and **Process history** disclosures, each with a count. Running shows only `state=running` and refreshes on process events and periodically to catch natural exits. Exited and stopped rows move to history, with their logs retained; only running rows offer Stop. Live logs stop tailing when closed, when their disclosure or view closes, or when their row leaves Running.
 - Each project's memory, with its history and who changed each line.
 - A sidebar with individually collapsible project rosters; collapsing does not change the open conversation. The browser remembers the collapsed projects. Provider sign-in and global pause controls are under a normally closed Settings disclosure.
 

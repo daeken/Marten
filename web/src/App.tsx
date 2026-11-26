@@ -1,7 +1,8 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { AgentMessage, AgentSummary, Api, Backend, BackgroundProcess, BackupStatus, Entry, NotebookCell, OutsideClient, McpServer, Project, ProjectMemory, Schedule, ScriptToolInfo, SeraMessage, ServerEvent, Status_, TaskItem, takeToken, TranscriptPage, transcriptPageSize } from './api';
+import { AgentMessage, AgentSummary, Api, Backend, BackupStatus, Entry, NotebookCell, OutsideClient, McpServer, Project, ProjectMemory, Schedule, ScriptToolInfo, SeraMessage, ServerEvent, Status_, TaskItem, takeToken, TranscriptPage, transcriptPageSize } from './api';
+import { ProcessPanels } from './ProcessPanels';
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh'];
 
@@ -147,6 +148,7 @@ export function App() {
       // A reconnect may be to a fresh process; its attempt ids start over.
       setStatus(s => s && { ...s, agents: s.agents.map(a => ({ ...a, modelCall: null })) });
       setStreaming({});
+      setTick(t => t + 1);
       refresh();
       if (selectedRef.current) loadTranscript(selectedRef.current);
     });
@@ -176,7 +178,7 @@ export function App() {
     main = <div className="empty">Start a chat or a project to begin.</div>;
 
   const select = (id: string) => { setSelected(id); setNavOpen(false); };
-  const title = agent?.name ?? (selected === 'inbox' ? 'Inbox' : selected === 'messages' ? 'Messages' : selected === 'processes' ? 'Processes'
+  const title = agent?.name ?? (selected === 'inbox' ? 'Inbox' : selected === 'messages' ? 'Messages' : selected === 'processes' ? 'Background processes'
     : selected?.startsWith('memory:') ? 'Memory' : selected === 'new:project' ? 'New project' : 'Marten');
   return (
     <div className={`shell ${navOpen ? 'nav-open' : ''}`}>
@@ -290,7 +292,7 @@ function Sidebar({ api, status, selected, onSelect, onChange }: {
           <span className="name">Messages</span>
         </button>
         <button className={`agent inbox ${selected === 'processes' ? 'active' : ''}`} onClick={() => onSelect('processes')}>
-          <span className="name">Processes</span>
+          <span className="name">Background processes</span>
         </button>
         <div className="row">
           <span className="muted small">Projects</span>
@@ -416,7 +418,11 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
     }
   };
   const [tasks, setTasks] = useState<TaskItem[]>([]);
-  useEffect(() => { api.tasks(agent.id).then(setTasks).catch(() => setTasks([])); }, [api, agent.id, tick]);
+  useEffect(() => {
+    let active = true;
+    api.tasks(agent.id).then(rows => { if (active) setTasks(rows); }).catch(() => {});
+    return () => { active = false; };
+  }, [api, agent.id, tick]);
   const [questions, setQuestions] = useState<SeraMessage[]>([]);
   useEffect(() => {
     let active = true;
@@ -430,8 +436,6 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
     return () => { active = false; };
   }, [api, agent.id, tick]);
   const updateQuestion = (answer: SeraMessage) => setQuestions(current => current.map(q => q.id === answer.id ? answer : q));
-  const [procs, setProcs] = useState<BackgroundProcess[]>([]);
-  useEffect(() => { api.agentProcesses(agent.id).then(setProcs).catch(() => setProcs([])); }, [api, agent.id, tick]);
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   useEffect(() => { api.schedules(agent.id).then(setSchedules).catch(() => setSchedules([])); }, [api, agent.id, tick]);
   const parent = agents.find(a => a.id === agent.parentId);
@@ -509,70 +513,54 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
 
   return (
     <div className="agent-view">
-      <header className="agent-head">
-        <div>
-          <div className="title">
-            {project && <span className="crumb">{project.name} / </span>}
-            {agent.name}
-            {agent.closed && <span className="tag">closed</span>}
-            {agent.pausedEffective && <span className="tag">paused</span>}
+      <header className="conversation-header">
+        <div className="agent-head">
+          <div>
+            <div className="title">
+              {project && <span className="crumb">{project.name} / </span>}
+              {agent.name}
+              {agent.closed && <span className="tag">closed</span>}
+              {agent.pausedEffective && <span className="tag">paused</span>}
+            </div>
+            <div className="muted small">
+              {agent.worktree ?? agent.workingDirectory}
+              {parent && <> · reports to <button className="link small" onClick={() => onSelect(parent.id)}>{parent.name}</button></>}
+            </div>
           </div>
-          <div className="muted small">
-            {agent.worktree ?? agent.workingDirectory}
-            {parent && <> · reports to <button className="link small" onClick={() => onSelect(parent.id)}>{parent.name}</button></>}
+          <div className="head-right">
+            <div className="pickers">
+              <select title="Model for this agent" value={agent.model ?? ''} onChange={e => api.setAgentSettings(agent.id, e.target.value || null, agent.effort ?? null).then(onChange)}>
+                <option value="">{defaultModel ? `Default (${defaultModel})` : 'Default model'}</option>
+                {[...new Set([...(agent.model ? [agent.model] : []), ...models])].map(m => <option key={m} value={m}>{m}</option>)}
+              </select>
+              <select title="Reasoning effort for this agent" value={agent.effort ?? ''} onChange={e => api.setAgentSettings(agent.id, agent.model ?? null, e.target.value || null).then(onChange)}>
+                <option value="">{defaultEffort ? `Default (${defaultEffort})` : 'Default effort'}</option>
+                {EFFORTS.map(x => <option key={x} value={x}>{x}</option>)}
+              </select>
+            </div>
+            <div className="head-actions">
+              <button className="small" disabled={resetting || busy || agent.pausedEffective || agent.status === 'paused'}
+                title="Start a new model context without deleting the transcript" onClick={startFreshContext}>Start fresh context</button>
+              <button className={`small ${showNotebook ? 'on' : ''}`} onClick={() => setShowNotebook(v => !v)}
+                title="Every PowerShell run with its $State in and out; re-run or export as a Jupyter notebook">{showNotebook ? 'Transcript' : 'Notebook'}</button>
+              <button className="small" onClick={() => api.closeAgent(agent.id, !agent.closed).then(onChange)}
+                title={agent.closed ? 'Reopen this agent' : 'Close this agent: it keeps its history, stops its processes and schedules, and wakes again when messaged'}>{agent.closed ? 'Reopen' : 'Close'}</button>
+              <button className="small" onClick={() => api.pauseAgent(agent.id, !agent.paused).then(onChange)}
+                title={agent.paused ? 'Resume this agent' : 'Hold this agent before its next model call'}>{agent.paused ? '▶ Resume' : '⏸ Pause'}</button>
+            </div>
+            <div className={`state ${agent.status}`}>{statusLabel[agent.status]}{agent.statusDetail ? ` · ${agent.statusDetail}` : ''}{agent.retryAt && ` · Next retry at ${new Date(agent.retryAt).toLocaleTimeString()}`}</div>
+            {agent.modelCall && <div className="small muted">
+              {agent.modelCall.kind === 'compaction' ? 'Context compaction' : 'Model reply'} · {agent.modelCall.model} · started {new Date(agent.modelCall.startedAt).toLocaleTimeString()}
+              {agent.modelCall.endedAt ? ` · ${agent.modelCall.outcome} at ${new Date(agent.modelCall.endedAt).toLocaleTimeString()}` : ' · in flight'}
+            </div>}
           </div>
         </div>
-        <div className="head-right">
-          <div className="pickers">
-            <select title="Model for this agent" value={agent.model ?? ''} onChange={e => api.setAgentSettings(agent.id, e.target.value || null, agent.effort ?? null).then(onChange)}>
-              <option value="">{defaultModel ? `Default (${defaultModel})` : 'Default model'}</option>
-              {[...new Set([...(agent.model ? [agent.model] : []), ...models])].map(m => <option key={m} value={m}>{m}</option>)}
-            </select>
-            <select title="Reasoning effort for this agent" value={agent.effort ?? ''} onChange={e => api.setAgentSettings(agent.id, agent.model ?? null, e.target.value || null).then(onChange)}>
-              <option value="">{defaultEffort ? `Default (${defaultEffort})` : 'Default effort'}</option>
-              {EFFORTS.map(x => <option key={x} value={x}>{x}</option>)}
-            </select>
-          </div>
-          <div className="head-actions">
-            <button className="small" disabled={resetting || busy || agent.pausedEffective || agent.status === 'paused'}
-              title="Start a new model context without deleting the transcript" onClick={startFreshContext}>Start fresh context</button>
-            <button className={`small ${showNotebook ? 'on' : ''}`} onClick={() => setShowNotebook(v => !v)}
-              title="Every PowerShell run with its $State in and out; re-run or export as a Jupyter notebook">{showNotebook ? 'Transcript' : 'Notebook'}</button>
-            <button className="small" onClick={() => api.closeAgent(agent.id, !agent.closed).then(onChange)}
-              title={agent.closed ? 'Reopen this agent' : 'Close this agent: it keeps its history, stops its processes and schedules, and wakes again when messaged'}>{agent.closed ? 'Reopen' : 'Close'}</button>
-            <button className="small" onClick={() => api.pauseAgent(agent.id, !agent.paused).then(onChange)}
-              title={agent.paused ? 'Resume this agent' : 'Hold this agent before its next model call'}>{agent.paused ? '▶ Resume' : '⏸ Pause'}</button>
-          </div>
-          <div className={`state ${agent.status}`}>{statusLabel[agent.status]}{agent.statusDetail ? ` · ${agent.statusDetail}` : ''}{agent.retryAt && ` · Next retry at ${new Date(agent.retryAt).toLocaleTimeString()}`}</div>
-          {agent.modelCall && <div className="small muted">
-            {agent.modelCall.kind === 'compaction' ? 'Context compaction' : 'Model reply'} · {agent.modelCall.model} · started {new Date(agent.modelCall.startedAt).toLocaleTimeString()}
-            {agent.modelCall.endedAt ? ` · ${agent.modelCall.outcome} at ${new Date(agent.modelCall.endedAt).toLocaleTimeString()}` : ' · in flight'}
-          </div>}
+        <div className="agent-work" role="region" aria-label="Agent tasks and processes" tabIndex={0}>
+          {tasks.length > 0 && <AgentTasks tasks={tasks} agents={agents} onSelect={onSelect} />}
+          <ProcessPanels api={api} agentId={agent.id} tick={tick} onSelect={onSelect} />
         </div>
       </header>
       {resetError && <div className="banner" role="alert">Could not start fresh context: {resetError}</div>}
-      {tasks.length > 0 && (
-        <div className="tasks task-list" role="region" aria-label="Agent tasks" tabIndex={0}>
-          {tasks.map(t => (
-            <span key={t.id} className={`task ${t.state}`} title={[t.reason, t.check && `Done when \`${t.check}\` passes`, t.lastCheck && `Last check ${formatWhen(t.lastCheck.at)}: ${t.lastCheck.passed ? 'passed' : 'failed'}\n${t.lastCheck.output.slice(-1500)}`].filter(Boolean).join('\n\n')}>
-              <span className="task-state">{t.state}</span> #{t.id} {t.title}
-              {t.waitingOn ? <> · waiting for <button className="link small" onClick={() => onSelect(t.waitingOn!.agentId)}>{agents.find(a => a.id === t.waitingOn!.agentId)?.name ?? t.waitingOn.agentId} #{t.waitingOn.taskId}</button></> : t.reason && t.state !== 'open' ? ` · ${t.reason}` : ''}
-              {t.check && <span className={`check ${t.lastCheck ? (t.lastCheck.passed ? 'pass' : 'fail') : ''}`}>{t.lastCheck ? (t.lastCheck.passed ? '✓' : '✗') : '◇'} check</span>}
-            </span>
-          ))}
-        </div>
-      )}
-      {procs.length > 0 && (
-        <div className="tasks processes">
-          {procs.map(p => (
-            <span key={p.id} className={`task proc ${p.state}`} title={`${p.command}\n${p.workingDirectory}\nLog: ${p.logPath}`}>
-              <span className="task-state">{p.state}</span> #{p.id} {p.name} <span className="muted">pid {p.pid}</span>
-              <button className="link small" onClick={() => onSelect('processes')}>log</button>
-              <button className="link small" title="Stop it and everything it spawned" onClick={() => api.stopProcess(agent.id, p.id)}>stop</button>
-            </span>
-          ))}
-        </div>
-      )}
       {schedules.length > 0 && (
         <div className="tasks schedules task-list" role="region" aria-label="Scheduled tasks" tabIndex={0}>
           {schedules.map(s => (
@@ -1007,21 +995,31 @@ function BackupsPanel({ api, tick }: { api: Api; tick: number }) {
   );
 }
 
+function AgentTasks({ tasks, agents, onSelect }: { tasks: TaskItem[]; agents: AgentSummary[]; onSelect: (id: string) => void }) {
+  const active = tasks.filter(t => t.state !== 'done');
+  const done = tasks.filter(t => t.state === 'done');
+  const pill = (t: TaskItem) => (
+    <span key={t.id} className={`task ${t.state}`} title={[t.reason, t.check && `Done when \`${t.check}\` passes`, t.lastCheck && `Last check ${formatWhen(t.lastCheck.at)}: ${t.lastCheck.passed ? 'passed' : 'failed'}\n${t.lastCheck.output.slice(-1500)}`].filter(Boolean).join('\n\n')}>
+      <span className="task-state">{t.state}</span> #{t.id} {t.title}
+      {t.waitingOn ? <> · waiting for <button className="link small" onClick={() => onSelect(t.waitingOn!.agentId)}>{agents.find(a => a.id === t.waitingOn!.agentId)?.name ?? t.waitingOn.agentId} #{t.waitingOn.taskId}</button></> : t.reason && t.state !== 'open' ? ` · ${t.reason}` : ''}
+      {t.check && <span className={`check ${t.lastCheck ? (t.lastCheck.passed ? 'pass' : 'fail') : ''}`}>{t.lastCheck ? (t.lastCheck.passed ? '✓' : '✗') : '◇'} check</span>}
+    </span>
+  );
+  return (
+    <details className="agent-tasks">
+      <summary>Agent Tasks ({active.length} active, {done.length} done)</summary>
+      <div className="agent-task-body">
+        <div className="task-pills">{active.length ? active.map(pill) : <span className="muted small">No active tasks.</span>}</div>
+        <details className="done-tasks">
+          <summary>Done ({done.length})</summary>
+          <div className="task-pills">{done.length ? done.map(pill) : <span className="muted small">No completed tasks.</span>}</div>
+        </details>
+      </div>
+    </details>
+  );
+}
+
 function ProcessesView({ api, tick, onSelect }: { api: Api; tick: number; onSelect: (id: string) => void }) {
-  const [procs, setProcs] = useState<BackgroundProcess[]>([]);
-  const [open, setOpen] = useState<string | null>(null);
-  const [log, setLog] = useState('');
-  const [showStopped, setShowStopped] = useState(false);
-  useEffect(() => { api.processes().then(setProcs).catch(() => setProcs([])); }, [api, tick]);
-  useEffect(() => {
-    if (!open) return;
-    const [agentId, n] = open.split('#');
-    const load = () => api.processLog(agentId, Number(n)).then(setLog);
-    load();
-    const timer = setInterval(load, 2000);
-    return () => clearInterval(timer);
-  }, [api, open]);
-  const shown = procs.filter(p => showStopped || p.state !== 'stopped');
   return (
     <div className="page">
       <div className="doc wide">
@@ -1029,28 +1027,7 @@ function ProcessesView({ api, tick, onSelect }: { api: Api; tick: number; onSele
         <BackupsPanel api={api} tick={tick} />
         <ClientsPanel api={api} tick={tick} />
         <h2>Background processes</h2>
-        <label className="small muted"><input type="checkbox" checked={showStopped} onChange={e => setShowStopped(e.target.checked)} /> Show stopped</label>
-        {shown.length === 0 && <div className="muted">Nothing running. Agents start long-lived work like dev servers with process_start.</div>}
-        {shown.map(p => {
-          const key = `${p.agentId}#${p.id}`;
-          return (
-            <div key={key} className="inbox-item">
-              <div className="row">
-                <div>
-                  <span className={`dot ${p.state === 'running' ? 'running' : p.state === 'exited' ? 'error' : 'idle'}`} />{' '}
-                  <strong>{p.name}</strong> <span className="muted small">pid {p.pid} · {p.state} · started {time(p.started)} · by </span>
-                  <button className="link small" onClick={() => onSelect(p.agentId)}>{p.agentName}</button>
-                </div>
-                <div>
-                  <button className="link small" onClick={() => setOpen(open === key ? null : key)}>{open === key ? 'Hide log' : 'Log'}</button>
-                  {p.state !== 'stopped' && <button className="link small" onClick={() => api.stopProcess(p.agentId, p.id).then(() => api.processes().then(setProcs))}>Stop</button>}
-                </div>
-              </div>
-              <div className="small muted"><code>{p.command}</code> in {p.workingDirectory}</div>
-              {open === key && <pre className="output log-tail">{log || '(empty)'}</pre>}
-            </div>
-          );
-        })}
+        <ProcessPanels api={api} tick={tick} onSelect={onSelect} />
       </div>
     </div>
   );
