@@ -1,0 +1,35 @@
+name: SidebarFixture
+options:
+  deploymentTarget:
+    iOS: '18.1'
+settings:
+  base:
+    SWIFT_VERSION: '6.0'
+    TARGETED_DEVICE_FAMILY: '1'
+targets:
+  SidebarFixture:
+    type: application
+    platform: iOS
+    sources: [App]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.marten.workspace.fixture
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+  SidebarFixtureUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [UITests]
+    dependencies:
+      - target: SidebarFixture
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.marten.workspace.fixture.tests
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  SidebarFixture:
+    build:
+      targets:
+        SidebarFixture: all
+    test:
+      targets: [SidebarFixtureUITests]
