@@ -135,6 +135,9 @@ struct WorkspaceView: View {
         sidebarLink(.processes(nil)) {
             Label("Background Processes", systemImage: "terminal")
         }
+        if directory.hasClosedChats {
+            Toggle("Show Closed Conversations", isOn: $showClosedChats)
+        }
         }
         Section("Projects") {
             sidebarLink(.createProject) { Label("New Project", systemImage: "folder.badge.plus") }
@@ -149,9 +152,6 @@ struct WorkspaceView: View {
         }
         Section("Standalone") {
             sidebarLink(.createChat) { Label("New Chat", systemImage: "plus.bubble") }
-            if directory.hasClosedChats {
-                Toggle("Show Closed Conversations", isOn: $showClosedChats)
-            }
             if status == nil && statusError == nil { ProgressView("Loading conversations…") }
             if status != nil && directory.standalone.isEmpty { Text("No standalone conversations.").foregroundStyle(.secondary) }
             ForEach(directory.standalone) { agentRow($0) }
