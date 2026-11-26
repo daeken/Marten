@@ -1,0 +1,33 @@
+name: SidebarFixture
+options:
+  deploymentTarget:
+    macOS: '14.0'
+settings:
+  base:
+    SWIFT_VERSION: '6.0'
+targets:
+  SidebarFixture:
+    type: application
+    platform: macOS
+    sources: [App]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.marten.sidebar.fixture
+        GENERATE_INFOPLIST_FILE: YES
+  SidebarFixtureUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources: [UITests]
+    dependencies:
+      - target: SidebarFixture
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.marten.sidebar.fixture.tests
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  SidebarFixture:
+    build:
+      targets:
+        SidebarFixture: all
+    test:
+      targets: [SidebarFixtureUITests]

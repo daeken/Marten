@@ -10,6 +10,7 @@
 		05CEFCF0AE2C7E8586FB8B4C /* Client.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13EA62427E8B256347FC0858 /* Client.swift */; };
 		0DD8586BD854D7794F711551 /* Messages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52B596FD73CE03FE5810A97B /* Messages.swift */; };
 		128763D247C303D05E3A32BA /* TailnetTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33414BAA3A0D9F1A66305699 /* TailnetTransport.swift */; };
+		16ADAD197A45DB844E4602DE /* WorkspaceDirectoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CAF38E5F8A92A6FDD19E7DB /* WorkspaceDirectoryTests.swift */; };
 		19F85D0A0E280CE4FE035639 /* DeviceManagement.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58CB3FDADC5254866A0B3501 /* DeviceManagement.swift */; };
 		2260B0B328F51E58556275E6 /* LiveEvents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7309633EE2E13A8F89FB924A /* LiveEvents.swift */; };
 		23A905C67BC47A823017DA6C /* Client.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13EA62427E8B256347FC0858 /* Client.swift */; };
@@ -42,6 +43,7 @@
 		C8A1FCFC8656D59C6F56FE67 /* LiveEvents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7309633EE2E13A8F89FB924A /* LiveEvents.swift */; };
 		DCC1E2EA2D51545F3615A95E /* RichTranscript.swift in Sources */ = {isa = PBXBuildFile; fileRef = 504195C01908429552CF5CD0 /* RichTranscript.swift */; };
 		E652BC28F8B7DD4B7E6BCC15 /* Administration.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6F4F3E1FB9A5D1D84E9F2B2 /* Administration.swift */; };
+		E7AFE5B2B48A8E47536B6C39 /* WorkspaceDirectoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CAF38E5F8A92A6FDD19E7DB /* WorkspaceDirectoryTests.swift */; };
 		F210C421087F3C1FE5B7C0BB /* Pairing.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5610B571F9AB02248FE2F42 /* Pairing.swift */; };
 		F22070ABEBD1DC30FD6873CF /* Inbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26B0506E9E29AC99DFA612AE /* Inbox.swift */; };
 		F989CD325FF9F20E8726DC51 /* Providers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 097A46E1BF9D1439D8F4E1C1 /* Providers.swift */; };
@@ -75,6 +77,7 @@
 		26B0506E9E29AC99DFA612AE /* Inbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Inbox.swift; sourceTree = "<group>"; };
 		33414BAA3A0D9F1A66305699 /* TailnetTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TailnetTransport.swift; sourceTree = "<group>"; };
 		39B4F8B9ABCF38ED1999593C /* Operations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Operations.swift; sourceTree = "<group>"; };
+		3CAF38E5F8A92A6FDD19E7DB /* WorkspaceDirectoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceDirectoryTests.swift; sourceTree = "<group>"; };
 		504195C01908429552CF5CD0 /* RichTranscript.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RichTranscript.swift; sourceTree = "<group>"; };
 		52B596FD73CE03FE5810A97B /* Messages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Messages.swift; sourceTree = "<group>"; };
 		58CB3FDADC5254866A0B3501 /* DeviceManagement.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceManagement.swift; sourceTree = "<group>"; };
@@ -109,6 +112,7 @@
 			isa = PBXGroup;
 			children = (
 				7E70246C11BAE9986E883FFA /* ClientTests.swift */,
+				3CAF38E5F8A92A6FDD19E7DB /* WorkspaceDirectoryTests.swift */,
 			);
 			path = Tests;
 			sourceTree = "<group>";
@@ -292,6 +296,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				B8BA10C79AF174A4F7C9A1AB /* ClientTests.swift in Sources */,
+				E7AFE5B2B48A8E47536B6C39 /* WorkspaceDirectoryTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -326,6 +331,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				480D9F1EE4B0159774C13F1E /* ClientTests.swift in Sources */,
+				16ADAD197A45DB844E4602DE /* WorkspaceDirectoryTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
