@@ -363,8 +363,8 @@ object ProcessSummary(Agent a, BackgroundProcess p) => new {
 	state = p.Stopped != null ? "stopped" : Posix.Alive(p.Pid) ? "running" : "exited",
 };
 api.MapGet("/processes", () => manager.Agents.SelectMany(a => a.Processes.OrderByDescending(p => p.Started).Select(p => ProcessSummary(a, p))));
-api.MapGet("/agents/{id}/processes", (string id) =>
-	manager.Get(id) is { } a ? Results.Ok(a.Processes.Where(p => p.Stopped == null).Select(p => ProcessSummary(a, p))) : Results.NotFound());
+api.MapGet("/agents/{id}/processes", (string id, bool? includeStopped) =>
+	manager.Get(id) is { } a ? Results.Ok(a.Processes.Where(p => includeStopped == true || p.Stopped == null).Select(p => ProcessSummary(a, p))) : Results.NotFound());
 api.MapPost("/agents/{id}/processes/{n:int}/stop", async (string id, int n) =>
 	manager.Get(id) is { } a && await a.StopProcess(n) is { } p ? Results.Ok(ProcessSummary(a, p)) : Results.NotFound());
 api.MapGet("/agents/{id}/processes/{n:int}/log", (string id, int n, int? lines) => {
