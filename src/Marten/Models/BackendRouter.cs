@@ -21,9 +21,13 @@ public sealed class BackendRouter(IModelBackend primary, IReadOnlyList<(IModelBa
 	}
 
 	/// <summary>Checks the backend's daily budget first, and records the call's usage after.</summary>
-	public async Task<ModelResult> CompleteAsync(ModelRequest req, Action<string> onTextDelta, CancellationToken ct) {
+	public Task<ModelResult> CompleteAsync(ModelRequest req, Action<string> onTextDelta, CancellationToken ct) =>
+		CompleteAsync(req, onTextDelta, ct, null);
+
+	internal async Task<ModelResult> CompleteAsync(ModelRequest req, Action<string> onTextDelta, CancellationToken ct, Action<IModelBackend, string>? onDispatch) {
 		var (backend, model) = Resolve(req.Model);
 		ledger?.CheckBudget(backend.Provider, backend.Provider);
+		onDispatch?.Invoke(backend, model);
 		var result = await backend.CompleteAsync(req with { Model = model }, onTextDelta, ct);
 		ledger?.Record(backend.Provider, model, result.Usage);
 		return result;

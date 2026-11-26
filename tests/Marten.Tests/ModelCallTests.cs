@@ -82,6 +82,8 @@ public class ModelCallTests {
 		Assert.Equal(failure == "exhaustion" ? [2d, 4, 8, 16, 32] : Array.Empty<double>(), backoffs.ToArray());
 		Assert.Equal(attempts * 2, calls.Count);
 		foreach(var pair in calls.Chunk(2)) AssertAttempt(pair, ModelCallOutcome.Failed);
+		var lastFailure = JsonIO.Deserialize<ModelAttemptFailure>(File.ReadAllText(Path.Combine(worker.Directory, Agent.ModelFailureFile)))!;
+		Assert.Equal(attempts, lastFailure.AttemptId);
 	}
 
 	[Theory]
@@ -124,11 +126,12 @@ public class ModelCallTests {
 		Assert.Equal(agent.ModelCall!.Id, record.AttemptId);
 		Assert.Equal(agent.ModelCall.StartedAt, record.StartedAt);
 		Assert.Equal(agent.ModelCall.EndedAt, record.EndedAt);
-		Assert.Equal("openai", record.Backend);
+		Assert.NotEqual(Guid.Empty, record.RunId);
+		Assert.Equal(ModelFailureBackend.Unknown, record.Backend);
+		Assert.Null(record.Model);
 		Assert.Equal(phase, record.TransportPhase);
 		Assert.False(record.AttemptCancelled || record.TurnCancelled || record.ShuttingDown);
-		Assert.Contains(record.Causes, c => c.Kind == nameof(ObjectDisposedException));
-		Assert.Equal(phase == ModelTransportPhase.ReadingBody, record.Causes.Any(c => c.SslStreamDisposed && c.SslStreamFrame));
+		Assert.Equal(phase == ModelTransportPhase.ReadingBody ? ["other", nameof(ObjectDisposedException)] : [nameof(ObjectDisposedException)], record.Causes);
 		Assert.Single(agent.Transcript.Entries, e => e.Kind == EntryKind.Error);
 	}
 
@@ -136,6 +139,32 @@ public class ModelCallTests {
 		protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
 			phase == ModelTransportPhase.AwaitingHeaders ? throw new ObjectDisposedException(marker)
 				: Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(tls) });
+	}
+
+	[Theory]
+	[InlineData("gpt-6.2-sol", "gpt-6.2-sol")]
+	[InlineData("not-allowlisted-test-model", null)]
+	public async Task RecordsOnlyAllowlistedModelFromActualRoutedBackend(string model, string? expected) {
+		using var dir = new TempDir();
+		using var tls = new SslStream(new MemoryStream());
+		using var http = ModelHttp.CreateClient(new FailureHandler(ModelTransportPhase.AwaitingHeaders, tls, "test-disposal"),
+			TimeSpan.FromSeconds(5), () => TimeSpan.FromSeconds(5));
+		var home = new Home(dir.File("home"));
+		JsonIO.Save(Path.Combine(home.Secrets, "openai.json"), new ChatGptAuth.Credentials {
+			HostId = "test", AccessToken = "test-token", ExpiresAt = DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeMilliseconds(),
+		});
+		var openai = new ResponsesBackend(new ChatGptAuth(home, http), http);
+		var router = new BackendRouter(new Backend((_, _) => throw new Exception("wrong route")), [(openai, [])]);
+		var manager = new AgentManager(home, new Config { Model = $"openai/{model}" }, router, new ToolRegistry());
+		var agent = manager.CreateChat("routed failure", dir.Path);
+		Wake(agent);
+		await Wait.Until(() => agent.Status == AgentStatus.Error);
+		var json = File.ReadAllText(Path.Combine(agent.Directory, Agent.ModelFailureFile));
+		var failure = JsonIO.Deserialize<ModelAttemptFailure>(json)!;
+		Assert.Equal(ModelFailureBackend.OpenAI, failure.Backend);
+		Assert.Equal(expected, failure.Model);
+		Assert.Equal(ModelTransportPhase.AwaitingHeaders, failure.TransportPhase);
+		Assert.DoesNotContain("test-token", json);
 	}
 
 	[Fact]
@@ -147,6 +176,7 @@ public class ModelCallTests {
 		Wake(agent);
 		await Wait.Until(() => agent.Status == AgentStatus.Error);
 		Assert.Equal(new ObjectDisposedException("original").Message, agent.StatusDetail);
+		Assert.False(File.Exists(Path.Combine(agent.Directory, Agent.ModelFailureFile + ".tmp")));
 	}
 
 	static Task<ModelResult> MissingModel() {
@@ -220,7 +250,7 @@ public class ModelCallTests {
 		Assert.NotNull(failure);
 		Assert.Equal(attempts[1][1].Call.Id, failure.AttemptId);
 		Assert.Equal(ModelCallKind.Compaction, failure.Kind);
-		Assert.Equal(nameof(RateLimitedException), Assert.Single(failure.Causes).Kind);
+		Assert.Equal(nameof(RateLimitedException), Assert.Single(failure.Causes));
 		Assert.Empty(manager.AgentMessages(agent.Info.Id));
 	}
 

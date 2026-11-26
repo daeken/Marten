@@ -53,7 +53,7 @@ Named slots are opt-in and shared by all agents. In a PowerShell command, run `$
 
 If DNS or connection establishment fails, the agent shows **Waiting for network** with the reason and next retry time. The turn releases its slots while waiting and retries the failed model operation without rerunning tools. Retries use jittered exponential backoff (up to five minutes) and are staggered across agents. A continuous outage can wait up to 45 minutes before the turn reports an error to its parent. Pause holds dispatch; Stop, Close, and shutdown cancel the wait. Header/stream timeouts, server errors, and quota still have their separate retry policies.
 
-For failure triage, read `agents/<id>/model-attempt-failure.json` in the Marten home. This redacted file keeps just the latest observed failed completion attempt across restarts, even if a retry later succeeded. It includes timing, backend, cancellation and shutdown flags, and typed failure details. The HTTP phase is included only when known; its absence does not imply a transport failure. No prompts, credentials, or exception messages are included in this file.
+For failure triage, read `agents/<id>/model-attempt-failure.json` in the Marten home. This redacted file keeps just the latest observed failed completion attempt across restarts, even if a retry later succeeded. It includes timing, a run and attempt ID, an observed backend and allowlisted model when known, cancellation and shutdown flags, and allowlisted exception categories. The HTTP phase is included only when known; its absence does not imply a transport failure. No prompts, credentials, or exception messages are included in this file.
 
 ## Policy refusals
 
