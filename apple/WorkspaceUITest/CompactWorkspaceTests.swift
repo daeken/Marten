@@ -187,6 +187,10 @@ final class CompactWorkspaceTests: XCTestCase {
         let running = item("Fixture transitioning worker")
         let stopped = item("Fixture stopped worker")
         let exited = item("Fixture exited worker")
+        func scrollToStopped() {
+            for _ in 0..<4 where !stopped.exists || !stopped.isHittable { app.swipeUp() }
+            show(stopped)
+        }
         show(item("Running processes (1)"))
         show(item("Process history (2)"))
         XCTAssertFalse(running.exists)
@@ -209,7 +213,7 @@ final class CompactWorkspaceTests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Process #1 Log"].waitForExistence(timeout: 5), app.debugDescription)
         show(item("fixture retained process log"))
         back()
-        show(stopped)
+        scrollToStopped()
         back()
         back()
 
@@ -218,6 +222,7 @@ final class CompactWorkspaceTests: XCTestCase {
         for _ in 0..<4 where !background.exists || !background.isHittable { app.swipeDown() }
         tap("Background Processes", down: false)
         let global = item("Fixture global worker")
+        show(item("MCP Servers"))
         show(item("Running processes (1)"))
         show(item("Process history (3)"))
         XCTAssertFalse(global.exists)
@@ -226,8 +231,7 @@ final class CompactWorkspaceTests: XCTestCase {
         show(global)
         XCTAssertFalse(stopped.exists)
         tap("Process history (3)")
-        show(stopped)
-        XCTAssertTrue(item("MCP Servers").exists)
+        scrollToStopped()
         attach(app, name: "Global running processes and expanded history")
     }
 

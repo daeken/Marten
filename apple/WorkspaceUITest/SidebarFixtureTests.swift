@@ -1,6 +1,81 @@
 import XCTest
 
 final class SidebarFixtureTests: XCTestCase {
+    @MainActor func testOperationDisclosures() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchEnvironment["MARTEN_FIXTURE_RESET"] = "1"
+        app.launch()
+        defer { app.terminate() }
+
+        let window = app.windows.firstMatch
+        func matches(_ label: String) -> NSPredicate { NSPredicate(format: "label == %@ OR value == %@", label, label) }
+        func text(_ label: String) -> XCUIElement { window.staticTexts.matching(matches(label)).firstMatch }
+        func contains(_ label: String) -> Bool { window.debugDescription.contains(label) }
+        func expect(_ label: String, file: StaticString = #filePath, line: UInt = #line) {
+            let predicate = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in contains(label) }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [predicate], timeout: 8), .completed, window.debugDescription, file: file, line: line)
+        }
+        func expand(_ label: String, at index: Int = 0) {
+            expect(label)
+            let detail = window.outlines.element(boundBy: 1)
+            let triangle = detail.disclosureTriangles.element(boundBy: index)
+            show(triangle)
+            triangle.click()
+        }
+        func show(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+            XCTAssertTrue(element.waitForExistence(timeout: 10), app.windows.firstMatch.debugDescription, file: file, line: line)
+        }
+        func clickText(_ label: String) {
+            let element = text(label)
+            show(element)
+            element.click()
+        }
+        func openConversationLink(_ title: String) {
+            let link = window.buttons.matching(matches(title)).firstMatch
+            let transcript = window.scrollViews.element(boundBy: 1)
+            show(transcript)
+            for _ in 0..<8 where !link.exists || !link.isHittable {
+                transcript.scroll(byDeltaX: 0, deltaY: 2_000)
+            }
+            show(link)
+            link.click()
+        }
+
+        clickText("Standalone Alpha")
+        openConversationLink("Tasks & Schedules")
+        expect("Agent Tasks (2 active, 1 done)")
+        expect("Fixture sched")
+        XCTAssertFalse(contains("Fixture active"))
+        expand("Agent Tasks (2 active, 1 done)")
+        expect("Fixture active")
+        expect("Done (1)")
+        XCTAssertFalse(contains("Fixture compl"))
+        expand("Done (1)", at: 1)
+        expect("Fixture compl")
+
+        // Switching split-view roots resets the detail navigation stack.
+        clickText("Inbox")
+        clickText("Standalone Alpha")
+        openConversationLink("Background Processes")
+        expect("Running processes (1)")
+        expect("Process history (2)")
+        XCTAssertFalse(contains("Fixture transition"))
+        XCTAssertFalse(contains("Fixture exited worker"))
+        expand("Running processes (1)")
+        expect("Fixture transition")
+        XCTAssertFalse(contains("Fixture exited worker"))
+
+        let globalProcesses = window.outlines.firstMatch.staticTexts.matching(matches("Background Processes")).firstMatch
+        show(globalProcesses)
+        globalProcesses.click()
+        expect("MCP Servers")
+        expect("Running processes (2)")
+        expect("Process history (2)")
+        XCTAssertFalse(contains("Fixture global worker"))
+        XCTAssertFalse(contains("Fixture exited worker"))
+    }
+
     @MainActor func testSidebarAndTimeline() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
