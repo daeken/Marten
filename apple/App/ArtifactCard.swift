@@ -92,6 +92,8 @@ struct ArtifactCard: View {
         defer { if request == item { request = nil } }
         do {
             let payload = try await api.artifact(ref, agent: agent, purpose: item.purpose)
+            try Task.checkCancellation()
+            guard request == item, item.route == route, available else { return }
             let content: ArtifactPreview?
             if case .download = payload { content = nil }
             else { content = try await ArtifactPreview.decode(payload) }

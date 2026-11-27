@@ -445,7 +445,7 @@ struct API: Sendable {
         try Task.checkCancellation()
         let path = try route(agent, "artifacts/\(ref.id)" + (purpose == .download ? "" : "/preview"))
         do {
-            let (data, reply) = try await response("GET", path, accept: purpose.mime, limit: purpose.limit, artifactWire: wire)
+            let (data, reply) = try await response("GET", path, accept: purpose.mime, limit: min(ref.bytes, purpose.limit), artifactWire: wire)
             try Task.checkCancellation()
             return try ArtifactPayload(data: data, reply: reply, reference: ref, purpose: purpose)
         } catch ClientError.response(404) {

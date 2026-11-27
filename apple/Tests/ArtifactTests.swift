@@ -41,11 +41,12 @@ final class ArtifactTests: XCTestCase, @unchecked Sendable {
         let after = await raw.requests.count
         XCTAssertEqual(after, 1)
 
-        let text = ArtifactFixture(data: Data("abc".utf8), mime: "text/plain; charset=utf-8", extra: ["X-Marten-Preview-Truncated": "1"])
+        let prefix = String(repeating: "a", count: ArtifactPurpose.text.limit)
+        let text = ArtifactFixture(data: Data(prefix.utf8), mime: "text/plain; charset=utf-8", extra: ["X-Marten-Preview-Truncated": "1"])
         let preview = API(endpoint: endpoint, token: "test", transport: try TailnetTransport(endpoint: endpoint, transport: text))
-        let payload = try await preview.artifact(ref(), agent: "agent-A", purpose: .text)
+        let payload = try await preview.artifact(ref(bytes: prefix.utf8.count + 1), agent: "agent-A", purpose: .text)
         guard case .text(let content, let truncated) = payload else { return XCTFail() }
-        XCTAssertEqual(content, "abc")
+        XCTAssertEqual(content, prefix)
         XCTAssertTrue(truncated)
         let request = await text.requests.first
         XCTAssertEqual(request?.url?.path, "/api/agents/agent-A/artifacts/\(id)/preview")
@@ -55,9 +56,19 @@ final class ArtifactTests: XCTestCase, @unchecked Sendable {
         let png = try XCTUnwrap(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jP1sAAAAASUVORK5CYII="))
         let reply = try XCTUnwrap(HTTPURLResponse(url: URL(string: "https://node.tail-test.ts.net")!, statusCode: 200,
                                                 httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "image/png", "Content-Disposition": "attachment"]))
-        XCTAssertNoThrow(try ArtifactPayload(data: png, reply: reply, reference: ref(kind: "png"), purpose: .png))
-        XCTAssertThrowsError(try ArtifactPayload(data: Data(png.dropLast()), reply: reply, reference: ref(kind: "png"), purpose: .png))
-        XCTAssertThrowsError(try ArtifactPayload(data: png + Data([0]), reply: reply, reference: ref(kind: "png"), purpose: .png))
+        func validate(_ data: Data, advertised: Int? = nil) throws {
+            _ = try ArtifactPayload(data: data, reply: reply, reference: ref(kind: "png", bytes: advertised ?? data.count), purpose: .png)
+        }
+        XCTAssertNoThrow(try validate(png))
+        XCTAssertThrowsError(try validate(png, advertised: png.count + 1))
+        XCTAssertThrowsError(try validate(Data(png.dropLast())))
+        XCTAssertThrowsError(try validate(png + Data([0])))
+        var oversize = png
+        oversize.replaceSubrange(16..<20, with: [0, 0, 0x20, 1])
+        XCTAssertThrowsError(try validate(oversize))
+        var metadata = png
+        metadata.insert(contentsOf: [0, 0, 0, 0, 116, 69, 88, 116, 0, 0, 0, 0], at: 33)
+        XCTAssertThrowsError(try validate(metadata))
     }
 
     func testOldPickerCallbacksDoNotMutateReplacementExport() {
