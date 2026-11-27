@@ -47,12 +47,13 @@ func main() {
 }
 
 func run(args []string) int {
-	// Reject builds that leave SDK log upload enabled. Never use interactive
-	// login or a credential inherited from a Tailscale install/environment.
-	if len(args) != 4 || buildfeatures.HasLogTail || !hostname.MatchString(args[0]) ||
+	// Reject builds with SDK log upload or the unused PeerAPI host TCP
+	// listener. Neither is needed to serve the native HTTPS listener.
+	if len(args) != 4 || buildfeatures.HasLogTail || buildfeatures.HasPeerAPIServer || !hostname.MatchString(args[0]) ||
 		!filepath.IsAbs(args[2]) || !filepath.IsAbs(args[3]) {
 		return badConfig
 	}
+	// Never use interactive login or credentials inherited from a Tailscale install.
 	for _, v := range os.Environ() {
 		name, _, _ := strings.Cut(v, "=")
 		if strings.HasPrefix(name, "TS_") || strings.HasPrefix(name, "TSNET_") {
