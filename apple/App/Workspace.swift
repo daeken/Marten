@@ -42,6 +42,16 @@ struct WorkspaceView: View {
     private var controlsReady: Bool { networkActive && controls.ready(routeID) }
     private var target: WorkspaceControls.Target { .init(route: routeID, page: path.last) }
 
+    #if os(iOS)
+    private var macFiles: MacFilesClient? {
+        guard networkActive, endPairedSession != nil, controls.loadedRoute == routeID,
+              statusError == nil, status?.macFiles == true else { return nil }
+        return MacFilesClient(api: api)
+    }
+
+    private var macFilesRoute: UUID? { macFiles == nil ? nil : routeID }
+    #endif
+
     private var showsMessages: Bool { path.last == .messages }
     private var showsInboxData: Bool {
         switch path.last {
@@ -123,6 +133,13 @@ struct WorkspaceView: View {
                 }
             }
         }
+        #if os(iOS)
+        if macFiles != nil {
+            Section("Mac") {
+                sidebarLink(.macFiles(.roots)) { Label("Mac Files", systemImage: "externaldrive") }
+            }
+        }
+        #endif
         Section("Workspace") {
         if endPairedSession != nil {
             sidebarLink(.devices) { Label("Paired Devices", systemImage: "qrcode") }
@@ -186,6 +203,15 @@ struct WorkspaceView: View {
 
     @ViewBuilder private func detail(_ destination: WorkspaceDestination) -> some View {
         switch destination {
+        #if os(iOS)
+        case .macFiles(let page):
+            if let macFiles, let endPairedSession {
+                MacFilesView(service: macFiles, page: page, route: routeID,
+                             active: path.last == destination, endSession: endPairedSession).id(routeID)
+            } else {
+                ContentUnavailableView("Mac Files Unavailable", systemImage: "externaldrive")
+            }
+        #endif
         case .inbox:
             InboxView(inbox: inbox, projects: status?.projects ?? [], agents: status?.agents ?? [],
                       active: networkActive, refresh: refreshInbox, answer: submitAnswer)
@@ -330,6 +356,11 @@ struct WorkspaceView: View {
                 }.padding(8).background(.regularMaterial)
             }
         }
+        #if os(iOS)
+        .onChange(of: macFilesRoute) { _, _ in
+            if case .macFiles? = path.first { path = [] }
+        }
+        #endif
         .onChange(of: target) { cancelLifecycle() }
         .onChange(of: networkActive) { if !networkActive { cancelLifecycle() } }
         .onDisappear { cancelLifecycle() }
@@ -438,6 +469,9 @@ struct WorkspaceView: View {
 }
 
 enum WorkspaceDestination: Hashable {
+    #if os(iOS)
+    case macFiles(MacFilesView.Page)
+    #endif
     case inbox, messages, providers, devices, agent(String)
     case createChat, createProject, memory(String)
     case settings(String)

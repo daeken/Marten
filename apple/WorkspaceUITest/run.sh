@@ -31,6 +31,14 @@ if [[ ${MARTEN_FIXTURE_DUO_TRANSITION:-0} == 1 ]]; then
     cp "$here/DuoTransitionTests.swift" "$scratch/UITests/"
     selection=(-only-testing:SidebarFixtureUITests/DuoTransitionTests)
 fi
+if [[ ${MARTEN_FIXTURE_FILES_ONLY:-0} == 1 ]]; then
+    if [[ $# != 1 || ${MARTEN_FIXTURE_DUO_TRANSITION:-0} == 1 ]]; then
+        echo 'Mac Files fixture requires one dedicated iOS simulator and no Duo transition selection.' >&2
+        exit 2
+    fi
+    cp "$here/MacFilesTests.swift" "$scratch/UITests/"
+    selection=(-only-testing:SidebarFixtureUITests/MacFilesTests)
+fi
 result=()
 if [[ -n ${MARTEN_FIXTURE_RESULT:-} ]]; then
     result=(-resultBundlePath "$MARTEN_FIXTURE_RESULT")

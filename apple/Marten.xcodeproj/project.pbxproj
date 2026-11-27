@@ -21,15 +21,20 @@
 		4840A29B12CC0D8540F1CA87 /* Operations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39B4F8B9ABCF38ED1999593C /* Operations.swift */; };
 		535526E45D48C8AF3A4E4BE8 /* Notebook.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FD59F4AC4F947B3F9984D71 /* Notebook.swift */; };
 		56322259F308F31D088F6C3E /* Timeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC4FEA88791C90D0E5315E22 /* Timeline.swift */; };
+		57EB0608785F35DC87979AC1 /* MacFilesClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDD65E7627DA951B12A8E87B /* MacFilesClientTests.swift */; };
 		584D35746983352495BAF27B /* Connections.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FF64C6D95C2712DCD5F203E /* Connections.swift */; };
+		6B9BD6D2BF04B34DB186223F /* MacFilesClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC862E87B10CE81FFBAE792B /* MacFilesClient.swift */; };
 		724A3E0D31209666CEC2652A /* Workspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7425BD4A106FDE0A234CC40 /* Workspace.swift */; };
 		7E0874FE16B8DF9701CF346C /* Administration.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6F4F3E1FB9A5D1D84E9F2B2 /* Administration.swift */; };
+		89629B40BBF0279264AD73B1 /* MacFilesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70A91BC391F2645547F6984F /* MacFilesView.swift */; };
 		8A7216E96170AAC9585274FE /* Timeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC4FEA88791C90D0E5315E22 /* Timeline.swift */; };
+		8B996FA5B0DC21F5ABF82762 /* MacFilesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70A91BC391F2645547F6984F /* MacFilesView.swift */; };
 		8D082F773F5DC8EBC960FD85 /* PendingComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F95E9B9905C7A988F2572DF /* PendingComposer.swift */; };
 		9282BA520E0A8129370A981A /* Inbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26B0506E9E29AC99DFA612AE /* Inbox.swift */; };
 		996D45C0A3EF134A28D2E99E /* Notebook.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FD59F4AC4F947B3F9984D71 /* Notebook.swift */; };
 		9A6E50D3F978ADB551378FB8 /* Workspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7425BD4A106FDE0A234CC40 /* Workspace.swift */; };
 		9CA6F859AB2A9024A2BEB3B9 /* RichTranscript.swift in Sources */ = {isa = PBXBuildFile; fileRef = 504195C01908429552CF5CD0 /* RichTranscript.swift */; };
+		A1762059ABADD82F461489C4 /* MacFilesClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDD65E7627DA951B12A8E87B /* MacFilesClientTests.swift */; };
 		A40C0E19F2A5703B53062ECF /* Operations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39B4F8B9ABCF38ED1999593C /* Operations.swift */; };
 		A765567A3860572D2F0B8BC5 /* MartenApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F88394C5EA8FF4E026A7BC1 /* MartenApp.swift */; };
 		AFA7F7F72F06595FF42F4EED /* AgentSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D5B77581012182B5CE21966 /* AgentSettings.swift */; };
@@ -44,6 +49,7 @@
 		C7D347CF686AF60C04E7A2C2 /* Providers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 097A46E1BF9D1439D8F4E1C1 /* Providers.swift */; };
 		C8A1FCFC8656D59C6F56FE67 /* LiveEvents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7309633EE2E13A8F89FB924A /* LiveEvents.swift */; };
 		DCC1E2EA2D51545F3615A95E /* RichTranscript.swift in Sources */ = {isa = PBXBuildFile; fileRef = 504195C01908429552CF5CD0 /* RichTranscript.swift */; };
+		E53CDC284DB07FA35DB1AEF2 /* MacFilesClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC862E87B10CE81FFBAE792B /* MacFilesClient.swift */; };
 		E652BC28F8B7DD4B7E6BCC15 /* Administration.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6F4F3E1FB9A5D1D84E9F2B2 /* Administration.swift */; };
 		E7AFE5B2B48A8E47536B6C39 /* WorkspaceDirectoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CAF38E5F8A92A6FDD19E7DB /* WorkspaceDirectoryTests.swift */; };
 		F210C421087F3C1FE5B7C0BB /* Pairing.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5610B571F9AB02248FE2F42 /* Pairing.swift */; };
@@ -83,6 +89,7 @@
 		504195C01908429552CF5CD0 /* RichTranscript.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RichTranscript.swift; sourceTree = "<group>"; };
 		52B596FD73CE03FE5810A97B /* Messages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Messages.swift; sourceTree = "<group>"; };
 		58CB3FDADC5254866A0B3501 /* DeviceManagement.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceManagement.swift; sourceTree = "<group>"; };
+		70A91BC391F2645547F6984F /* MacFilesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacFilesView.swift; sourceTree = "<group>"; };
 		710EAFECDF40B85F91489538 /* ProjectWorkspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectWorkspace.swift; sourceTree = "<group>"; };
 		7309633EE2E13A8F89FB924A /* LiveEvents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveEvents.swift; sourceTree = "<group>"; };
 		7436B48633AF38F0900290F1 /* MartenTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MartenTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -93,10 +100,12 @@
 		A6F4F3E1FB9A5D1D84E9F2B2 /* Administration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Administration.swift; sourceTree = "<group>"; };
 		AB79A7B841A9E892C17E98A7 /* QR.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QR.swift; sourceTree = "<group>"; };
 		AC4FEA88791C90D0E5315E22 /* Timeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Timeline.swift; sourceTree = "<group>"; };
+		AC862E87B10CE81FFBAE792B /* MacFilesClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacFilesClient.swift; sourceTree = "<group>"; };
 		BEE2674A0B2F5E7B72841D3F /* Marten.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Marten.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		C5610B571F9AB02248FE2F42 /* Pairing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Pairing.swift; sourceTree = "<group>"; };
 		C7AEF0AE07D2853578E1F294 /* Marten.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Marten.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		D7425BD4A106FDE0A234CC40 /* Workspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Workspace.swift; sourceTree = "<group>"; };
+		DDD65E7627DA951B12A8E87B /* MacFilesClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacFilesClientTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -115,6 +124,7 @@
 			isa = PBXGroup;
 			children = (
 				7E70246C11BAE9986E883FFA /* ClientTests.swift */,
+				DDD65E7627DA951B12A8E87B /* MacFilesClientTests.swift */,
 				3CAF38E5F8A92A6FDD19E7DB /* WorkspaceDirectoryTests.swift */,
 			);
 			path = Tests;
@@ -130,6 +140,8 @@
 				58CB3FDADC5254866A0B3501 /* DeviceManagement.swift */,
 				26B0506E9E29AC99DFA612AE /* Inbox.swift */,
 				7309633EE2E13A8F89FB924A /* LiveEvents.swift */,
+				AC862E87B10CE81FFBAE792B /* MacFilesClient.swift */,
+				70A91BC391F2645547F6984F /* MacFilesView.swift */,
 				9F88394C5EA8FF4E026A7BC1 /* MartenApp.swift */,
 				52B596FD73CE03FE5810A97B /* Messages.swift */,
 				1FD59F4AC4F947B3F9984D71 /* Notebook.swift */,
@@ -280,6 +292,8 @@
 				B800BF68FCA150DB57CDB962 /* DeviceManagement.swift in Sources */,
 				F22070ABEBD1DC30FD6873CF /* Inbox.swift in Sources */,
 				C8A1FCFC8656D59C6F56FE67 /* LiveEvents.swift in Sources */,
+				6B9BD6D2BF04B34DB186223F /* MacFilesClient.swift in Sources */,
+				89629B40BBF0279264AD73B1 /* MacFilesView.swift in Sources */,
 				B4EE9191BCBFE52AB6BD866A /* MartenApp.swift in Sources */,
 				C478B7E89E54ECBB840212F7 /* Messages.swift in Sources */,
 				535526E45D48C8AF3A4E4BE8 /* Notebook.swift in Sources */,
@@ -301,6 +315,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				B8BA10C79AF174A4F7C9A1AB /* ClientTests.swift in Sources */,
+				57EB0608785F35DC87979AC1 /* MacFilesClientTests.swift in Sources */,
 				E7AFE5B2B48A8E47536B6C39 /* WorkspaceDirectoryTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -316,6 +331,8 @@
 				19F85D0A0E280CE4FE035639 /* DeviceManagement.swift in Sources */,
 				9282BA520E0A8129370A981A /* Inbox.swift in Sources */,
 				2260B0B328F51E58556275E6 /* LiveEvents.swift in Sources */,
+				E53CDC284DB07FA35DB1AEF2 /* MacFilesClient.swift in Sources */,
+				8B996FA5B0DC21F5ABF82762 /* MacFilesView.swift in Sources */,
 				A765567A3860572D2F0B8BC5 /* MartenApp.swift in Sources */,
 				0DD8586BD854D7794F711551 /* Messages.swift in Sources */,
 				996D45C0A3EF134A28D2E99E /* Notebook.swift in Sources */,
@@ -337,6 +354,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				480D9F1EE4B0159774C13F1E /* ClientTests.swift in Sources */,
+				A1762059ABADD82F461489C4 /* MacFilesClientTests.swift in Sources */,
 				16ADAD197A45DB844E4602DE /* WorkspaceDirectoryTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

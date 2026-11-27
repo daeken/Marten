@@ -5,6 +5,10 @@ import UniformTypeIdentifiers
 struct MartenApp: App {
     @State private var connections = Connections()
 
+    #if os(iOS)
+    init() { MacFilesStagedCopy.sweep() }
+    #endif
+
     var body: some Scene {
         WindowGroup {
             RootView(connections: connections)

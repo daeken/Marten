@@ -133,7 +133,7 @@ protocol EventTransport: Transport {
     func events(for request: URLRequest) throws -> EventStream
 }
 
-struct URLSessionTransport: EventTransport {
+struct URLSessionTransport: EventTransport, MacFilesTransport {
     private let session: URLSession
     private let notebookSession: URLSession
     static let notebookRerunTimeout: TimeInterval = 180
@@ -202,6 +202,14 @@ struct URLSessionTransport: EventTransport {
         return (data, http)
     }
 
+    func readMacFiles(_ request: URLRequest, policy: MacFilesRead, staging: URL?) async throws -> Data {
+        let (bytes, response) = try await session.bytes(for: request)
+        defer { bytes.task.cancel() }
+        guard let http = response as? HTTPURLResponse else { throw ClientError.malformed }
+        try policy.check(http, for: request)
+        return try await policy.consume(bytes, staging: staging)
+    }
+
     func invalidate() {
         session.invalidateAndCancel()
         notebookSession.invalidateAndCancel()
@@ -232,6 +240,7 @@ struct ServerStatus: Decodable, Sendable {
     let inbox: Int?
     let openQuestions: Int?
     let paused: Bool?
+    let macFiles: Bool?
 }
 
 struct Project: Decodable, Identifiable, Sendable {
