@@ -482,6 +482,48 @@ private func agentStatus(_ agent: Agent) -> String {
     return agent.pausedEffective ? "Paused" : agent.status.replacingOccurrences(of: "_", with: " ").capitalized
 }
 
+// The route task owns the automatic GET. An event wakes the loop, not a new
+// SwiftUI task that would cancel the in-flight response when its id changes.
+@MainActor final class TranscriptRefreshLoop {
+    private var current: (id: UUID, wake: AsyncStream<Void>.Continuation)?
+
+    func hint() { current?.wake.yield(()) }
+
+    func run(waitForPoll: @escaping @Sendable () async throws -> Void = { try await Task.sleep(for: .seconds(4)) },
+             refresh: @MainActor () async -> Void) async {
+        guard !Task.isCancelled else { return }
+        let id = UUID()
+        let (signals, wake) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        current = (id, wake)
+        defer {
+            wake.finish()
+            if current?.id == id { current = nil }
+        }
+        while !Task.isCancelled && current?.id == id {
+            await refresh()
+            guard !Task.isCancelled, current?.id == id else { return }
+            guard await Self.waitForHintOrPoll(signals, wake: wake, waitForPoll: waitForPoll) else { return }
+        }
+    }
+
+    private nonisolated static func waitForHintOrPoll(_ signals: AsyncStream<Void>,
+                                                     wake: AsyncStream<Void>.Continuation,
+                                                     waitForPoll: @escaping @Sendable () async throws -> Void) async -> Bool {
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+                do {
+                    try await waitForPoll()
+                    try Task.checkCancellation()
+                    wake.yield(())
+                } catch { }
+            }
+            defer { group.cancelAll() }
+            var iterator = signals.makeAsyncIterator()
+            return await iterator.next() != nil
+        }
+    }
+}
+
 private struct ConversationView: View {
     let api: API
     let agent: Agent
@@ -495,7 +537,8 @@ private struct ConversationView: View {
     let activity: LiveActivity?
     let controlsReady: Bool
     let lifecycle: (LifecycleAction) -> Void
-    @State private var checking = false
+    @State private var refreshLoop = TranscriptRefreshLoop()
+    @State private var latestRequest: (id: UUID, route: UUID)?
     @State private var pageRequest: UUID?
     @State private var pageError: String?
     @State private var mutating = false
@@ -559,14 +602,17 @@ private struct ConversationView: View {
         }
         .task(id: RefreshRoute(id: routeID, active: networkActive)) {
             guard networkActive else { return }
-            while !Task.isCancelled {
-                await refresh()
-                try? await Task.sleep(for: .seconds(4))
-            }
+            await refreshLoop.run { await refresh() }
         }
-        .task(id: eventHint) { await refresh() }
-        .onChange(of: routeID) { pageRequest = nil; showInterrupt = false }
-        .onChange(of: networkActive) { if !networkActive { pageRequest = nil; showInterrupt = false } }
+        .onChange(of: eventHint) { if networkActive { refreshLoop.hint() } }
+        .onChange(of: routeID) {
+            if latestRequest?.route != routeID { latestRequest = nil }
+            pageRequest = nil
+            showInterrupt = false
+        }
+        .onChange(of: networkActive) {
+            if !networkActive { latestRequest = nil; pageRequest = nil; showInterrupt = false }
+        }
     }
 
     @ViewBuilder private var initialTranscriptState: some View {
@@ -576,7 +622,7 @@ private struct ConversationView: View {
             } description: {
                 Text(refreshError)
             } actions: {
-                Button("Retry Transcript") { Task { await refresh() } }.disabled(!networkActive || checking)
+                Button("Retry Transcript") { Task { await refresh() } }.disabled(!networkActive || latestRequest?.route == routeID)
             }
         } else {
             ProgressView("Loading transcript…").frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -741,16 +787,18 @@ private struct ConversationView: View {
     }
 
     @MainActor private func refresh() async {
-        guard networkActive, !Task.isCancelled, !checking else { return }
-        checking = true
-        defer { checking = false }
+        guard networkActive, !Task.isCancelled, latestRequest?.route != routeID else { return }
+        let id = UUID()
+        latestRequest = (id, routeID)
+        defer { if latestRequest?.id == id { latestRequest = nil } }
         do {
             let page = try await api.transcript(agent.id)
-            try Task.checkCancellation()
+            guard !Task.isCancelled, latestRequest?.id == id else { return }
             timeline.updateLatest(page)
             refreshError = nil
         } catch is CancellationError {
         } catch {
+            guard !Task.isCancelled, latestRequest?.id == id else { return }
             refreshError = safeMessage(error)
         }
     }
