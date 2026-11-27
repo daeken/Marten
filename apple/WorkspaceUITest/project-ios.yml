@@ -15,6 +15,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.marten.workspace.fixture
         GENERATE_INFOPLIST_FILE: YES
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: '$(inherited) MARTEN_FILES_PROTOTYPE'
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
   SidebarFixtureUITests:
     type: bundle.ui-testing

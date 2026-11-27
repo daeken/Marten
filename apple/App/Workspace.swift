@@ -154,6 +154,11 @@ struct WorkspaceView: View {
             ForEach(directory.projects) { project in
                 DisclosureGroup(isExpanded: projectExpansion(project.id)) {
                     sidebarLink(.memory(project.id)) { Label("Memory", systemImage: "doc.text") }
+                    #if os(iOS) && MARTEN_FILES_PROTOTYPE
+                    if ProcessInfo.processInfo.environment["MARTEN_FIXTURE_FILES"] == "1", project.id == "p" {
+                        sidebarLink(.prototypeFiles(project.id, .roots)) { Label("Files", systemImage: "folder") }
+                    }
+                    #endif
                     ForEach(directory.members[project.id] ?? []) { agentRow($0) }
                 } label: {
                     Label(project.paused == true ? "\(project.name) · Paused" : project.name, systemImage: "folder")
@@ -213,6 +218,11 @@ struct WorkspaceView: View {
                     if let paused = project.paused, path.last == destination { lifecycle(.pauseProject(id, !paused)) }
                 }, inbox: inbox, answer: submitAnswer).id(routeID)
             } else { ContentUnavailableView("Project Unavailable", systemImage: "folder") }
+        #if os(iOS) && MARTEN_FILES_PROTOTYPE
+        case .prototypeFiles(let project, let page):
+            ProjectFilesPrototype(service: PrototypeFilesAPI(api: api, project: project), page: page,
+                                  route: routeID, active: networkActive && path.last == destination).id(routeID)
+        #endif
         case .createChat, .createProject:
             CreationView(project: destination == .createProject, ready: controlsReady && path.last == destination, busy: controls.busy,
                          statusError: statusError, submitChat: { name in
@@ -425,6 +435,9 @@ struct WorkspaceView: View {
 enum WorkspaceDestination: Hashable {
     case inbox, messages, providers, devices, agent(String)
     case createChat, createProject, memory(String)
+    #if os(iOS) && MARTEN_FILES_PROTOTYPE
+    case prototypeFiles(String, ProjectFilesPrototype.Page)
+    #endif
     case settings(String)
     case administration(AdministrationPage)
     case notebook(String), operations(String, task: Int?), processes(String?), processLog(AgentProcess.Key)
