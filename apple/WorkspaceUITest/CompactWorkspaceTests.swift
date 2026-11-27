@@ -2,6 +2,36 @@
 import XCTest
 
 final class CompactWorkspaceTests: XCTestCase {
+    @MainActor func testTouchComposerSendsMultilineDraftWithButton() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        let trace = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try Data().write(to: trace)
+        defer { try? FileManager.default.removeItem(at: trace) }
+        app.launchEnvironment["MARTEN_FIXTURE_TRACE"] = trace.path
+        app.launchEnvironment["MARTEN_FIXTURE_RESET"] = "1"
+        app.launch()
+        defer { app.terminate() }
+
+        XCTAssertTrue(app.navigationBars["Marten"].waitForExistence(timeout: 10))
+        let alpha = app.staticTexts["Standalone Alpha"].firstMatch
+        for _ in 0..<4 where !alpha.exists || !alpha.isHittable { app.swipeUp() }
+        XCTAssertTrue(alpha.waitForExistence(timeout: 10))
+        alpha.tap()
+        let draft = app.descendants(matching: .any)["messageDraft"].firstMatch
+        XCTAssertTrue(draft.waitForExistence(timeout: 10))
+        draft.tap()
+        draft.typeText("First\nSecond")
+        func sends() -> [String] {
+            ((try? String(contentsOf: trace, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init).filter { $0.hasPrefix("send ") }
+        }
+        XCTAssertTrue(sends().isEmpty)
+        app.buttons["Send Message"].firstMatch.tap()
+        let sent = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in !sends().isEmpty }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [sent], timeout: 8), .completed, "Draft: \(draft.value ?? "nil")")
+        XCTAssertEqual(sends(), [#"send queued "First\nSecond""#])
+    }
+
     @MainActor func testCompactWorkspace() throws {
         continueAfterFailure = false
         let app = XCUIApplication()

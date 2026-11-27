@@ -1,4 +1,7 @@
 import SwiftUI
+#if os(macOS)
+import AppKit
+#endif
 
 struct WorkspaceView: View {
     let api: API
@@ -448,6 +451,13 @@ struct WorkspaceDirectory {
             if let id = agent.projectId, projectIDs.contains(id) { members[id, default: []].append(agent) }
             else { standalone.append(agent) }
         }
+        for project in projects {
+            guard let id = project.orchestratorId, var rows = members[project.id],
+                  let index = rows.firstIndex(where: { $0.id == id }), index > 0 else { continue }
+            let orchestrator = rows.remove(at: index)
+            rows.insert(orchestrator, at: 0)
+            members[project.id] = rows
+        }
         self.members = members
         self.standalone = standalone
     }
@@ -659,10 +669,16 @@ private struct ConversationView: View {
                 .foregroundStyle(.red)
             }
             HStack(alignment: .bottom, spacing: 8) {
+                #if os(macOS)
+                MessageComposer(draft: $draft) { Task { await send() } }
+                    .background(.background, in: RoundedRectangle(cornerRadius: 6))
+                    .overlay { RoundedRectangle(cornerRadius: 6).strokeBorder(.quaternary).allowsHitTesting(false) }
+                #else
                 TextField("Message", text: $draft, axis: .vertical)
                     .lineLimit(1...5)
                     .textFieldStyle(.roundedBorder)
                     .accessibilityIdentifier("messageDraft")
+                #endif
                 Button {
                     Task { await send() }
                 } label: {
@@ -768,6 +784,69 @@ private struct ConversationView: View {
         }) { returnToLatest() }
     }
 }
+
+// Handle Return at the focused text control, before platform text bindings consume it.
+#if os(macOS)
+private struct MessageComposer: NSViewRepresentable {
+    @Binding var draft: String
+    var send: () -> Void
+
+    final class Editor: NSTextView, NSTextViewDelegate {
+        var change: (String) -> Void = { _ in }
+        var send: () -> Void = {}
+
+        override func keyDown(with event: NSEvent) {
+            // Enter on the numeric keypad follows Return. Leave IME confirmation and
+            // system shortcuts to the responder rather than submitting marked text.
+            let modifiers = event.modifierFlags.intersection([.shift, .command, .control, .option])
+            guard (event.keyCode == 36 || event.keyCode == 76), !hasMarkedText(),
+                  modifiers.isEmpty || modifiers == .shift else {
+                super.keyDown(with: event)
+                return
+            }
+            if modifiers == .shift { insertNewline(nil) }
+            else if !event.isARepeat { send() }
+        }
+
+        func textDidChange(_ notification: Notification) { change(string) }
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scroll = NSScrollView()
+        let editor = Editor(frame: .zero)
+        editor.delegate = editor
+        editor.isRichText = false
+        editor.isAutomaticQuoteSubstitutionEnabled = false
+        editor.isAutomaticDashSubstitutionEnabled = false
+        editor.drawsBackground = false
+        editor.font = .systemFont(ofSize: NSFont.systemFontSize)
+        editor.textContainerInset = NSSize(width: 4, height: 5)
+        editor.isVerticallyResizable = true
+        editor.autoresizingMask = [.width]
+        editor.textContainer?.widthTracksTextView = true
+        editor.setAccessibilityLabel("Message")
+        editor.setAccessibilityIdentifier("messageDraft")
+        scroll.documentView = editor
+        scroll.drawsBackground = false
+        return scroll
+    }
+
+    func updateNSView(_ scroll: NSScrollView, context: Context) {
+        guard let editor = scroll.documentView as? Editor else { return }
+        editor.change = { draft = $0 }
+        editor.send = send
+        if editor.string != draft, !editor.hasMarkedText() { editor.string = draft }
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView scroll: NSScrollView, context: Context) -> CGSize? {
+        guard let width = proposal.width, let editor = scroll.documentView as? Editor,
+              let font = editor.font else { return nil }
+        let height = (draft + " ").boundingRect(with: NSSize(width: max(1, width - 18), height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: [.font: font]).height
+        return CGSize(width: width, height: min(90, max(34, ceil(height) + 10)))
+    }
+}
+#endif
 
 private struct TranscriptAnchor: ViewModifier {
     let archived: Bool

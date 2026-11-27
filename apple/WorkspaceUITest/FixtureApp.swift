@@ -25,6 +25,11 @@ import SwiftUI
     }
 }
 
+private struct FixtureMessage: Decodable {
+    let text: String
+    let mode: String
+}
+
 actor Fixture: Transport {
     private var latestReads: [String: Int] = [:]
 
@@ -42,16 +47,28 @@ actor Fixture: Transport {
         if path == "/api/inbox" || path == "/api/messages" { try record(path) }
         var body = "[]"
         if path == "/api/status" {
+            #if os(macOS)
+            let leadID = #", "orchestratorId":"z""#
+            let lead = #"{"id":"z","name":"Zulu Lead","kind":"orchestrator","projectId":"p","status":"idle","paused":false,"pausedEffective":false},"#
+            #else
+            let leadID = ""
+            let lead = ""
+            #endif
             body = #"""
             {"paused":false,"inbox":5,"openQuestions":2,
-            "projects":[{"id":"p","name":"Fixture Project"},{"id":"q","name":"Second Project"}],"agents":[
+            "projects":[{"id":"p","name":"Fixture Project"\#(leadID)},{"id":"q","name":"Second Project"}],"agents":[
               {"id":"a","name":"Standalone Alpha","kind":"chat","status":"idle","paused":false,"pausedEffective":false},
               {"id":"b","name":"Project Beta","kind":"task","projectId":"p","status":"idle","paused":false,"pausedEffective":false},
+              \#(lead)
               {"id":"c","name":"Closed Gamma","kind":"chat","closed":true,"status":"idle","paused":false,"pausedEffective":false},
               {"id":"d","name":"Closed Project Task","kind":"task","projectId":"q","closed":true,"status":"idle","paused":false,"pausedEffective":false},
               {"id":"e","name":"Active Project Task","kind":"task","projectId":"q","status":"idle","paused":false,"pausedEffective":false}
             ]}
             """#
+        } else if request.httpMethod == "POST", path == "/api/agents/a/messages", let data = request.httpBody {
+            let message = try JSONDecoder().decode(FixtureMessage.self, from: data)
+            try record("send \(message.mode) \(message.text.debugDescription)")
+            body = "{}"
         } else if path.hasSuffix("/transcript") {
             let call = url.lastPathComponent
             let id = url.deletingLastPathComponent().lastPathComponent

@@ -1,6 +1,59 @@
 import XCTest
 
 final class SidebarFixtureTests: XCTestCase {
+    @MainActor func testProjectOrderAndComposerReturn() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        let trace = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try Data().write(to: trace)
+        defer { try? FileManager.default.removeItem(at: trace) }
+        app.launchEnvironment["MARTEN_FIXTURE_TRACE"] = trace.path
+        app.launchEnvironment["MARTEN_FIXTURE_RESET"] = "1"
+        app.launch()
+        defer { app.terminate() }
+
+        let lead = app.staticTexts["Zulu Lead"].firstMatch
+        let member = app.staticTexts["Project Beta"].firstMatch
+        XCTAssertTrue(lead.waitForExistence(timeout: 10))
+        XCTAssertTrue(member.waitForExistence(timeout: 10))
+        XCTAssertLessThan(lead.frame.minY, member.frame.minY)
+
+        let alpha = app.staticTexts["Standalone Alpha"].firstMatch
+        XCTAssertTrue(alpha.waitForExistence(timeout: 10))
+        alpha.click()
+        let draft = app.descendants(matching: .any)["messageDraft"].firstMatch
+        XCTAssertTrue(draft.waitForExistence(timeout: 10))
+        draft.click()
+        draft.typeKey(.return, modifierFlags: []) // Empty draft must not send.
+        draft.typeText("FirstXX")
+        draft.typeKey(.leftArrow, modifierFlags: .shift)
+        draft.typeKey(.leftArrow, modifierFlags: .shift)
+        draft.typeKey(.return, modifierFlags: .shift) // Replace XX, then continue typing.
+        draft.typeText("Second")
+
+        func sends() -> [String] {
+            ((try? String(contentsOf: trace, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init).filter { $0.hasPrefix("send ") }
+        }
+        XCTAssertTrue(sends().isEmpty)
+        draft.typeKey(.return, modifierFlags: [])
+        let sent = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in !sends().isEmpty }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [sent], timeout: 8), .completed, "Draft: \(draft.value ?? "nil")")
+        XCTAssertEqual(sends(), [#"send queued "First\nSecond""#])
+
+        draft.typeText("Button send")
+        app.buttons["Send Message"].firstMatch.click()
+        let clicked = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in sends().count >= 2 }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [clicked], timeout: 8), .completed)
+        let expected = [#"send queued "First\nSecond""#, #"send queued "Button send""#]
+        XCTAssertEqual(sends(), expected)
+
+        draft.typeText("Do not send")
+        let inbox = app.staticTexts["Inbox"].firstMatch
+        inbox.click()
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertEqual(sends(), expected)
+    }
+
     @MainActor func testOperationDisclosures() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
