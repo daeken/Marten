@@ -17,6 +17,9 @@ import SwiftUI
     let fixture = Fixture()
 
     init() {
+        #if os(iOS) && MARTEN_FILES_PROTOTYPE
+        sweepProjectFilePrototypeExports()
+        #endif
         // This app has its own bundle and preferences. Reset only on the
         // first launch of a test, not the relaunch that checks persistence.
         if ProcessInfo.processInfo.environment["MARTEN_FIXTURE_RESET"] == "1" {
@@ -41,9 +44,36 @@ actor Fixture: Transport {
         try file.write(contentsOf: Data("\(line)\n".utf8))
     }
 
+    #if os(iOS) && MARTEN_FILES_PROTOTYPE
+    private func fileReply(_ request: URLRequest, _ url: URL) throws -> (Data, HTTPURLResponse) {
+        let tail = url.path.replacingOccurrences(of: "/api/projects/p/files/", with: "")
+        guard request.httpMethod == "GET", request.value(forHTTPHeaderField: "Authorization") == "Bearer " + String(repeating: "a", count: 64),
+              url.host == "sidebar-fixture.example.ts.net", url.query == nil else { throw ClientError.unauthorized }
+        try record("files \(tail)")
+        let text = "# Fixture readme\nA private local file."
+        let binary = Data([0, 1, 2, 3])
+        var data = Data()
+        var mime = "application/json"
+        var status = 200
+        switch tail {
+        case "roots": data = Data(#"[{"id":"demo-root","label":"Demo checkout"}]"#.utf8)
+        case "entries/demo-root": data = Data(#"{"entries":[{"id":"docs","name":"docs","directory":true,"modified":"2026-01-01T00:00:00Z"}],"next":"demo-next"}"#.utf8)
+        case "entries/demo-next": data = Data(#"{"entries":[{"id":"binary","name":"sample.bin","directory":false,"bytes":4,"modified":"2026-01-01T00:00:00Z"}]}"#.utf8)
+        case "entries/docs": data = Data(#"{"entries":[{"id":"readme","name":"README.md","directory":false,"bytes":\#(text.utf8.count),"modified":"2026-01-01T00:00:00Z"}]}"#.utf8)
+        case "bytes/readme/text", "bytes/readme/share": data = Data(text.utf8); mime = "application/octet-stream"
+        case "bytes/binary/share": data = binary; mime = "application/octet-stream"
+        default: status = 404
+        }
+        return (data, HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: ["Content-Type": mime])!)
+    }
+    #endif
+
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let url = request.url!
         let path = url.path
+        #if os(iOS) && MARTEN_FILES_PROTOTYPE
+        if path.hasPrefix("/api/projects/p/files/") { return try fileReply(request, url) }
+        #endif
         if path == "/api/inbox" || path == "/api/messages" { try record(path) }
         let compactChrome = ProcessInfo.processInfo.environment["MARTEN_FIXTURE_COMPACT_CHROME"] == "1"
         var body = "[]"
