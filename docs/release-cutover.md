@@ -29,13 +29,20 @@ instance or run another deploy/start command alongside it.
    cat "$job/generation.json"
    ```
 
-3. Give a heads-up before launching the job: write a note to
+3. Check web dependencies before scheduling the job. If they are missing or
+   the lockfile changed, fetch `origin/main` and confirm it is still the exact
+   tested SHA. On tracked-clean `main` in the live checkout, fast-forward only
+   to that SHA, then run `npm ci` in `web/`. The helper builds against the
+   installed dependencies; it does not install them. If `origin/main` moved,
+   stop and verify the new release first.
+
+   Give a heads-up before launching the job: write a note to
    `~/marten-mailbox/to-openthedas/` following its README and message
    `client:openthedas`. No fixed waiting window is required. Submit the
    following command with **detached `process_start`** (substitute the actual
    paths and tested `sha`; shell variables from staging do not carry over).
-   Do not execute it
-   as an in-process PowerShell tool or wait for the result in a foreground task.
+   Do not execute it as an in-process PowerShell tool or wait for the result
+   in a foreground task.
 
    ```sh
    python3 -u "$job/cutover.py" release --job "$job" --checkout "$checkout" \
