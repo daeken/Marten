@@ -27,6 +27,14 @@ chmod 700 "$marten_home/secrets"
 )
 ```
 
+To cross-build for Linux amd64, run from `src/Marten.Tsnet` and stage the resulting binary on the Linux server (not on the build host):
+
+```sh
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -mod=readonly \
+  -tags 'ts_omit_logtail ts_omit_oauthkey ts_omit_identityfederation ts_omit_peerapiserver' \
+  -trimpath -o /tmp/marten-tsnet-linux-amd64 .
+```
+
 Use a secret-file editor or your normal secret-management workflow to create `$MARTEN_HOME/secrets/tailnet-auth-key` (owned by the Marten user, mode `0600`) containing only the device auth key. Do not put it in shell command arguments, environment variables, `config.json`, logs, or a pairing QR. Add the following to `config.json`, merging it with existing settings:
 
 ```json
