@@ -562,7 +562,7 @@ public sealed partial class Agent : IPowerShellOwner {
 		TakeViewedImages();
 		toolTurn.Value = slots.TurnToken;
 		try {
-			output = await manager.Tools.InvokeAsync(this, call.Name ?? "", call.Arguments, ct, Admit);
+			output = await manager.Tools.InvokeAsync(this, call.Name ?? "", call.Arguments, ct, Admit, deferJev: true);
 		} catch(OperationCanceledException) when(ct.IsCancellationRequested || slots.TurnToken.IsCancellationRequested || manager.Restart.IsStopping) {
 			throw;
 		} catch(Exception e) {
@@ -585,9 +585,8 @@ public sealed partial class Agent : IPowerShellOwner {
 					Artifacts = value.Artifacts,
 				});
 			}
-			// Accept under the turn gate without holding a settings lock across append/publication.
-			if(jev != null && !jev.IsCurrent()) output = JevPresentation.Withdrawn();
-			else if(jev != null && evidence is { } found && Visible()) output = jev.WithEvidence(output, found);
+			// Accept under the turn gate; once accepted, an operator change cannot recall this handoff.
+			if(jev != null) output = jev.Accept(ct, evidence != null && Visible() ? evidence : null);
 			slots.ThrowIfStopped(ct);
 			Publish(output);
 		}

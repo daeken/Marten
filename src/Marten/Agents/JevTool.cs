@@ -8,13 +8,20 @@ using Marten.Tools;
 namespace Marten.Agents;
 
 // Internal, non-serialized output metadata. Never pass this object to PowerShell or a model.
-internal sealed class JevPresentation(JevSettings settings, JevGrant grant, string? uncertainty, string question, long started) {
+internal sealed class JevPresentation(JevSettings settings, JevGrant grant, string? uncertainty, string question, long started, JevResult result) {
+	int consumed;
 	internal static ToolOutput Withdrawn() => ToolOutput.Error("Jev was disabled or its settings changed; result withheld. A request already sent may have been billed.");
 	internal bool IsCurrent() => settings.IsCurrent(grant);
-	internal ToolOutput WithEvidence(ToolOutput output, EvidenceResult evidence) {
-		var json = JsonNode.Parse(output.Text)!.AsObject();
-		json["evidence"] = JsonSerializer.SerializeToNode(Render(evidence));
-		return output with { Text = json.ToJsonString(), Jev = null };
+	internal ToolOutput Accept(CancellationToken ct, EvidenceResult? evidence = null) {
+		ct.ThrowIfCancellationRequested();
+		if(Interlocked.Exchange(ref consumed, 1) != 0) return ToolOutput.Error("Jev result was already handed off.");
+		// This check is the acceptance point, not an assertion about when later bytes are delivered.
+		if(!IsCurrent()) return Withdrawn();
+		ct.ThrowIfCancellationRequested();
+		object answer = result.Answer is JevChoiceAnswer choice ? new { choice = choice.Choice, confidence = choice.Confidence, probabilities = choice.Probabilities }
+			: new { probability_yes = ((JevNoulAnswer)result.Answer).ProbabilityYes };
+		return new(JsonSerializer.Serialize(new { model = result.Model, answer, input_tokens = result.InputTokens, output_tokens = result.OutputTokens,
+			evidence = NeedsEvidence ? Render(evidence) : null }));
 	}
 	internal bool NeedsEvidence => LocalEvidence.IsUncertainty(uncertainty);
 	internal EvidenceResult Evidence(IReadOnlyList<Entry> view, CancellationToken ct) {
@@ -39,7 +46,7 @@ internal sealed class JevTool(JevSettings settings, JevClient client, UsageLedge
 	internal const int MaxArgumentsChars = 32_768;
 	readonly SemaphoreSlim slots = new(4);
 	public string Name => "jev";
-	public string Description => "Ask TypeSafe Jev directly for a useful second opinion. Send only the relevant explicit state and question; TypeSafe AI receives them. Do not include secrets. Use decide for a four-way verdict, choice for your defined options, or noul for a yes probability. An optional same-agent published PNG requires image preview to be enabled. No automatic context is sent.";
+	public string Description => "Use TypeSafe Jev routinely for a second opinion: check a crisp acceptance criterion (decide), compare explicit alternatives (choice), estimate a yes probability (noul), or identify when more information is needed (decide). It provides judgment, not proof. Send only relevant explicit state and question to TypeSafe AI; never include secrets. Optional same-agent published PNG requires image preview. No automatic context is sent.";
 	public JsonObject Parameters => Schema.Object(
 		("mode", Schema.Enum("Evaluation mode", "decide", "choice", "noul")),
 		("state", Schema.Str("Relevant text to send; images can use empty text.")),
@@ -58,6 +65,7 @@ internal sealed class JevTool(JevSettings settings, JevClient client, UsageLedge
 		var token = linked.Token;
 		UsageLedger.JevReservation? reserved = null;
 		bool dispatched = false;
+		long sentAt = 0;
 		try {
 			token.ThrowIfCancellationRequested();
 			var input = Parse(args);
@@ -74,22 +82,18 @@ internal sealed class JevTool(JevSettings settings, JevClient client, UsageLedge
 				if(!settings.IsCurrent(grant)) throw new JevException(JevErrorKind.Cancelled);
 				token.ThrowIfCancellationRequested();
 				dispatched = true;
+				sentAt = Stopwatch.GetTimestamp();
 				return send();
 			}
 			JevResult? validated = null;
 			JevResult result;
 			try { result = await client.EvaluateAsync(request, grant.GetKeyForProvider(), token, Send, value => validated = value); }
-			finally { if(validated != null) ledger.CloseJev(reserved, validated); }
+			finally { if(validated != null) ledger.CloseJev(reserved, validated, Stopwatch.GetElapsedTime(sentAt), input.Mode == "decide"); }
 			if(!settings.IsCurrent(grant)) return JevPresentation.Withdrawn();
 			token.ThrowIfCancellationRequested();
 			var choice = result.Answer as JevChoiceAnswer;
 			var uncertainty = input.Mode == "decide" ? choice?.Choice : null;
-			var presentation = new JevPresentation(settings, grant, uncertainty, input.Question, started);
-			object answer = choice != null ? new { choice = choice.Choice, confidence = choice.Confidence, probabilities = choice.Probabilities }
-				: new { probability_yes = ((JevNoulAnswer)result.Answer).ProbabilityYes };
-			var text = JsonSerializer.Serialize(new { model = result.Model, answer, input_tokens = result.InputTokens, output_tokens = result.OutputTokens,
-				evidence = presentation.NeedsEvidence ? JevPresentation.Render(null) : null });
-			return new(text) { Jev = presentation };
+			return new("") { Jev = new JevPresentation(settings, grant, uncertainty, input.Question, started, result) };
 		} catch(JevException ex) {
 			if(!settings.IsCurrent(grant)) return JevPresentation.Withdrawn();
 			ct.ThrowIfCancellationRequested();

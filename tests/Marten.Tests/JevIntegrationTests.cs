@@ -127,10 +127,12 @@ public sealed class JevIntegrationTests {
 		Assert.Equal(label == "failure" ? 1 : 0, f.Usage().UnknownCalls);
 	}
 
-	[Fact]
-	public async Task DisableBeforeAdmissionPreventsSendAndRefundsReservation() {
+	[Theory]
+	[InlineData(false)]
+	[InlineData(true)]
+	public async Task DisableOrRotateBeforeAdmissionPreventsSendAndRefundsReservation(bool rotate) {
 		using var f = new Fixture((_, _) => throw new InvalidOperationException("should not dispatch"),
-			settings => Assert.Equal(JevChange.Saved, settings.SetOptions(false, false)));
+			settings => Assert.Equal(JevChange.Saved, rotate ? settings.Replace("synthetic-replacement") : settings.SetOptions(false, false)));
 		f.Start();
 		f.TurnOn();
 		var result = await f.Tools.InvokeAsync(f.Agent(), "jev", Args, default);
@@ -163,17 +165,62 @@ public sealed class JevIntegrationTests {
 		Assert.Equal(1L, f.Usage().UnknownCalls);
 	}
 
-	[Fact]
-	public async Task ValidatedButNotYetAcceptedResultCanBeRetiredWithoutUndoingUsage() {
+	sealed class DelegatingFixture(Action<ToolOutput> after) : ITool {
+		public string Name => "fixture_delegate";
+		public string Description => "Fixture delegation";
+		public System.Text.Json.Nodes.JsonObject Parameters => Schema.Object();
+		public async Task<ToolOutput> InvokeAsync(IToolContext ctx, System.Text.Json.Nodes.JsonObject args, CancellationToken ct) {
+			var pending = await ctx.Tools.InvokeAsync(ctx, "jev", Args, ct);
+			after(pending);
+			return pending;
+		}
+	}
+
+	[Theory]
+	[InlineData(false)]
+	[InlineData(true)]
+	public async Task RealTurnHandoffOrdersAcceptanceAgainstRetirement(bool retireAfterAcceptance) {
 		using var f = new Fixture((_, _) => Task.FromResult(Reply("yes")));
 		f.Start();
 		f.TurnOn();
-		var result = await f.Tools.InvokeAsync(f.Agent(), "jev", Args, default);
-		Assert.True(result.Jev!.IsCurrent()); // consumer can accept at this point
-		Assert.Equal(JevChange.Saved, f.Settings.Remove());
-		Assert.False(result.Jev.IsCurrent()); // a later consumer must withhold
+		string? pendingText = null;
+		JevChange? retired = null;
+		f.Tools.Add(new DelegatingFixture(pending => {
+			pendingText = pending.Text;
+			if(!retireAfterAcceptance) retired = f.Settings.Remove();
+		}));
+		f.Manager.Events += e => {
+			if(retireAfterAcceptance && JsonIO.Serialize(e).Contains("\"kind\":\"tool_result\"")) retired = f.Settings.Remove();
+		};
+		var a = f.Agent();
+		f.Backend.Script.Enqueue(_ => FakeBackend.Call("real-accept", "fixture_delegate", "{}"));
+		f.Backend.Script.Enqueue(_ => FakeBackend.Say("done"));
+		a.Send(new Inbound("Sera", "evaluate this", SendMode.Queued));
+		await Wait.Until(() => a.Transcript.Last?.Kind == EntryKind.Idle);
+		var entry = Assert.Single(a.Transcript.Entries, row => row.Kind == EntryKind.ToolResult);
+		Assert.Equal("", pendingText);
+		Assert.Equal(JevChange.Saved, retired);
+		Assert.Equal(!retireAfterAcceptance, entry.IsError == true);
+		Assert.Contains(retireAfterAcceptance ? "\"choice\":\"yes\"" : "withheld", entry.Text);
 		Assert.Equal(10, f.Usage().Input);
 		Assert.Equal(0, f.Usage().UnknownCalls);
+		Assert.Equal(1, f.Usage().Jev?.Yes);
+	}
+
+	[Fact]
+	public async Task RealScheduleUsesPowerShellPathWithoutBorrowingModelEvidence() {
+		using var f = new Fixture((_, _) => Task.FromResult(Reply("undecidable")));
+		f.Start();
+		f.Tools.Add(new PowerShellTool(() => 30, () => 3, new ChildProcessWatcher()));
+		f.TurnOn();
+		var a = f.Agent();
+		var now = DateTimeOffset.UtcNow;
+		a.AddSchedule("jev -mode decide -state 'Explicit facts' -question 'Has Quartz shipped?'", null, now, null, null);
+		await Task.WhenAll(new Scheduler(f.Manager).Tick(now));
+		await Wait.Until(() => a.Transcript.Last?.Kind == EntryKind.Idle);
+		Assert.Contains(a.Transcript.Entries, row => row.Text?.Contains("\"evidence\":{\"status\":\"unavailable\"}") == true);
+		Assert.Equal(1, f.Calls);
+		Assert.Equal(1, f.Usage().Jev?.Undecidable);
 	}
 
 	[Fact]

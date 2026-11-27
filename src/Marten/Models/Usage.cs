@@ -48,11 +48,24 @@ public sealed record UsageTotals {
 	public decimal? Usd { get; init; }
 	public long UnknownCalls { get; init; }
 	public decimal ReservedUsd { get; init; }
+	[System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+	public JevExperimentTotals? Jev { get; init; }
 
 	public UsageTotals Add(CallUsage u, decimal? usd) => this with {
 		Calls = Calls + 1, Input = Input + u.Input, CacheRead = CacheRead + u.CacheRead,
 		CacheWrite = CacheWrite + u.CacheWrite, Output = Output + u.Output,
 		Usd = usd is { } c ? (Usd ?? 0) + c : Usd,
+	};
+}
+
+/// <summary>Validated-provider replies only; no user-defined labels or per-request data.</summary>
+public sealed record JevExperimentTotals(long LatencyMilliseconds = 0, long Yes = 0, long No = 0, long NeedMoreInformation = 0, long Undecidable = 0) {
+	internal JevExperimentTotals Add(TimeSpan latency, string? decision) => this with {
+		LatencyMilliseconds = LatencyMilliseconds + (long)Math.Clamp(latency.TotalMilliseconds, 0, 60_000),
+		Yes = Yes + (decision == "yes" ? 1 : 0),
+		No = No + (decision == "no" ? 1 : 0),
+		NeedMoreInformation = NeedMoreInformation + (decision == "need more information" ? 1 : 0),
+		Undecidable = Undecidable + (decision == "undecidable" ? 1 : 0),
 	};
 }
 
@@ -98,11 +111,12 @@ public sealed class UsageLedger(Home home, Func<Config> config) {
 			if(price.Input < 0 || price.Output < 0) return null;
 			var maximum = 1_000_000L * (price.Input + price.Output) / 1_000_000m; // matches the wire client's validated usage ceiling
 			var budgets = config().Budgets;
+			var date = Today;
 			foreach(var key in new[] { "jev", "total" })
-				if(budgets.TryGetValue(key, out var cap) && (cap <= 0 || SpentToday(key == "total" ? null : key) + maximum > cap)) return null;
-			var byModel = JevDay(Today);
+				if(budgets.TryGetValue(key, out var cap) && (cap <= 0 || Spent(date, key == "total" ? null : key) + maximum > cap)) return null;
+			var byModel = JevDay(date);
 			var before = byModel.GetValueOrDefault(JevClient.Model) ?? new UsageTotals();
-			var reservation = new JevReservation(Today, maximum, price);
+			var reservation = new JevReservation(date, maximum, price);
 			// Durably charge the maximum before sending. Crash or ambiguous failure remains unknown.
 			byModel[JevClient.Model] = before with { UnknownCalls = before.UnknownCalls + 1, ReservedUsd = before.ReservedUsd + maximum };
 			try { JsonIO.Save(Path, Days()); }
@@ -111,7 +125,7 @@ public sealed class UsageLedger(Home home, Func<Config> config) {
 		}
 	}
 
-	internal void CloseJev(JevReservation reservation, JevResult? result) {
+	internal void CloseJev(JevReservation reservation, JevResult? result, TimeSpan latency = default, bool decide = false) {
 		lock(gate) {
 			if(reservation.Finished) return;
 			reservation.Finished = true;
@@ -120,7 +134,9 @@ public sealed class UsageLedger(Home home, Func<Config> config) {
 			var after = before with { UnknownCalls = before.UnknownCalls - 1, ReservedUsd = before.ReservedUsd - reservation.Maximum };
 			if(result != null) {
 				var usage = new CallUsage(result.InputTokens, 0, 0, result.OutputTokens);
-				after = after.Add(usage, usage.Cost(reservation.Price));
+				after = after.Add(usage, usage.Cost(reservation.Price)) with {
+					Jev = (after.Jev ?? new()).Add(latency, decide ? (result.Answer as JevChoiceAnswer)?.Choice : null),
+				};
 			}
 			byModel[JevClient.Model] = after;
 			try { JsonIO.Save(Path, Days()); }
@@ -133,12 +149,10 @@ public sealed class UsageLedger(Home home, Func<Config> config) {
 		return day.GetValueOrDefault("jev") ?? (day["jev"] = new());
 	}
 
-	public decimal SpentToday(string? provider = null) {
-		lock(gate) {
-			if(Days().GetValueOrDefault(Today) is not { } day) return 0;
-			return day.Where(p => provider == null || p.Key == provider).SelectMany(p => p.Value.Values).Sum(t => (t.Usd ?? 0) + t.ReservedUsd);
-		}
-	}
+	public decimal SpentToday(string? provider = null) { lock(gate) return Spent(Today, provider); }
+
+	decimal Spent(string date, string? provider) => Days().GetValueOrDefault(date) is { } day
+		? day.Where(p => provider == null || p.Key == provider).SelectMany(p => p.Value.Values).Sum(t => (t.Usd ?? 0) + t.ReservedUsd) : 0;
 
 	/// <summary>The most recent days, newest first.</summary>
 	public object Recent(int count) {

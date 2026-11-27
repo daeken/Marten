@@ -76,8 +76,12 @@ public sealed class MartenApi(Agent agent, AgentManager manager, CancellationTok
 		var result = manager.Tools.InvokeAsync(agent, name, args, runCancellation, () => {
 			Admit();
 			return Task.CompletedTask;
-		}).GetAwaiter().GetResult();
-		if(result.Jev is { } jev && !jev.IsCurrent()) result = JevPresentation.Withdrawn();
+		}, deferJev: true).GetAwaiter().GetResult();
+		if(result.Jev is { } jev) {
+			Admit();
+			result = jev.Accept(runCancellation); // PowerShell stays evidence-free, even inside a turn.
+			Admit();
+		}
 		if(result.IsError) throw new InvalidOperationException(result.Text);
 		return result.Text;
 	}
