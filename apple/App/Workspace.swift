@@ -10,6 +10,7 @@ struct WorkspaceView: View {
     let routeID: UUID
     let networkActive: Bool
     let composers: ConversationComposers
+    var macFilesSession: MacFilesSession? = nil
     @State private var pendingHint = UUID()
     @State private var controls = WorkspaceControls()
     @State private var showClosedChats = false
@@ -44,12 +45,14 @@ struct WorkspaceView: View {
 
     #if os(iOS)
     private var macFiles: MacFilesClient? {
-        guard networkActive, endPairedSession != nil, controls.loadedRoute == routeID,
+        guard networkActive, endPairedSession != nil, let macFilesSession,
+              macFilesSession.key.endpoint == api.endpoint, macFilesSession.key.route == routeID,
+              macFilesSession.isCurrent(), controls.loadedRoute == routeID,
               statusError == nil, status?.macFiles == true else { return nil }
         return MacFilesClient(api: api)
     }
 
-    private var macFilesRoute: UUID? { macFiles == nil ? nil : routeID }
+    private var macFilesRoute: MacFilesSession.Key? { macFiles == nil ? nil : macFilesSession?.key }
     #endif
 
     private var showsMessages: Bool { path.last == .messages }
@@ -205,9 +208,13 @@ struct WorkspaceView: View {
         switch destination {
         #if os(iOS)
         case .macFiles(let page):
-            if let macFiles, let endPairedSession {
-                MacFilesView(service: macFiles, page: page, route: routeID,
-                             active: path.last == destination, endSession: endPairedSession).id(routeID)
+            if let macFiles, let macFilesSession, let endPairedSession {
+                MacFilesView(service: macFiles, page: page, scope: macFilesSession.key,
+                             active: path.last == destination, isCurrent: {
+                    macFilesSession.isCurrent() && path.last == destination &&
+                    controls.loadedRoute == macFilesSession.key.route && controls.statusError == nil &&
+                    controls.status?.macFiles == true
+                }, endSession: endPairedSession).id(macFilesSession.key)
             } else {
                 ContentUnavailableView("Mac Files Unavailable", systemImage: "externaldrive")
             }

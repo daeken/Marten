@@ -1,5 +1,16 @@
 import Foundation
 
+struct MacFilesSession {
+    struct Key: Hashable, Sendable {
+        let endpoint: Endpoint
+        let pairedSession: UUID
+        let route: UUID
+    }
+
+    let key: Key
+    let isCurrent: @MainActor () -> Bool
+}
+
 struct MacFileRoot: Decodable, Identifiable, Hashable, Sendable {
     let id: String
     let label: String
@@ -138,7 +149,7 @@ struct MacFilesClient: Sendable {
             try Task.checkCancellation()
             return file
         } catch {
-            file.cleanup()
+            file.discardUnpublished()
             throw error
         }
     }
@@ -176,7 +187,7 @@ struct MacFilesClient: Sendable {
     }
 }
 
-final class MacFilesStagedCopy: Sendable {
+final class MacFilesStagedCopy: Identifiable, Sendable {
     private let folder: URL
     let url: URL
     private static var parent: URL {
@@ -184,7 +195,7 @@ final class MacFilesStagedCopy: Sendable {
     }
 
     private init(folder: URL, url: URL) { self.folder = folder; self.url = url }
-    deinit { cleanup() }
+    deinit { remove() }
 
     /// Call at process launch only, before there can be any active exports.
     static func sweep() { try? FileManager.default.removeItem(at: parent) }
@@ -215,5 +226,8 @@ final class MacFilesStagedCopy: Sendable {
         }
     }
 
-    func cleanup() { try? FileManager.default.removeItem(at: folder) }
+    /// Call only before handing the copy to an activity controller.
+    func discardUnpublished() { remove() }
+
+    private func remove() { try? FileManager.default.removeItem(at: folder) }
 }

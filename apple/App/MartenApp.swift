@@ -35,7 +35,7 @@ struct RootView: View {
                                   ? { connections.endRejectedPairedSession(api) } : nil,
                               routeID: connections.transportGeneration,
                               networkActive: phase == .active && foregroundReady && !connections.busy && connections.routeUsable,
-                              composers: connections.composers)
+                              composers: connections.composers, macFilesSession: macFilesSession(api))
                     .id(connections.workspaceID)
             } else {
                 ServerScreen(connections: connections)
@@ -60,6 +60,22 @@ struct RootView: View {
                 #endif
         }
     }
+
+    private func macFilesSession(_ api: API) -> MacFilesSession? {
+        #if os(iOS)
+        guard connections.pairingEnabled, MacFilesClient(api: api) != nil else { return nil }
+        let key = MacFilesSession.Key(endpoint: api.endpoint, pairedSession: connections.workspaceID,
+                                      route: connections.transportGeneration)
+        return MacFilesSession(key: key) {
+            connections.connected?.endpoint == key.endpoint && connections.connected?.token == api.token &&
+            connections.workspaceID == key.pairedSession && connections.transportGeneration == key.route &&
+            connections.routeUsable && !connections.busy
+        }
+        #else
+        return nil
+        #endif
+    }
+
 }
 
 struct ServerScreen: View {

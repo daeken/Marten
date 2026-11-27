@@ -30,7 +30,7 @@ final class MacFilesClientTests: XCTestCase, @unchecked Sendable {
         let file = try await client.share(row)
         XCTAssertEqual(file.url.lastPathComponent, "_sample.txt")
         XCTAssertEqual(try Data(contentsOf: file.url), preview)
-        file.cleanup()
+        file.discardUnpublished()
         XCTAssertFalse(FileManager.default.fileExists(atPath: file.url.path))
         let after = await fixture.calls
         XCTAssertEqual(after, before + ["/api/mac-files/bytes/file/text", "/api/mac-files/bytes/file/share"])
