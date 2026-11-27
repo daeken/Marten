@@ -75,6 +75,9 @@ actor Fixture: Transport {
             let archived = url.query?.contains("before=") == true
             let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
             try record("\(id) \(call) \(archived ? "archive" : "latest") \(query.first { $0.name == "limit" }?.value ?? "missing-limit")")
+            if ProcessInfo.processInfo.environment["MARTEN_FIXTURE_POSTURE_TRACE"] == "1" {
+                try record("transcript-time \(ProcessInfo.processInfo.systemUptime) \(id) \(archived ? "archive" : "latest")")
+            }
             if !archived { latestReads[id, default: 0] += 1 }
             let upper = archived ? 80 : 159 + (latestReads[id] ?? 1)
             let entries = ((upper-79)...upper).map { i in

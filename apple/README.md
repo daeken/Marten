@@ -94,6 +94,15 @@ This was a headless verification, not a full operator acceptance test. Message s
 
 **iPhone Duo simulator.** Ordinary iOS 27.2 (`24B8117`) rejects the Duo profile, but the dedicated iOS 27.2 runtime `com.apple.CoreSimulator.SimRuntime.iOS-27-2-iPhone19-4` (`24B91016s`) booted the `iPhone19,4` fixture. The same XCUITest passed on the default folded cover display (1398 × 2034 screenshots); the 2007 × 2853 inner display was black. The installed `simctl` exposes display capture, power and geometry but no fold/posture operation. Unfolded and in-chat transitions remain untested; changing display geometry is not a posture test.
 
+The opt-in Duo transition fixture builds without opening the simulator:
+
+```sh
+MARTEN_FIXTURE_BUILD_ONLY=1 MARTEN_FIXTURE_DUO_TRANSITION=1 \
+  bash apple/WorkspaceUITest/run.sh 5F2956AD-A279-428F-B7DB-2DBF7E026AD7
+```
+
+For an authorized interactive run, start on the dedicated Duo’s portrait cover, omit `MARTEN_FIXTURE_BUILD_ONLY`, and retain an `.xcresult`. Use the selected Xcode’s `Contents/Applications/DeviceHub.app` (not Spotlight) if it presents an official posture control. Follow the `UNFOLD` and then `FOLD` prompts in the test activity log; use only the fixture device. The test requires the wider portrait viewport and return to cover width, and asserts the selected chat, visible archive position, unsent draft, and no refetch of the archive or another agent. Latest transcript polls are expected; the trace flags bursts faster than normal polling. The activity log, request trace and three screenshots supplement, not replace, observation of the official posture changes. If those controls are unavailable, stop rather than substituting display resizing.
+
 **Signed iPhone and runtime validation.** Verify signed launch, camera permission/scan and image import, explicit origin confirmation, real embedded enrollment and HTTPS/WSS over the app node with standard platform TLS, Keychain persistence, and suspend/resume with no replay. Exercise server revoke, local Forget/node cleanup and re-pair as distinct operations, and drive the dialogs and export picker in the UI. The simulator SDK builds, but simulator tests do not cover the signed-device checks above. No signed physical-device run has taken place. Scratch success does not lift the activation gate.
 
 For a coordinated physical-device run, use the [opt-in signed iPhone scratch pilot runbook](SIGNED-IPHONE-PILOT.md). It uses a disposable, single-origin overlay and leaves both shipped app roots unchanged.
