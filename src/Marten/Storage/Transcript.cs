@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Text;
 using System.Text.Json;
 
 namespace Marten.Storage;
@@ -79,7 +80,8 @@ public sealed class Transcript {
 	readonly List<string> segments;
 	readonly List<Row> rows = new();
 	readonly object gate = new();
-	bool rotateAfterTornTail;
+	bool damagedTail;
+	bool appendFailed;
 
 	readonly record struct Row(long Seq, long Offset, int Length, int Segment, RowKind Kind);
 
@@ -109,34 +111,48 @@ public sealed class Transcript {
 		int n;
 		while((n = fs.Read(block)) != 0) {
 			ReadOnlySpan<byte> rest = block.AsSpan(0, n);
+			if(offset == 0 && partial.WrittenCount == 0 &&
+				(rest.StartsWith(new byte[] { 0xff, 0xfe }) || rest.StartsWith(new byte[] { 0xfe, 0xff }) ||
+				 rest.StartsWith(new byte[] { 0, 0, 0xfe, 0xff })))
+				throw new InvalidDataException("Transcript segments must use UTF-8.");
 			int newline;
-			while((newline = rest.IndexOf((byte) '\n')) >= 0) {
+			while((newline = rest.IndexOfAny((byte) '\n', (byte) '\r')) >= 0) {
 				var line = rest[..newline];
 				if(partial.WrittenCount != 0) {
 					partial.Write(line);
 					line = partial.WrittenSpan;
 				}
-				IndexLine(line, offset, segment, terminated: true);
+				IndexLine(line, offset, segment);
 				offset += line.Length + 1L;
 				partial.ResetWrittenCount();
 				rest = rest[(newline + 1)..];
 			}
 			partial.Write(rest);
 		}
-		if(partial.WrittenCount > 0) IndexLine(partial.WrittenSpan, offset, segment, terminated: false);
+		if(partial.WrittenCount > 0) IndexLine(partial.WrittenSpan, offset, segment);
 	}
 
-	void IndexLine(ReadOnlySpan<byte> line, long offset, int segment, bool terminated) {
+	void IndexLine(ReadOnlySpan<byte> line, long offset, int segment) {
 		if(offset == 0 && line.StartsWith("\uFEFF"u8)) { line = line[3..]; offset = 3; }
 		if(line.IndexOfAnyExcept((byte) ' ', (byte) '\t', (byte) '\r') < 0) return;
 		try {
 			if(JsonSerializer.Deserialize<Entry>(line, JsonIO.Options) is { } e)
 				rows.Add(new(e.Seq, offset, line.Length, segment, Tag(e.Kind)));
-		} catch(JsonException) when(!terminated || segment == segments.Count - 1) {
-			// Leave the torn bytes on disk. For an unterminated tail, start a new segment so
-			// future startups can still identify the torn line without rewriting the file.
-			if(!terminated && segment == segments.Count - 1) rotateAfterTornTail = true;
+		} catch(JsonException) when(IsUnicodeWhitespace(line)) {
+			// StreamReader-based transcripts also ignored Unicode-only blank lines.
+		} catch(JsonException) when(segment == segments.Count - 1) {
+			// Keep the damaged segment newest, so even the old reader can recover it.
+			// Rolling it into the archive would make the next startup reject the log.
+			damagedTail = true;
 		}
+	}
+
+	static bool IsUnicodeWhitespace(ReadOnlySpan<byte> line) {
+		while(!line.IsEmpty) {
+			if(Rune.DecodeFromUtf8(line, out var rune, out var consumed) != OperationStatus.Done || !Rune.IsWhiteSpace(rune)) return false;
+			line = line[consumed..];
+		}
+		return true;
 	}
 
 	// Rows are immutable once published. Each reader captures the current end, so an append
@@ -176,8 +192,14 @@ public sealed class Transcript {
 		internal IEnumerable<Entry> Read(RowKind kinds = RowKind.All, long? after = null) => ReadRows<Entry>(Select(kinds, after));
 		internal IEnumerable<CallRecord> ReadCalls(RowKind kinds, long? after) => ReadRows<CallRecord>(Select(kinds, after));
 		internal TranscriptPage Tail(int limit, RowKind kinds = RowKind.All, long? after = null, long? before = null) {
+			var (entries, older) = Tail(limit, static e => e, kinds, after, before);
+			return new(entries, older);
+		}
+
+		internal (IReadOnlyList<T> Entries, bool HasOlder) Tail<T>(int limit, Func<Entry, T> project, RowKind kinds = RowKind.All,
+			long? after = null, long? before = null) {
 			var tail = Select(kinds, after, before, reverse: true).Take(limit + 1).ToList();
-			return new(ReadRows<Entry>(tail.Take(limit).Reverse()).ToList(), tail.Count > limit);
+			return (ReadRows<Entry>(tail.Take(limit).Reverse()).Select(project).ToList(), tail.Count > limit);
 		}
 
 		IEnumerable<T> ReadRows<T>(IEnumerable<Row> selected) {
@@ -214,30 +236,37 @@ public sealed class Transcript {
 	public TranscriptPage ReadPage(int limit, long? before = null) => Capture().Tail(Math.Clamp(limit, 1, 100), before: before);
 	public Entry? Last => Capture().ReadLast(RowKind.All);
 
-	public Entry Append(Entry entry) {
+	public Entry Append(Entry entry) => Append(entry, static (fs, bytes) => { fs.Write(bytes); fs.WriteByte((byte) '\n'); });
+
+	internal Entry Append(Entry entry, Action<FileStream, byte[]> write) {
 		lock(gate) {
+			if(appendFailed) throw new IOException("A previous transcript append failed; restart to re-index before appending again.");
 			entry = entry with {
 				Seq = rows.Count > 0 ? rows[^1].Seq + 1 : 1,
 				Ts = entry.Ts == default ? DateTimeOffset.UtcNow : entry.Ts,
 			};
 			var path = segments[^1];
-			if(rotateAfterTornTail || File.Exists(path) && new FileInfo(path).Length > SegmentBytes) {
+			if(!damagedTail && File.Exists(path) && new FileInfo(path).Length > SegmentBytes) {
 				path = Path.Combine(Path.GetDirectoryName(path)!, $"{int.Parse(Path.GetFileNameWithoutExtension(path)) + 1:D6}.jsonl");
 				segments.Add(path);
-				rotateAfterTornTail = false;
 			}
 			var bytes = JsonSerializer.SerializeToUtf8Bytes(entry, JsonIO.Options);
 			long offset;
-			using(var fs = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read)) {
+			try {
+				using var fs = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read);
 				if(fs.Length > 0) {
 					using var check = OpenRead(path);
 					check.Seek(-1, SeekOrigin.End);
 					if(check.ReadByte() != '\n') fs.WriteByte((byte) '\n');
 				}
 				offset = fs.Position;
-				fs.Write(bytes);
-				fs.WriteByte((byte) '\n');
+				write(fs, bytes);
 				fs.Flush(flushToDisk: true);
+			} catch(Exception e) when(e is IOException or UnauthorizedAccessException) {
+				// A failed write/flush may have left a partial or even complete line. Do not
+				// append a separator or reuse its sequence until startup has inspected it.
+				appendFailed = true;
+				throw;
 			}
 			rows.Add(new(entry.Seq, offset, bytes.Length, segments.Count - 1, Tag(entry.Kind)));
 			return entry;

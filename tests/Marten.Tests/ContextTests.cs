@@ -375,7 +375,7 @@ public class ContextTests {
 		}
 		backend.Script.Enqueue(_ => FakeBackend.Say("reply"));
 		task.Send(new Inbound("Sera", "now", SendMode.Queued));
-		await Wait.Until(() => Idle(task));
+		await Wait.Until(() => Idle(task) && task.Transcript.Entries.Any(e => e.Kind == EntryKind.Assistant && e.Text == "reply"));
 
 		Assert.Equal(needsAnotherPass ? 7 : 5, backend.Requests.Count);
 		var summarized = backend.Requests[3].History.SkipLast(1).ToList();

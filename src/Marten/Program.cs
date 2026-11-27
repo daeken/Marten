@@ -301,9 +301,10 @@ ext.MapGet("/agents/{id}/transcript", (HttpContext ctx, string id, long? since, 
 	if(ClientOf(ctx) is null) return NeedsClient();
 	if(manager.Get(id) is not { } a) return Results.NotFound();
 	static string? Cut(string? s, int n) => s == null || s.Length <= n ? s : s[..n] + $"… ({s.Length - n} more chars)";
-	var tail = a.Transcript.Capture().Tail(Math.Clamp(limit ?? 50, 1, 500), RowKind.All & ~(RowKind.Reasoning | RowKind.Elide), after: since ?? 0);
-	return Results.Ok(tail.Entries
-		.Select(e => new { e.Seq, e.Ts, e.Kind, e.From, Text = Cut(e.Text, 4000), e.Name, Arguments = Cut(e.Arguments, 1000), e.IsError }));
+	var tail = a.Transcript.Capture().Tail(Math.Clamp(limit ?? 50, 1, 500),
+		static e => new { e.Seq, e.Ts, e.Kind, e.From, Text = Cut(e.Text, 4000), e.Name, Arguments = Cut(e.Arguments, 1000), e.IsError },
+		RowKind.All & ~(RowKind.Reasoning | RowKind.Elide), after: since ?? 0);
+	return Results.Ok(tail.Entries);
 });
 ext.MapGet("/agents/{id}/tasks", (HttpContext ctx, string id) =>
 	ClientOf(ctx) is null ? NeedsClient() : manager.Get(id) is { } a ? Results.Ok(a.Tasks) : Results.NotFound());
@@ -330,9 +331,9 @@ api.MapPost("/agents", (CreateAgent req) => AgentSummary(manager.CreateChat(req.
 api.MapGet("/agents/{id}/transcript", async (HttpContext ctx, string id, int? limit, long? before) => {
 	if(manager.Get(id) is not { } a) { await Results.NotFound().ExecuteAsync(ctx); return; }
 	if(limit is int size) {
-		var page = a.Transcript.ReadPage(size, before);
-		// Replay payloads (notably encrypted reasoning) can dwarf the text the UI displays.
-		await ctx.Response.WriteAsJsonAsync(new { Entries = page.Entries.Select(e => e with { Raw = null, Instructions = null }), page.HasOlder });
+		// Drop replay payloads row by row rather than retaining the entire page's raw data.
+		var page = a.Transcript.Capture().Tail(Math.Clamp(size, 1, 100), static e => e with { Raw = null, Instructions = null }, before: before);
+		await ctx.Response.WriteAsJsonAsync(new { page.Entries, page.HasOlder });
 		return;
 	}
 	using var lease = restart.Enter();
