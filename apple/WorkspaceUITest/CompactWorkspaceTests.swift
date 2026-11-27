@@ -26,10 +26,92 @@ final class CompactWorkspaceTests: XCTestCase {
             ((try? String(contentsOf: trace, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init).filter { $0.hasPrefix("send ") }
         }
         XCTAssertTrue(sends().isEmpty)
+        let keyboard = app.keyboards.firstMatch
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+        // Hit the transcript's leading gutter, not a selectable text run or a control.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.015, dy: 0.35)).tap()
+        XCTAssertTrue(keyboard.waitForNonExistence(timeout: 5))
+        XCTAssertEqual(draft.value as? String, "First\nSecond")
+        XCTAssertTrue(sends().isEmpty)
+
+        // A control hit still works while the keyboard is up.
+        draft.tap()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+        app.buttons["Older transcript page"].tap()
+        XCTAssertTrue(app.buttons["Newer transcript page"].waitForExistence(timeout: 8))
+        XCTAssertEqual(draft.value as? String, "First\nSecond")
         app.buttons["Send Message"].firstMatch.tap()
         let sent = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in !sends().isEmpty }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [sent], timeout: 8), .completed, "Draft: \(draft.value ?? "nil")")
         XCTAssertEqual(sends(), [#"send queued "First\nSecond""#])
+    }
+
+    @MainActor func testTapAwayAndRetryWithUnavailableTranscript() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        let gate = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: gate) }
+        app.launchEnvironment["MARTEN_FIXTURE_TRANSCRIPT_GATE"] = gate.path
+        app.launchEnvironment["MARTEN_FIXTURE_RESET"] = "1"
+        app.launch()
+        defer { app.terminate() }
+        XCTAssertTrue(app.navigationBars["Marten"].waitForExistence(timeout: 10))
+        let alpha = app.staticTexts["Standalone Alpha"].firstMatch
+        for _ in 0..<4 where !alpha.exists || !alpha.isHittable { app.swipeUp() }
+        XCTAssertTrue(alpha.waitForExistence(timeout: 10))
+        alpha.tap()
+        let retry = app.buttons["Retry Transcript"]
+        XCTAssertTrue(retry.waitForExistence(timeout: 20))
+        let draft = app.descendants(matching: .any)["messageDraft"].firstMatch
+        draft.tap()
+        draft.typeText("Keep this draft")
+        let keyboard = app.keyboards.firstMatch
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.08, dy: 0.25)).tap()
+        XCTAssertTrue(keyboard.waitForNonExistence(timeout: 5))
+        XCTAssertEqual(draft.value as? String, "Keep this draft")
+        XCTAssertTrue(retry.isHittable)
+        try Data().write(to: gate)
+        if retry.exists { retry.tap() }
+        XCTAssertTrue(app.buttons["Older transcript page"].waitForExistence(timeout: 10))
+        XCTAssertEqual(draft.value as? String, "Keep this draft")
+    }
+
+    @MainActor func testPendingRowsRecallOrStayReadOnly() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        let trace = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try Data().write(to: trace)
+        defer { try? FileManager.default.removeItem(at: trace) }
+        app.launchEnvironment["MARTEN_FIXTURE_TRACE"] = trace.path
+        app.launchEnvironment["MARTEN_FIXTURE_PENDING"] = "1"
+        app.launchEnvironment["MARTEN_FIXTURE_RESET"] = "1"
+        app.launch()
+        defer { app.terminate() }
+
+        XCTAssertTrue(app.navigationBars["Marten"].waitForExistence(timeout: 10))
+        let alpha = app.staticTexts["Standalone Alpha"].firstMatch
+        for _ in 0..<4 where !alpha.exists || !alpha.isHittable { app.swipeUp() }
+        XCTAssertTrue(alpha.waitForExistence(timeout: 10))
+        alpha.tap()
+        let steering = app.staticTexts["Fixture steering"]
+        let stale = app.buttons["pendingRecall.stale"]
+        let queued = app.buttons["pendingRecall.q"]
+        let draft = app.descendants(matching: .any)["messageDraft"].firstMatch
+        XCTAssertTrue(steering.waitForExistence(timeout: 8))
+        XCTAssertFalse(app.buttons["pendingRecall.s"].exists)
+        XCTAssertTrue(stale.waitForExistence(timeout: 5))
+        stale.tap()
+        XCTAssertTrue(app.staticTexts["That message is no longer pending."].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Send Message"].isEnabled)
+        queued.tap()
+        let recalled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Fixture recalled text"), object: draft)
+        XCTAssertEqual(XCTWaiter.wait(for: [recalled], timeout: 5), .completed)
+        XCTAssertTrue(queued.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(steering.exists)
+        let writes = try String(contentsOf: trace, encoding: .utf8).split(separator: "\n")
+            .filter { $0.hasPrefix("recall ") || $0.hasPrefix("send ") }
+        XCTAssertEqual(writes, ["recall stale", "recall q"])
     }
 
     @MainActor func testCompactWorkspace() throws {

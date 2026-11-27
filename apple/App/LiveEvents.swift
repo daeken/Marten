@@ -19,10 +19,13 @@ struct LiveEvents {
     }
 
     private(set) var agents: [String: LiveActivity] = [:]
+    private(set) var pendingAgent: String?
 
     mutating func receive(_ data: Data) -> (updated: Bool, invalidate: Bool) {
+        pendingAgent = nil
         guard let frame = try? JSONDecoder().decode(Frame.self, from: data),
               let id = frame.agentId, !id.isEmpty, id.utf8.count <= 128 else { return (false, true) }
+        if frame.type == "inbox" { pendingAgent = id }
         var next = agents[id] ?? LiveActivity()
         switch frame.type {
         case "delta":

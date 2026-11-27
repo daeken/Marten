@@ -9,6 +9,8 @@ struct WorkspaceView: View {
     let endPairedSession: (() -> Void)?
     let routeID: UUID
     let networkActive: Bool
+    let composers: ConversationComposers
+    @State private var pendingHint = UUID()
     @State private var controls = WorkspaceControls()
     @State private var showClosedChats = false
     @State private var confirmLifecycle = false
@@ -255,6 +257,7 @@ struct WorkspaceView: View {
             if let agent = status?.agents.first(where: { $0.id == id }) {
                 ConversationView(api: api, agent: agent, refreshStatus: refresh, routeID: routeID,
                                  networkActive: networkActive && path.last == destination, eventHint: eventHint,
+                                 pendingHint: pendingHint, pending: composers.state(id, using: api),
                                  inbox: inbox, answer: submitAnswer,
                                  activity: networkActive ? activity[id] : nil,
                                  controlsReady: controlsReady, lifecycle: { action in
@@ -362,6 +365,14 @@ struct WorkspaceView: View {
         if socketID == id { activity = [:] }
     }
 
+    @MainActor private func consumePendingHints(_ stream: AsyncStream<String>?, id: UUID) async {
+        guard let stream else { return }
+        for await agent in stream {
+            guard !Task.isCancelled, socketID == id else { return }
+            if path.last == .agent(agent) { pendingHint = UUID() }
+        }
+    }
+
     @MainActor private func listenForEvents(id: UUID) async {
         var delay = 1
         let clock = ContinuousClock()
@@ -370,8 +381,11 @@ struct WorkspaceView: View {
             do {
                 guard let stream = try api.events() else { return }
                 defer { stream.cancel() }
+                // Resync the active conversation when the socket is recreated.
+                if case .agent = path.last { pendingHint = UUID() }
                 try await withTaskCancellationHandler {
                     async let live: Void = consumeActivity(stream.activity, id: id)
+                    async let pending: Void = consumePendingHints(stream.pendingAgents, id: id)
                     defer { stream.cancel() }
                     for try await _ in stream.hints {
                         try Task.checkCancellation()
@@ -381,6 +395,7 @@ struct WorkspaceView: View {
                     }
                     stream.cancel()
                     await live
+                    await pending
                 } onCancel: { stream.cancel() }
             } catch {
                 // Polling remains on the same route; only the socket is retried.
@@ -532,6 +547,8 @@ private struct ConversationView: View {
     let networkActive: Bool
     let eventHint: UUID
     @State private var timeline = TimelinePages()
+    let pendingHint: UUID
+    let pending: PendingComposer
     let inbox: InboxState
     let answer: (InboxMessage, Int?) -> Void
     let activity: LiveActivity?
@@ -542,8 +559,11 @@ private struct ConversationView: View {
     @State private var pageRequest: UUID?
     @State private var pageError: String?
     @State private var mutating = false
-    @State private var draft = ""
-    @State private var mode: SendMode = .queued
+    #if os(iOS)
+    @FocusState private var composerFocused: Bool
+    #endif
+    private var draft: Binding<String> { Binding(get: { pending.draft }, set: pending.setDraft) }
+    private var mode: Binding<SendMode> { Binding(get: { pending.mode }, set: { pending.mode = $0 }) }
     @State private var refreshError: String?
     @State private var actionError: String?
     @State private var showInterrupt = false
@@ -555,10 +575,22 @@ private struct ConversationView: View {
 
     var body: some View {
         Group {
-            if timeline.page == nil { initialTranscriptState }
-            else { transcript }
+            if timeline.page == nil {
+                initialTranscriptState
+                #if os(iOS)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background { keyboardDismissSurface }
+                #endif
+            } else { transcript }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) { composer }
+        .task(id: PendingHint(event: pendingHint, local: pending.changeHint, route: routeID, active: networkActive)) {
+            guard networkActive else { return }
+            while !Task.isCancelled {
+                await pending.refresh(using: api, route: routeID)
+                try? await Task.sleep(for: .seconds(4))
+            }
+        }
         .navigationTitle(agent.name)
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
@@ -684,9 +716,13 @@ private struct ConversationView: View {
                 .padding()
                 .frame(maxWidth: 860)
                 .frame(maxWidth: .infinity)
+                #if os(iOS)
+                .background { keyboardDismissSurface }
+                #endif
             }
             #if os(iOS)
             .scrollDismissesKeyboard(.interactively)
+            .background { keyboardDismissSurface }
             #endif
             .refreshable { await refresh() }
             .modifier(TranscriptAnchor(archived: timeline.archive != nil))
@@ -695,6 +731,16 @@ private struct ConversationView: View {
             .onChange(of: live) { followLatest(using: proxy) }
         }
     }
+
+    #if os(iOS)
+    // Behind the transcript, not an ancestor gesture: rows keep their links, buttons,
+    // and text selection. This covers its gutters and unused viewport space.
+    private var keyboardDismissSurface: some View {
+        Color.clear.contentShape(Rectangle())
+            .onTapGesture { composerFocused = false }
+            .accessibilityHidden(true)
+    }
+    #endif
 
     @ViewBuilder private var pagingControls: some View {
         if timeline.page?.hasOlder == true || timeline.archive != nil || pageError != nil {
@@ -714,6 +760,75 @@ private struct ConversationView: View {
         }
     }
 
+    private struct PendingHint: Equatable {
+        let event: UUID
+        let local: UUID
+        let route: UUID
+        let active: Bool
+    }
+
+    @ViewBuilder private var pendingMessages: some View {
+        let rows = pending.rows(on: routeID)
+        if !rows.isEmpty {
+            Text("Pending messages").font(.caption.bold())
+            ViewThatFits(in: .vertical) {
+                pendingRows(rows)
+                ScrollView { pendingRows(rows) }
+            }
+            .frame(maxHeight: 128)
+        }
+        if pending.recalling {
+            ProgressView("Recalling message…").font(.footnote)
+        } else if let notice = pending.recallNotice {
+            Text(notice).font(.footnote).foregroundStyle(.secondary)
+            if let recovery = pending.uncertainRecall {
+                HStack {
+                    Text(recovery.text).font(.footnote).lineLimit(2)
+                        .accessibilityLabel("Unconfirmed recall: \(recovery.text)")
+                    Spacer()
+                    Button("Copy") {
+                        #if os(iOS)
+                        UIPasteboard.general.string = recovery.text
+                        #elseif os(macOS)
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(recovery.text, forType: .string)
+                        #endif
+                    }
+                    .accessibilityLabel("Copy unconfirmed message text")
+                    Button("Dismiss") { pending.dismissRecallRecovery() }
+                        .accessibilityLabel("Dismiss unconfirmed recall")
+                }
+                .buttonStyle(.borderless)
+            }
+        }
+    }
+
+    private func pendingRows(_ rows: [PendingOperatorMessage]) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(rows) { row in
+                HStack {
+                    VStack(alignment: .leading) {
+                        Text(row.recallable ? "Queued" : "Steering").font(.caption).foregroundStyle(.secondary)
+                        Text(row.text).font(.footnote).lineLimit(2)
+                    }
+                    Spacer()
+                    if row.recallable {
+                        Button("Edit", systemImage: "pencil") {
+                            guard networkActive, !mutating else { return }
+                            pending.recall(row, using: api, route: routeID)
+                        }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("Recall queued message for editing")
+                        .accessibilityIdentifier("pendingRecall.\(row.id)")
+                        .accessibilityHint("Available when the composer is empty")
+                        .disabled(!networkActive || mutating || !pending.canRecall)
+                    }
+                }
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
     private var composer: some View {
         VStack(alignment: .leading, spacing: 4) {
             pagingControls
@@ -725,13 +840,17 @@ private struct ConversationView: View {
                 }
                 .foregroundStyle(.red)
             }
+            pendingMessages
             HStack(alignment: .bottom, spacing: 8) {
                 #if os(macOS)
-                MessageComposer(draft: $draft) { Task { await send() } }
+                MessageComposer(draft: draft) { Task { await send() } }
+                    .disabled(pending.recalling)
                     .background(.background, in: RoundedRectangle(cornerRadius: 6))
                     .overlay { RoundedRectangle(cornerRadius: 6).strokeBorder(.quaternary).allowsHitTesting(false) }
                 #else
-                TextField("Message", text: $draft, axis: .vertical)
+                TextField("Message", text: draft, axis: .vertical)
+                    .focused($composerFocused)
+                    .disabled(pending.recalling)
                     .lineLimit(1...5)
                     .textFieldStyle(.roundedBorder)
                     .accessibilityIdentifier("messageDraft")
@@ -745,20 +864,20 @@ private struct ConversationView: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(Color.accentColor)
                 .accessibilityLabel("Send Message")
-                .disabled(!networkActive || mutating || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(!networkActive || mutating || pending.recalling || pending.sending || pending.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             HStack {
                 Menu {
-                    Picker("Delivery Mode", selection: $mode) {
+                    Picker("Delivery Mode", selection: mode) {
                         Text("Queued").tag(SendMode.queued)
                         Text("Immediate").tag(SendMode.immediate)
                     }
                 } label: {
-                    Label(mode == .queued ? "Queued" : "Immediate", systemImage: "chevron.up.chevron.down")
+                    Label(pending.mode == .queued ? "Queued" : "Immediate", systemImage: "chevron.up.chevron.down")
                         .font(.footnote).padding(.vertical, 8)
                 }
-                .accessibilityLabel("Delivery Mode: \(mode.rawValue)")
-                .disabled(mutating)
+                .accessibilityLabel("Delivery Mode: \(pending.mode.rawValue)")
+                .disabled(mutating || pending.recalling || pending.sending)
                 Spacer()
                 Button("Jump to Latest", systemImage: "arrow.down.to.line") {
                     returnToLatest()
@@ -835,12 +954,9 @@ private struct ConversationView: View {
     }
 
     @MainActor private func send() async {
-        let message = draft
-        guard !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        if await perform({
-            try await api.send(agent.id, text: message, mode: mode)
-            if draft == message { draft = "" }
-        }) { returnToLatest() }
+        guard !pending.recalling, !pending.sending,
+              !pending.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        if await perform({ _ = try await pending.send(using: api) }) { returnToLatest() }
     }
 }
 
@@ -849,6 +965,7 @@ private struct ConversationView: View {
 private struct MessageComposer: NSViewRepresentable {
     @Binding var draft: String
     var send: () -> Void
+    @Environment(\.isEnabled) private var isEnabled
 
     final class Editor: NSTextView, NSTextViewDelegate {
         var change: (String) -> Void = { _ in }
@@ -894,6 +1011,7 @@ private struct MessageComposer: NSViewRepresentable {
         guard let editor = scroll.documentView as? Editor else { return }
         editor.change = { draft = $0 }
         editor.send = send
+        editor.isEditable = isEnabled
         if editor.string != draft, !editor.hasMarkedText() { editor.string = draft }
     }
 

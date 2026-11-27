@@ -8,13 +8,15 @@ import SwiftUI
     private var content: some View {
         WorkspaceView(api: API(endpoint: try! Endpoint("https://sidebar-fixture.example.ts.net"),
                                token: String(repeating: "a", count: 64), transport: fixture),
-                      showServers: {}, endPairedSession: nil, routeID: route, networkActive: true)
+                      showServers: {}, endPairedSession: nil, routeID: route, networkActive: true,
+                      composers: composers)
             #if os(macOS)
             .frame(minWidth: 1000, minHeight: 650)
             #endif
     }
     let route = UUID()
     let fixture = Fixture()
+    @State private var composers = ConversationComposers()
 
     init() {
         // This app has its own bundle and preferences. Reset only on the
@@ -32,6 +34,8 @@ private struct FixtureMessage: Decodable {
 
 actor Fixture: Transport {
     private var latestReads: [String: Int] = [:]
+    private var queuedPending = true
+    private var stalePending = true
 
     private func record(_ line: String) throws {
         guard let trace = ProcessInfo.processInfo.environment["MARTEN_FIXTURE_TRACE"] else { return }
@@ -47,6 +51,7 @@ actor Fixture: Transport {
         if path == "/api/inbox" || path == "/api/messages" { try record(path) }
         let compactChrome = ProcessInfo.processInfo.environment["MARTEN_FIXTURE_COMPACT_CHROME"] == "1"
         var body = "[]"
+        var code = 200
         if path == "/api/status" {
             #if os(macOS)
             let leadID = #", "orchestratorId":"z""#
@@ -71,10 +76,38 @@ actor Fixture: Transport {
             let message = try JSONDecoder().decode(FixtureMessage.self, from: data)
             try record("send \(message.mode) \(message.text.debugDescription)")
             body = "{}"
+        } else if path.hasSuffix("/pending-messages") || path.contains("/pending-messages/") {
+            if ProcessInfo.processInfo.environment["MARTEN_FIXTURE_PENDING"] != "1" {
+                code = 404
+            } else if path == "/api/agents/a/pending-messages", request.httpMethod == "GET" {
+                var rows = [#"{"id":"s","text":"Fixture steering","mode":"immediate"}"#]
+                if stalePending { rows.append(#"{"id":"stale","text":"Fixture stale","mode":"queued"}"#) }
+                if queuedPending { rows.append(#"{"id":"q","text":"Fixture queued","mode":"queued"}"#) }
+                body = "[\(rows.joined(separator: ","))]"
+            } else if path == "/api/agents/a/pending-messages/q", request.httpMethod == "DELETE", queuedPending {
+                try record("recall q")
+                queuedPending = false
+                body = #"{"id":"q","text":"Fixture recalled text","mode":"queued"}"#
+            } else if path == "/api/agents/a/pending-messages/stale", request.httpMethod == "DELETE" {
+                try record("recall stale")
+                stalePending = false
+                code = 404
+            } else {
+                code = 404
+            }
         } else if path.hasSuffix("/transcript") {
             let call = url.lastPathComponent
             let id = url.deletingLastPathComponent().lastPathComponent
             let archived = url.query?.contains("before=") == true
+            if id == "a", !archived,
+               let gate = ProcessInfo.processInfo.environment["MARTEN_FIXTURE_TRANSCRIPT_GATE"],
+               !FileManager.default.fileExists(atPath: gate) {
+                if latestReads[id] == nil {
+                    latestReads[id] = 0
+                    try await Task.sleep(for: .seconds(12))
+                }
+                return (Data(), HTTPURLResponse(url: url, statusCode: 503, httpVersion: nil, headerFields: nil)!)
+            }
             let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
             try record("\(id) \(call) \(archived ? "archive" : "latest") \(query.first { $0.name == "limit" }?.value ?? "missing-limit")")
             if ProcessInfo.processInfo.environment["MARTEN_FIXTURE_POSTURE_TRACE"] == "1" {
@@ -115,6 +148,6 @@ actor Fixture: Transport {
             return (Data("fixture retained process log".utf8), HTTPURLResponse(url: url, statusCode: 200,
                     httpVersion: nil, headerFields: ["Content-Type": "text/plain"])!)
         }
-        return (Data(body.utf8), HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        return (Data(body.utf8), HTTPURLResponse(url: url, statusCode: code, httpVersion: nil, headerFields: nil)!)
     }
 }

@@ -822,6 +822,117 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
         XCTAssertThrowsError(try AttachmentPreview.thumbnail(Data("<svg/>".utf8)))
     }
 
+    @MainActor func testPendingComposerWireSteeringDraftAndStaleRecall() async throws {
+        let rows = #"[{"id":"q","text":"Waiting","mode":"queued"},{"id":"s","text":"Steer","mode":"immediate"},{"id":"internal","text":"Hidden","mode":"nudge"}]"#
+        let transport = StubTransport([.init(200, rows), .init(404), .init(404)])
+        let api = API(endpoint: try Endpoint(Self.fixtureOrigin), token: "fixture-token", transport: transport)
+        let composer = PendingComposer(agent: "a")
+        let route = UUID()
+        await composer.refresh(using: api, route: route)
+        XCTAssertEqual(composer.rows(on: route).map(\.id), ["q", "s"])
+        let queued = try XCTUnwrap(composer.rows(on: route).first)
+        let steering = try XCTUnwrap(composer.rows(on: route).last)
+        XCTAssertNil(composer.recall(steering, using: api, route: route))
+        composer.setDraft("Keep this draft")
+        XCTAssertNil(composer.recall(queued, using: api, route: route))
+        XCTAssertEqual(composer.draft, "Keep this draft")
+        composer.setDraft("")
+        XCTAssertNil(composer.recall(queued, using: api, route: UUID()))
+        let deletion = try XCTUnwrap(composer.recall(queued, using: api, route: route))
+        XCTAssertNil(composer.recall(queued, using: api, route: route))
+        await deletion.value
+        XCTAssertTrue(composer.draft.isEmpty)
+        XCTAssertNotNil(composer.recallNotice)
+        XCTAssertEqual(composer.rows(on: route).map(\.id), ["s"])
+        await composer.refresh(using: api, route: route)
+        XCTAssertTrue(composer.rows(on: route).isEmpty)
+        let requests = await transport.requests
+        XCTAssertEqual(requests.map(\.httpMethod), ["GET", "DELETE", "GET"])
+        XCTAssertEqual(requests.map { $0.url?.path }, ["/api/agents/a/pending-messages", "/api/agents/a/pending-messages/q", "/api/agents/a/pending-messages"])
+        XCTAssertTrue(requests.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-token" })
+    }
+
+    @MainActor func testPendingTransientReadAndAmbiguousDeleteKeepRecoverySeparateFromDraft() async throws {
+        let rows = #"[{"id":"q","text":"Original text to recover","mode":"queued"}]"#
+        let transport = StubTransport([.init(200, rows), .init(503), .init(failure: .networkConnectionLost), .init(200, "[]")])
+        let api = API(endpoint: try Endpoint(Self.fixtureOrigin), token: "fixture-token", transport: transport)
+        let composer = PendingComposer(agent: "a")
+        let route = UUID()
+        await composer.refresh(using: api, route: route)
+        let row = try XCTUnwrap(composer.rows(on: route).first)
+        await composer.refresh(using: api, route: route)
+        XCTAssertEqual(composer.rows(on: route), [row])
+        XCTAssertTrue(composer.rows(on: UUID()).isEmpty)
+        let recall = try XCTUnwrap(composer.recall(row, using: api, route: route))
+        await recall.value
+        await composer.refresh(using: api, route: route)
+        XCTAssertTrue(composer.rows(on: route).isEmpty)
+        XCTAssertEqual(composer.uncertainRecall, row)
+        XCTAssertFalse(composer.canRecall)
+        XCTAssertTrue(composer.draft.isEmpty)
+        let sent = try await composer.send(using: api)
+        XCTAssertFalse(sent)
+        composer.dismissRecallRecovery()
+        XCTAssertNil(composer.uncertainRecall)
+        XCTAssertTrue(composer.draft.isEmpty)
+    }
+
+    @MainActor func testPendingRecallRetainsReturnedTextAcrossNavigationAndRejectsLateRead() async throws {
+        let lateStarted = expectation(description: "Old GET suspended")
+        let deleteStarted = expectation(description: "Original route DELETE suspended")
+        let oldTransport = GatedPendingTransport(lateStarted: lateStarted, deleteStarted: deleteStarted)
+        let endpoint = try Endpoint(Self.fixtureOrigin)
+        let oldAPI = API(endpoint: endpoint, token: "fixture-token", transport: oldTransport)
+        let newTransport = StubTransport([.init(200, "[]"), .init(200, "{}")])
+        let newAPI = API(endpoint: endpoint, token: oldAPI.token, transport: newTransport)
+        let states = ConversationComposers()
+        let composer = states.state("a", using: oldAPI)
+        let old = UUID(), new = UUID()
+        await composer.refresh(using: oldAPI, route: old)
+        let row = try XCTUnwrap(composer.rows(on: old).first)
+        let late = Task { await composer.refresh(using: oldAPI, route: old) }
+        await fulfillment(of: [lateStarted], timeout: 3)
+        let recall = try XCTUnwrap(composer.recall(row, using: oldAPI, route: old))
+        let another = states.state("b", using: newAPI)
+        another.setDraft("Other agent draft")
+        XCTAssertTrue(states.state("a", using: newAPI) === composer)
+        XCTAssertTrue(states.state("a", using: API(endpoint: endpoint, token: "other-token", transport: newTransport)).draft.isEmpty)
+        XCTAssertTrue(states.state("a", using: API(endpoint: try Endpoint("https://other.tail-test1.ts.net"), token: oldAPI.token, transport: newTransport)).draft.isEmpty)
+        await fulfillment(of: [deleteStarted], timeout: 3)
+        composer.setDraft("Blocked while reserved")
+        let sentWhileReserved = try await composer.send(using: newAPI)
+        XCTAssertFalse(sentWhileReserved)
+        XCTAssertTrue(composer.draft.isEmpty)
+        await oldTransport.releaseDelete()
+        await recall.value
+        XCTAssertEqual(composer.draft, "Returned\ntext")
+        XCTAssertEqual(another.draft, "Other agent draft")
+        await composer.refresh(using: newAPI, route: new)
+        await oldTransport.releaseLate()
+        await late.value
+        XCTAssertTrue(composer.rows(on: old).isEmpty)
+        XCTAssertTrue(composer.rows(on: new).isEmpty)
+        let oldRequests = await oldTransport.requests
+        XCTAssertEqual(oldRequests.map { $0.url?.path }, ["/api/agents/a/pending-messages", "/api/agents/a/pending-messages", "/api/agents/a/pending-messages/q"])
+        composer.mode = .immediate
+        let sent = try await composer.send(using: newAPI)
+        XCTAssertTrue(sent)
+        let newRequests = await newTransport.requests
+        XCTAssertEqual(newRequests.map(\.httpMethod), ["GET", "POST"])
+        XCTAssertEqual(try Self.body(XCTUnwrap(newRequests.last)), ["mode": "immediate", "text": "Returned\ntext"])
+        XCTAssertTrue(composer.draft.isEmpty)
+    }
+
+    func testPendingSocketHintsContainOnlyTheAffectedAgent() {
+        var events = LiveEvents()
+        _ = events.receive(Data(#"{"type":"inbox","agentId":"a","pending":1}"#.utf8))
+        XCTAssertEqual(events.pendingAgent, "a")
+        _ = events.receive(Data(#"{"type":"inbox","agentId":"b","pending":0}"#.utf8))
+        XCTAssertEqual(events.pendingAgent, "b")
+        _ = events.receive(Data(#"{"type":"status","agentId":"a"}"#.utf8))
+        XCTAssertNil(events.pendingAgent)
+    }
+
     func testLiveEventsKeepAccumulatedDeltasAndFollowOnlyAtLiveTail() {
         var events = LiveEvents()
         func receive(_ payload: String) -> (updated: Bool, invalidate: Bool) { events.receive(Data(payload.utf8)) }
@@ -1571,6 +1682,37 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
         let body = try XCTUnwrap(request.httpBody)
         return try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])
     }
+}
+
+private actor GatedPendingTransport: Transport {
+    let lateStarted: XCTestExpectation
+    let deleteStarted: XCTestExpectation
+    private var late: CheckedContinuation<Void, Never>?
+    private var deletion: CheckedContinuation<Void, Never>?
+    private(set) var requests: [URLRequest] = []
+
+    init(lateStarted: XCTestExpectation, deleteStarted: XCTestExpectation) {
+        self.lateStarted = lateStarted
+        self.deleteStarted = deleteStarted
+    }
+
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        requests.append(request)
+        let body: String
+        if request.httpMethod == "DELETE" {
+            await withCheckedContinuation { deletion = $0; deleteStarted.fulfill() }
+            body = #"{"id":"q","text":"Returned\ntext","mode":"queued"}"#
+        } else {
+            if requests.count > 1 {
+                await withCheckedContinuation { late = $0; lateStarted.fulfill() }
+            }
+            body = #"[{"id":"q","text":"Original preview","mode":"queued"}]"#
+        }
+        return (Data(body.utf8), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+    }
+
+    func releaseLate() { late?.resume(); late = nil }
+    func releaseDelete() { deletion?.resume(); deletion = nil }
 }
 
 private actor StubTransport: Transport {

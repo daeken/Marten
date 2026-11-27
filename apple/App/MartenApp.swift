@@ -30,7 +30,8 @@ struct RootView: View {
                               endPairedSession: connections.pairingEnabled && api.endpoint.url.scheme == "https"
                                   ? { connections.endRejectedPairedSession(api) } : nil,
                               routeID: connections.transportGeneration,
-                              networkActive: phase == .active && foregroundReady && !connections.busy && connections.routeUsable)
+                              networkActive: phase == .active && foregroundReady && !connections.busy && connections.routeUsable,
+                              composers: connections.composers)
                     .id(connections.workspaceID)
             } else {
                 ServerScreen(connections: connections)
