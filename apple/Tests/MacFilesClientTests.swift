@@ -308,6 +308,24 @@ final class MacFilesClientTests: XCTestCase, @unchecked Sendable {
         override func stopLoading() {}
     }
 
+    func testEmptyNonterminalPageAndLostReplyRequireRestartNotCursorReplay() throws {
+        var listing = MacFilesListing()
+        try listing.append(.init(entries: [], next: "one-use"), requested: "directory")
+        XCTAssertTrue(listing.rows.isEmpty)
+        XCTAssertEqual(listing.next, "one-use")
+        XCTAssertFalse(listing.needsRestart)
+        listing.continuationFailed("one-use")
+        XCTAssertTrue(listing.needsRestart)
+        XCTAssertNil(listing.next)
+        XCTAssertThrowsError(try listing.append(.init(entries: [], next: nil), requested: "one-use"))
+
+        listing = MacFilesListing()
+        try listing.append(.init(entries: [], next: "fresh"), requested: "directory")
+        try listing.append(.init(entries: [row(bytes: 4)], next: nil), requested: "fresh")
+        XCTAssertEqual(listing.rows.count, 1)
+        XCTAssertFalse(listing.needsRestart)
+    }
+
     func testListingCapsRowsAndEmptyFreshCursorsIndependently() throws {
         var empty = MacFilesListing()
         for i in 0..<MacFilesListing.pageLimit {

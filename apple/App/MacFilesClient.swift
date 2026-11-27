@@ -73,8 +73,17 @@ struct MacFilesListing {
     private var seen: Set<String> = []
     private var entryIDs: Set<String> = []
 
+    private(set) var needsRestart = false
+
+    /// A continuation may have been consumed even if its reply never arrived.
+    mutating func continuationFailed(_ cursor: String) {
+        guard cursor == next else { return }
+        next = nil
+        needsRestart = true
+    }
+
     mutating func append(_ page: MacFilePage, requested: String) throws {
-        guard !reachedLimit, seen.isEmpty || requested == next, !seen.contains(requested),
+        guard !reachedLimit, !needsRestart, seen.isEmpty || requested == next, !seen.contains(requested),
               page.next.map({ $0 != requested && !seen.contains($0) }) ?? true else { throw ClientError.malformed }
         let incoming = Set(page.entries.map(\.id))
         guard incoming.count == page.entries.count, entryIDs.isDisjoint(with: incoming) else { throw ClientError.malformed }

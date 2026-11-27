@@ -52,13 +52,19 @@ struct MacFilesView: View {
                 } else if issue == nil { ProgressView("Loading Mac locations…") }
             case .folder:
                 if let listing {
-                    if listing.rows.isEmpty { Text("No visible files.") }
+                    if listing.rows.isEmpty, listing.next == nil, !listing.needsRestart, !listing.reachedLimit {
+                        Text("No visible files.")
+                    }
                     ForEach(listing.rows) { row in
                         destination(row.directory ? .folder(row.id, row.name) : .file(row)) {
                             Label(row.name, systemImage: row.directory ? "folder" : "doc")
                         }
                     }
                     if let next = listing.next { Button("Load more") { more = next }.disabled(more != nil || !active) }
+                    if listing.needsRestart {
+                        Text("Could not continue this listing. Refresh to start again.").foregroundStyle(.secondary)
+                        Button("Restart listing") { refresh = UUID() }.disabled(!active)
+                    }
                     if listing.reachedLimit { Text("Listing limit reached. Open a subfolder to continue.").foregroundStyle(.secondary) }
                 } else if issue == nil { ProgressView("Loading files…") }
             case .file(let row):
@@ -109,7 +115,14 @@ struct MacFilesView: View {
                 guard permits(started) else { return }
                 try listing?.append(result, requested: more)
                 issue = nil
-            } catch { if permits(started) { fail(error) } }
+            } catch {
+                if permits(started) {
+                    switch error as? ClientError {
+                    case .unauthorized, .response(403): fail(error)
+                    default: listing?.continuationFailed(more)
+                    }
+                }
+            }
             if self.more == more && started == work { self.more = nil }
         }
         .task(id: work.job(previewRequest)) {
