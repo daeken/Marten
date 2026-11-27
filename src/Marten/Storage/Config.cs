@@ -4,12 +4,8 @@ namespace Marten.Storage;
 public sealed record Config {
 	/// <summary>Default model slug. Null means "first listed model" at first use.</summary>
 	public string? Model { get; init; }
-	/// <summary>
-	/// Where an agent goes when a provider blocks its request on policy grounds (a content filter or a
-	/// refusal) instead of failing it. Null keeps the agent where it is and fails the turn. It must be a
-	/// different model than the one that refused, and its backend must be connected, or nothing changes.
-	/// </summary>
-	public string? RefusalFallbackModel { get; init; } = "deepseek-flash";
+	/// <summary>Legacy config field kept for compatibility. Policy refusals never use a fallback.</summary>
+	public string? RefusalFallbackModel { get; init; }
 	/// <summary>Reasoning effort sent to the backend, or null for the backend default.</summary>
 	public string? Effort { get; init; }
 	public int Port { get; init; } = 7450;

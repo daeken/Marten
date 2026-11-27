@@ -57,7 +57,7 @@ For failure triage, read `agents/<id>/model-attempt-failure.json` in the Marten 
 
 ## Policy refusals
 
-Sometimes a provider blocks the request itself instead of failing it: OpenAI reports a content filter or policy code, or the model answers with a refusal, and Anthropic reports a refusal stop reason or its content-filtering error. Retrying the same model cannot help, so Marten moves the agent to `refusalFallbackModel` from `config.json` (default `deepseek-flash`) and leaves a note in its transcript: what refused it, why, which model it is on now, and that it can stay there, hand the work to a fresh agent with a fuller brief, or surface the refusal if it thinks the block was right. The switch sticks until something changes it, including the agent itself with `set_model`. One fallback per turn; a refusal on the fallback itself ends the turn as a normal error. Set `"refusalFallbackModel": null` to keep the old behaviour, where a refusal is just a failed turn.
+A recognized provider policy refusal (such as a content filter, policy code, or refusal stop) ends the turn. Marten shows a terminal error, notifies the parent and owners of unfinished tasks if any, and includes a known refusal code when available, without quoting the provider's explanation. It neither retries the blocked request nor switches models. The legacy `refusalFallbackModel` setting is accepted but ignored.
 
 ## Pausing and closing agents
 

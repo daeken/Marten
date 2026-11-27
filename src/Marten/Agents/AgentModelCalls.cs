@@ -67,46 +67,21 @@ public sealed partial class Agent {
 
 	static async Task Observe(Task pending) => await pending.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
 
-	/// <summary>
-	/// A provider blocked the request on policy grounds. Move the agent to the fallback model, and say so in
-	/// the transcript, together with the three things it can do: carry on where it is, hand the work to a
-	/// fresh agent with a fuller brief, or escalate the refusal if it thinks the block was right.
-	/// </summary>
-	void MoveToRefusalFallback(ModelRefusedException refused, string? from, string to) {
-		var refusedBy = from ?? manager.KnownDefaultModel ?? "The provider";
-		UpdateSettings(to, Info.Effort);
-		Append(new Entry { Kind = EntryKind.Message, From = NudgeSender, Text = RefusalNotice(refused, refusedBy, to) });
-		SetStatus(AgentStatus.Running, $"{refusedBy} refused the request; now on {to}.");
-	}
-
-	static string Clip(string text, int max) => text.Length <= max ? text : text[..max].TrimEnd() + "…";
-
-	string RefusalNotice(ModelRefusedException refused, string from, string to) {
-		var reason = !string.IsNullOrWhiteSpace(refused.Reason) ? refused.Reason
-			: !string.IsNullOrWhiteSpace(refused.Code) ? refused.Code : "the provider gave no reason";
-		// Keep the provider's code visible: it is what Sera and the orchestrator will search for.
-		if(refused.Code is { Length: > 0 } code && !string.Equals(code, reason, StringComparison.OrdinalIgnoreCase))
-			reason = $"{reason} [{code}]";
-		var options = Info.Kind switch {
-			AgentKind.Orchestrator =>
-				$"- Spawn a fresh agent with more context (spawn_agent) and hand the work over with a fuller brief, so it is less likely to be flagged again.\n" +
-				"- If you think the refusal was right and this shouldn't be done, surface it to Sera with send_message to \"sera\": what was asked, what was refused, and why.",
-			AgentKind.Chat =>
-				"- If you think the refusal was right and this shouldn't be done, say so plainly in your reply to Sera: what was asked, what was refused, and why. She can start a fresh chat with more context if the block was a mistake.",
-			_ =>
-				"- Ask your orchestrator (send_message) to spawn a fresh agent with more context and a fuller brief, so it is less likely to be flagged again.\n" +
-				"- If you think the refusal was right and this shouldn't be done, tell your orchestrator with send_message: what was asked, what was refused, and why.",
-		};
-		return $"{from} flagged this request and refused it: \"{Clip(reason, 400)}\"\n\n" +
-			$"You're on {to} now, for this call and after, until you change it (set_model). Nothing was lost: your history, tools and tasks are as they were.\n\n" +
-			$"You can choose to:\n- Stay here: carry on with the work on {to}.\n{options}";
+	// Exception text and unfamiliar codes may contain arbitrary provider body content.
+	static string RefusalDetail(ModelRefusedException refusal) {
+		var code = refusal.Code?.ToLowerInvariant();
+		if(code is not ("refusal" or "content_filter" or "content_policy_violation" or "policy_violation" or "invalid_prompt"
+			or "cyber_policy" or "harassment_policy")) code = null;
+		return $"The provider refused the request on policy grounds{(code == null ? "" : $" ({code})")}. " +
+			"The turn ended without retrying or switching models. Do not resubmit or reroute the blocked request";
 	}
 
 	void FailTurn(Exception e) {
+		var detail = e is ModelRefusedException refusal ? RefusalDetail(refusal) : e.Message;
 		AnswerDanglingCalls("Interrupted by a turn failure before this finished.");
-		Append(new Entry { Kind = EntryKind.Error, Text = $"Turn failed: {e.Message}" });
+		Append(new Entry { Kind = EntryKind.Error, Text = $"Turn failed: {detail}" });
 		Append(new Entry { Kind = EntryKind.Idle, Reason = "turn_error" });
-		SetStatus(AgentStatus.Error, e.Message);
+		SetStatus(AgentStatus.Error, detail);
 
 		var outstanding = Tasks.Where(t => t.State != TaskState.Done).ToList();
 		var recipients = outstanding.Select(t => t.AssignedBy).Append(Info.ParentId).OfType<string>().Distinct();
@@ -115,7 +90,7 @@ public sealed partial class Agent {
 			var relevant = outstanding.Where(t => id == Info.ParentId || t.AssignedBy == id).Select(t => $"#{t.Id} ({t.State})");
 			var list = string.Join(", ", relevant);
 			var tasksNote = list.Length == 0 ? "" : $" Unfinished tasks: {list}.";
-			var message = $"Marten: {AgentManager.Label(this)} stopped with a terminal turn error: {e.Message}.{tasksNote} No task states were changed.";
+			var message = $"Marten: {AgentManager.Label(this)} stopped with a terminal turn error: {detail}.{tasksNote} No task states were changed.";
 			recipient.Send(Inbound.FromAgent(this, message, SendMode.Queued) with { Reason = "turn_error" });
 		}
 	}

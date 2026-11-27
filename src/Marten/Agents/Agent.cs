@@ -589,14 +589,12 @@ public sealed partial class Agent : IPowerShellOwner {
 		int? lastOversizedReply = null;
 		var retainedSuffix = false;
 		var forceCompaction = false;
-		string? attemptModel = null;
-		var refused = false;
 		while(true) {
 			manager.Restart.ThrowIfStopping();
 			ct.ThrowIfCancellationRequested();
 			try {
 				await slots.EnsureAgent(ct);
-				var model = attemptModel = Info.Model ?? await RecoverNetwork(slots, async (recovery, token) => {
+				var model = Info.Model ?? await RecoverNetwork(slots, async (recovery, token) => {
 					await slots.EnsureAgent(token);
 					recovery?.CheckDeadline(token);
 					return await manager.DefaultModel(token);
@@ -623,15 +621,6 @@ public sealed partial class Agent : IPowerShellOwner {
 				retainedSuffix = false;
 				// Keep the forced compaction inside the retry loop, including its own quota/transient failures.
 				recoveringOverflow = forceCompaction = true;
-			} catch(ModelRefusedException e) {
-				// The provider blocked the request itself. Retrying it on the same model is pointless, so the
-				// agent moves to the fallback model for this call and after, and is told what happened and what
-				// it can do about it. Once per turn: if the fallback refuses too, nothing is left to try.
-				var fallback = refused ? null : manager.RefusalFallback(attemptModel ?? "");
-				if(fallback == null) throw;
-				refused = true;
-				transientFailures = 0;
-				MoveToRefusalFallback(e, attemptModel, fallback);
 			} catch(RateLimitedException e) {
 				slots.ReleaseAgent();
 				// Wait it out; never fail and never switch models.
