@@ -29,7 +29,7 @@ final class CompactWorkspaceTests: XCTestCase {
         let keyboard = app.keyboards.firstMatch
         XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
         // Hit the transcript's leading gutter, not a selectable text run or a control.
-        app.scrollViews.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.015, dy: 0.45)).tap()
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.015, dy: 0.35)).tap()
         XCTAssertTrue(keyboard.waitForNonExistence(timeout: 5))
         XCTAssertEqual(draft.value as? String, "First\nSecond")
         XCTAssertTrue(sends().isEmpty)
@@ -44,6 +44,37 @@ final class CompactWorkspaceTests: XCTestCase {
         let sent = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in !sends().isEmpty }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [sent], timeout: 8), .completed, "Draft: \(draft.value ?? "nil")")
         XCTAssertEqual(sends(), [#"send queued "First\nSecond""#])
+    }
+
+    @MainActor func testTapAwayAndRetryWithUnavailableTranscript() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        let gate = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: gate) }
+        app.launchEnvironment["MARTEN_FIXTURE_TRANSCRIPT_GATE"] = gate.path
+        app.launchEnvironment["MARTEN_FIXTURE_RESET"] = "1"
+        app.launch()
+        defer { app.terminate() }
+        XCTAssertTrue(app.navigationBars["Marten"].waitForExistence(timeout: 10))
+        let alpha = app.staticTexts["Standalone Alpha"].firstMatch
+        for _ in 0..<4 where !alpha.exists || !alpha.isHittable { app.swipeUp() }
+        XCTAssertTrue(alpha.waitForExistence(timeout: 10))
+        alpha.tap()
+        let retry = app.buttons["Retry Transcript"]
+        XCTAssertTrue(retry.waitForExistence(timeout: 20))
+        let draft = app.descendants(matching: .any)["messageDraft"].firstMatch
+        draft.tap()
+        draft.typeText("Keep this draft")
+        let keyboard = app.keyboards.firstMatch
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.08, dy: 0.25)).tap()
+        XCTAssertTrue(keyboard.waitForNonExistence(timeout: 5))
+        XCTAssertEqual(draft.value as? String, "Keep this draft")
+        XCTAssertTrue(retry.isHittable)
+        try Data().write(to: gate)
+        if retry.exists { retry.tap() }
+        XCTAssertTrue(app.buttons["Older transcript page"].waitForExistence(timeout: 10))
+        XCTAssertEqual(draft.value as? String, "Keep this draft")
     }
 
     @MainActor func testPendingRowsRecallOrStayReadOnly() throws {

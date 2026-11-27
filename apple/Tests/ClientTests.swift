@@ -852,6 +852,31 @@ final class ClientTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(requests.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-token" })
     }
 
+    @MainActor func testPendingTransientReadAndAmbiguousDeleteKeepRecoverySeparateFromDraft() async throws {
+        let rows = #"[{"id":"q","text":"Original text to recover","mode":"queued"}]"#
+        let transport = StubTransport([.init(200, rows), .init(503), .init(failure: .networkConnectionLost), .init(200, "[]")])
+        let api = API(endpoint: try Endpoint(Self.fixtureOrigin), token: "fixture-token", transport: transport)
+        let composer = PendingComposer(agent: "a")
+        let route = UUID()
+        await composer.refresh(using: api, route: route)
+        let row = try XCTUnwrap(composer.rows(on: route).first)
+        await composer.refresh(using: api, route: route)
+        XCTAssertEqual(composer.rows(on: route), [row])
+        XCTAssertTrue(composer.rows(on: UUID()).isEmpty)
+        let recall = try XCTUnwrap(composer.recall(row, using: api, route: route))
+        await recall.value
+        await composer.refresh(using: api, route: route)
+        XCTAssertTrue(composer.rows(on: route).isEmpty)
+        XCTAssertEqual(composer.uncertainRecall, row)
+        XCTAssertFalse(composer.canRecall)
+        XCTAssertTrue(composer.draft.isEmpty)
+        let sent = try await composer.send(using: api)
+        XCTAssertFalse(sent)
+        composer.dismissRecallRecovery()
+        XCTAssertNil(composer.uncertainRecall)
+        XCTAssertTrue(composer.draft.isEmpty)
+    }
+
     @MainActor func testPendingRecallRetainsReturnedTextAcrossNavigationAndRejectsLateRead() async throws {
         let lateStarted = expectation(description: "Old GET suspended")
         let deleteStarted = expectation(description: "Original route DELETE suspended")
