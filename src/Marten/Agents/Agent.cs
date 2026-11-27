@@ -185,7 +185,7 @@ public sealed partial class Agent : IPowerShellOwner {
 			if(Info.Closed == closed) return;
 			SaveClosed(closed);
 			if(closed) {
-				resumeReason = null;
+				ClearRecoveryWake();
 				activeTurn?.Cancel(closed: true);
 			}
 		}
@@ -226,8 +226,7 @@ public sealed partial class Agent : IPowerShellOwner {
 
 	/// <summary>Repair the log after a restart and decide whether a turn was cut short.</summary>
 	public void Recover() {
-		foreach(var item in Tasks)
-			foreach(var text in item.PendingDependencyWakes ?? []) QueueDependencyWake(text);
+		var dependencyWakes = Tasks.SelectMany(item => item.PendingDependencyWakes ?? []).ToList();
 		AnswerDanglingCalls("Interrupted: Marten stopped while this was running. It was not re-run; check its effects before retrying.");
 		var history = Transcript.Capture();
 		var reset = history.LastSeq(RowKind.Reset);
@@ -244,7 +243,21 @@ public sealed partial class Agent : IPowerShellOwner {
 		Append(new Entry { Kind = EntryKind.Message, From = NudgeSender, Text =
 			"Marten restarted. Interrupted calls were not re-run. Check logs, files, and external state before retrying; partial effects are possible." +
 			(interruptedTurn ? " Your previous turn was interrupted." : "") + interruptedOperations });
-		if(!Info.Closed && (interruptedTurn || interruptedOperations.Length > 0)) resumeReason = "restart";
+		// Publish recovered work only after all fallible disk repair. LoadAll removes an
+		// agent on repair failure; dependency wake records remain in tasks.json for
+		// the next successful recovery, with no orphaned in-memory registrations.
+		foreach(var text in dependencyWakes) QueueDependencyWake(text);
+		if(!Info.Closed && (interruptedTurn || interruptedOperations.Length > 0) && resumeReason == null) {
+			manager.Restart.ChangePendingMessages(1);
+			resumeReason = "restart";
+		}
+	}
+
+	// Called with gate held, either by explicit close or after acquiring a turn admission.
+	void ClearRecoveryWake() {
+		if(resumeReason == null) return;
+		resumeReason = null;
+		manager.Restart.ChangePendingMessages(-1);
 	}
 
 	/// <summary>Every tool call needs a result before the next model call; give unanswered ones an error.</summary>
@@ -366,7 +379,7 @@ public sealed partial class Agent : IPowerShellOwner {
 				var reasons = inbox.Select(m => m.Reason ?? (m.From == NudgeSender ? "nudge" : "message")).Distinct().ToList();
 				resuming = resumeReason != null;
 				reason = resumeReason ?? (reasons.Count == 1 ? reasons[0] : "message");
-				resumeReason = null;
+				ClearRecoveryWake();
 				activeTurn = turn = new Turn();
 			}
 			try {

@@ -122,6 +122,88 @@ public class ReleaseDrainTests {
 		Assert.Null(drain.GetRelease(First));
 	}
 
+	[Theory]
+	[InlineData(false)]
+	[InlineData(true)]
+	public async Task UnclaimedStartupRecoveryIsBusyUntilClaimedOrExplicitlyClosed(bool close) {
+		using var dir = new TempDir();
+		var home = new Home(dir.File("home"));
+		var backend = new FakeBackend { Gate = new(TaskCreationOptions.RunContinuationsAsynchronously) };
+		backend.Script.Enqueue(_ => FakeBackend.Say("recovered"));
+		var id = RecoveryFixture(home, dir);
+		new Transcript(System.IO.Path.Combine(home.AgentDir(id), "transcript")).Append(new Entry { Kind = EntryKind.Wake });
+		var manager = new AgentManager(home, new Config { Model = "fake-1" }, backend, new ToolRegistry());
+		// Seal before launching the loops so recovery is registered but cannot race
+		// ahead of the assertion. Production always loads before accepting HTTP.
+		Assert.Equal("ready", manager.Restart.BeginRelease(First, 30)?.State);
+		manager.LoadAll();
+		var recovered = manager.Get(id)!;
+		try {
+			Assert.Empty(backend.Requests);
+			Assert.Equal("busy", manager.Restart.GetRelease(First)?.State);
+			Assert.Equal(1, manager.Restart.GetRelease(First)?.PendingMessages);
+			if(close) {
+				recovered.SetClosed(true);
+				Assert.Equal("ready", manager.Restart.GetRelease(First)?.State);
+				Assert.True(recovered.Info.Closed);
+				Assert.Empty(backend.Requests);
+			} else {
+				Assert.True(manager.Restart.AbortRelease(First));
+				await Wait.Until(() => backend.Requests.Count == 1);
+				var claimed = manager.Restart.BeginRelease(Second, 30);
+				Assert.Equal("draining", claimed?.State);
+				Assert.Equal(0, claimed?.PendingMessages);
+				backend.Gate.SetResult();
+				await Wait.Until(() => manager.Restart.GetRelease(Second)?.State == "ready");
+				Assert.Equal(EntryKind.Idle, recovered.Transcript.Last?.Kind);
+			}
+		} finally {
+			backend.Gate.TrySetResult();
+			await manager.Restart.DrainAsync(TimeSpan.Zero, Deadline, () => { });
+		}
+	}
+
+	[Fact]
+	public async Task FailedRecoveryDoesNotOrphanADurableDependencyWakeRegistration() {
+		using var dir = new TempDir();
+		var home = new Home(dir.File("home"));
+		var id = RecoveryFixture(home, dir);
+		var agentDir = home.AgentDir(id);
+		var tasksPath = System.IO.Path.Combine(agentDir, "tasks.json");
+		const string wake = "durable dependency wake";
+		JsonIO.Save(tasksPath, new List<TaskItem> { new() { Id = 1, Title = "fixture", AssignedBy = "Sera", PendingDependencyWakes = [wake] } });
+		var obstructedSegment = System.IO.Path.Combine(agentDir, "transcript", "000001.jsonl");
+		Directory.CreateDirectory(obstructedSegment); // Index can load; startup append fails.
+		AgentManager Manager(FakeBackend backend) => new(home, new Config { Model = "fake-1" }, backend, new ToolRegistry());
+		var failed = Manager(new FakeBackend());
+		failed.LoadAll();
+		Assert.Null(failed.Get(id));
+		Assert.Equal(new[] { wake }, Assert.Single(JsonIO.Load(tasksPath, () => new List<TaskItem>())).PendingDependencyWakes);
+		Assert.Equal("ready", failed.Restart.BeginRelease(First, 30)?.State);
+		await failed.Restart.DrainAsync(TimeSpan.Zero, Deadline, () => { });
+
+		Directory.Delete(obstructedSegment);
+		var backend = new FakeBackend();
+		backend.Script.Enqueue(_ => FakeBackend.Say("processed"));
+		var retried = Manager(backend);
+		try {
+			retried.LoadAll();
+			var recovered = retried.Get(id)!;
+			await Wait.Until(() => recovered.Transcript.Last?.Kind == EntryKind.Idle);
+			Assert.Single(recovered.Transcript.Entries, e => e.Kind == EntryKind.Message && e.Text == wake);
+		} finally { await retried.Restart.DrainAsync(TimeSpan.Zero, Deadline, () => { }); }
+	}
+
+	static string RecoveryFixture(Home home, TempDir dir) {
+		const string id = "release-recovery-fixture";
+		var agentDir = home.AgentDir(id);
+		Directory.CreateDirectory(agentDir);
+		File.WriteAllText(System.IO.Path.Combine(agentDir, "system.md"), "Recovery test");
+		JsonIO.Save(System.IO.Path.Combine(agentDir, "agent.json"), new AgentInfo { Id = id, Kind = AgentKind.Chat,
+			Name = "Recovery test", Created = DateTimeOffset.UtcNow, WorkingDirectory = dir.Path });
+		return id;
+	}
+
 	[Fact]
 	public async Task BrowserCallbackCannotStartWhileReadyAndAdmittedExchangeCountsUntilCompletion() {
 		using var dir = new TempDir();
