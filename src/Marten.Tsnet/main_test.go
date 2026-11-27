@@ -303,6 +303,42 @@ func TestMacFilesProxyToKestrel(t *testing.T) {
 	if json.Unmarshal(statusBody, &status) != nil || !status.MacFiles {
 		t.Fatal("paired canonical status did not advertise Files")
 	}
+	control := func(method, path string, proof, trailer bool, want int, advertises bool) {
+		t.Helper()
+		var payload io.Reader
+		if trailer {
+			payload = strings.NewReader("fixture")
+		}
+		r, err := http.NewRequest(method, front.URL+"/api/"+path, payload)
+		if err != nil {
+			t.Fatal("invalid control request")
+		}
+		r.Host = host
+		r.Header.Set("Authorization", "Bearer "+fixture.Bearer)
+		if proof {
+			r.Header[nativeProofHeader] = []string{fixture.Ingress, strings.Repeat("c", 64)}
+			r.Header.Set("Connection", nativeProofHeader)
+		}
+		if trailer {
+			r.ContentLength = -1
+			r.Trailer = http.Header{nativeProofHeader: {fixture.Ingress}}
+		}
+		res, err := native.Do(r)
+		if err != nil {
+			t.Fatal("control request did not complete")
+		}
+		defer res.Body.Close()
+		body, err := io.ReadAll(res.Body)
+		if err != nil || res.StatusCode != want || strings.Contains(string(body), "macFiles") != advertises ||
+			res.Header.Get(nativeProofHeader) != "" || res.Trailer.Get(nativeProofHeader) != "" {
+			t.Fatalf("unexpected proof control response status: %d; want %d", res.StatusCode, want)
+		}
+	}
+	control(http.MethodGet, "status", true, false, 200, true)
+	control(http.MethodGet, "STATUS", true, false, 200, false)
+	control(http.MethodGet, "status", false, true, 400, false)
+	control(http.MethodGet, "mac-files/roots/", true, false, 404, false)
+	control(http.MethodPost, "mac-files/roots", true, false, 403, false)
 	const roots = "mac-files/roots"
 	get(native, fixture.URL, roots, host, fixture.Bearer, "", 403)
 	get(native, fixture.URL, roots, host, fixture.Bearer, strings.Repeat("0", 64), 403)
