@@ -254,7 +254,7 @@ final class MacFilesClientTests: XCTestCase, @unchecked Sendable {
         let deadline = clock.now.advanced(by: .seconds(5))
         var stagedSize = 0
         while clock.now < deadline {
-            stagedSize = (try? copy.url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            stagedSize = ((try? FileManager.default.attributesOfItem(atPath: copy.url.path)[.size]) as? NSNumber)?.intValue ?? 0
             if stagedSize > 64 * 1024 { break }
             try await Task.sleep(for: .milliseconds(10))
         }
