@@ -45,7 +45,7 @@ struct WorkspaceView: View {
 
     #if os(iOS)
     private var macFiles: MacFilesClient? {
-        guard networkActive, endPairedSession != nil, let macFilesSession,
+        guard endPairedSession != nil, let macFilesSession,
               macFilesSession.key.endpoint == api.endpoint, macFilesSession.key.route == routeID,
               macFilesSession.isCurrent(), controls.loadedRoute == routeID,
               statusError == nil, status?.macFiles == true else { return nil }
@@ -137,7 +137,7 @@ struct WorkspaceView: View {
             }
         }
         #if os(iOS)
-        if macFiles != nil {
+        if networkActive, macFiles != nil {
             Section("Mac") {
                 sidebarLink(.macFiles(.roots)) { Label("Mac Files", systemImage: "externaldrive") }
             }
@@ -210,11 +210,11 @@ struct WorkspaceView: View {
         case .macFiles(let page):
             if let macFiles, let macFilesSession, let endPairedSession {
                 MacFilesView(service: macFiles, page: page, scope: macFilesSession.key,
-                             active: path.last == destination, isCurrent: {
-                    macFilesSession.isCurrent() && path.last == destination &&
+                             active: networkActive && path.last == destination, isCurrent: {
+                    macFilesSession.isCurrent() && UIApplication.shared.applicationState == .active && path.last == destination &&
                     controls.loadedRoute == macFilesSession.key.route && controls.statusError == nil &&
                     controls.status?.macFiles == true
-                }, endSession: endPairedSession).id(macFilesSession.key)
+                }, endSession: endPairedSession).id(MacFilesView.Identity(scope: macFilesSession.key, page: page))
             } else {
                 ContentUnavailableView("Mac Files Unavailable", systemImage: "externaldrive")
             }
@@ -477,7 +477,7 @@ struct WorkspaceView: View {
 
 enum WorkspaceDestination: Hashable {
     #if os(iOS)
-    case macFiles(MacFilesView.Page)
+    case macFiles(MacFilesDestination)
     #endif
     case inbox, messages, providers, devices, agent(String)
     case createChat, createProject, memory(String)

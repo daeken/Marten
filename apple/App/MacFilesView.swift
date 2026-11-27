@@ -4,33 +4,37 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct MacFilesView: View {
-    enum Page: Hashable {
-        case roots
-        case folder(String, String)
-        case file(MacFileEntry)
+    struct Identity: Hashable {
+        let scope: MacFilesSession.Key
+        let page: MacFilesDestination
     }
     let service: MacFilesClient
-    let page: Page
+    let page: MacFilesDestination
     let scope: MacFilesSession.Key
     let active: Bool
     let isCurrent: @MainActor () -> Bool
     let endSession: () -> Void
+    @Environment(\.scenePhase) private var phase
     @State private var roots: [MacFileRoot]?
-    @State private var rows: [MacFileEntry]?
-    @State private var next: String?
+    @State private var listing: MacFilesListing?
     @State private var preview: Preview?
     @State private var issue: String?
     @State private var refresh = UUID()
     @State private var more: String?
     @State private var previewRequest: UUID?
     @State private var export: UUID?
-    @State private var staged: MacFilesStagedCopy?
+    @State private var staged: MacFilesShare?
     @State private var valid = UUID()
-    @State private var loadedPages: Set<String> = []
 
-    private enum Preview {
+    private var work: MacFilesWork { .init(scope: scope, destination: page, generation: valid) }
+    private var identity: Identity { .init(scope: scope, page: page) }
+    private func permits(_ started: MacFilesWork) -> Bool {
+        started.permits(work, destinationIsCurrent: isCurrent())
+    }
+
+    private enum Preview: Sendable {
         case text(String, truncated: Bool)
-        case image(UIImage)
+        case image(CGImage)
         case unavailable
     }
 
@@ -46,14 +50,15 @@ struct MacFilesView: View {
                     }
                 } else if issue == nil { ProgressView("Loading Mac locations…") }
             case .folder:
-                if let rows {
-                    if rows.isEmpty { Text("No visible files.") }
-                    ForEach(rows) { row in
+                if let listing {
+                    if listing.rows.isEmpty { Text("No visible files.") }
+                    ForEach(listing.rows) { row in
                         destination(row.directory ? .folder(row.id, row.name) : .file(row)) {
                             Label(row.name, systemImage: row.directory ? "folder" : "doc")
                         }
                     }
-                    if let next { Button("Load more") { more = next }.disabled(more != nil || !active) }
+                    if let next = listing.next { Button("Load more") { more = next }.disabled(more != nil || !active) }
+                    if listing.reachedLimit { Text("Listing limit reached. Open a subfolder to continue.").foregroundStyle(.secondary) }
                 } else if issue == nil { ProgressView("Loading files…") }
             case .file(let row):
                 if let bytes = row.bytes {
@@ -72,7 +77,7 @@ struct MacFilesView: View {
                     Text(text).font(.body.monospaced()).textSelection(.enabled)
                         .accessibilityIdentifier("mac-file-preview")
                 case .image(let image):
-                    Image(uiImage: image).resizable().scaledToFit().accessibilityLabel(row.name)
+                    Image(decorative: image, scale: 1, orientation: .up).resizable().scaledToFit().accessibilityLabel(row.name)
                 case .unavailable: Text("Preview unavailable. You can share a copy if the file is within the download limit.")
                 case nil: if previewRequest != nil { ProgressView("Loading preview…") }
                 }
@@ -83,60 +88,69 @@ struct MacFilesView: View {
         }
         .navigationTitle(title)
         .toolbar { Button("Refresh files", systemImage: "arrow.clockwise") { refresh = UUID() }.disabled(!active) }
-        .task(id: ReadKey(scope: scope, active: active, refresh: refresh)) {
-            reset()
-            if active && isCurrent() { await load() }
+        .task(id: ReadKey(identity: identity, active: active, refresh: refresh)) {
+            // UIKit can make the scene temporarily inactive as the share activity
+            // takes focus. Cancel network work and clear previews, not the handoff.
+            reset(keepShare: !active && phase != .background && staged != nil)
+            if active && isCurrent(), staged == nil { await load() }
         }
-        .task(id: more) {
+        .task(id: work.job(more)) {
             guard let more, active, isCurrent() else { return }
-            let version = valid
+            let started = work
             do {
                 let result = try await service.page(more)
-                guard !Task.isCancelled, version == valid, isCurrent() else { return }
-                guard let rows, Set(rows.map(\.id)).isDisjoint(with: result.entries.map(\.id)),
-                      result.next.map({ $0 != more && !loadedPages.contains($0) }) ?? true else { throw ClientError.malformed }
-                self.rows = rows + result.entries
-                loadedPages.insert(more)
-                next = result.next
+                guard permits(started) else { return }
+                try listing?.append(result, requested: more)
                 issue = nil
-            } catch { if !Task.isCancelled && version == valid && isCurrent() { fail(error) } }
-            if version == valid { self.more = nil }
+            } catch { if permits(started) { fail(error) } }
+            if self.more == more && started == work { self.more = nil }
         }
-        .task(id: previewRequest) {
+        .task(id: work.job(previewRequest)) {
             guard active, isCurrent(), let previewRequest, case .file(let row) = page, let purpose = previewPurpose(row) else { return }
-            let version = valid
+            let started = work
             defer { if self.previewRequest == previewRequest { self.previewRequest = nil } }
             do {
                 let result = try await filePreview(row, purpose: purpose)
-                guard !Task.isCancelled, version == valid, isCurrent() else { return }
+                guard permits(started) else { return }
                 preview = result
-            } catch { if !Task.isCancelled && version == valid && isCurrent() { fail(error) } }
+            } catch { if permits(started) { fail(error) } }
         }
-        .task(id: export) {
+        .task(id: work.job(export)) {
             guard active, isCurrent(), let export, case .file(let row) = page else { return }
-            let version = valid
+            let started = work
             defer { if self.export == export { self.export = nil } }
             do {
                 let file = try await service.share(row)
-                guard !Task.isCancelled, version == valid, isCurrent() else { file.discardUnpublished(); return }
-                staged = file
-            } catch { if !Task.isCancelled && version == valid && isCurrent() { fail(error) } }
+                guard let share = started.share(file, current: work, destinationIsCurrent: isCurrent()) else { return }
+                staged = share
+            } catch { if permits(started) { fail(error) } }
         }
         .onDisappear { reset() }
-        .task(id: staged?.url) {
+        .onChange(of: phase) { _, phase in
+            if phase == .background { reset() }
+        }
+        .task(id: identityWithShare) {
             guard let staged else { return }
             do { try await Task.sleep(for: .seconds(300)) } catch { return }
             guard self.staged === staged else { return }
-            self.staged = nil // Request dismissal, but let UIKit release its lease.
+            dismissShare() // Drop app ownership, but let UIKit finish with its lease.
         }
-        .sheet(item: $staged) { file in
-            ActivitySheet(file: file) {
-                if staged === file { staged = nil }
+        .sheet(item: $staged) { share in
+            if let lease = share.leaseForActivity() {
+                ActivitySheet(lease: lease) {
+                    share.requestCleanup()
+                    if staged === share { staged = nil }
+                }
+                .onDisappear { share.requestCleanup() }
             }
         }
     }
 
-    private struct ReadKey: Hashable { let scope: MacFilesSession.Key; let active: Bool; let refresh: UUID }
+    private var identityWithShare: MacFilesWork.Job<UUID?> {
+        MacFilesWork(scope: scope, destination: page, generation: refresh).job(staged?.id)
+    }
+
+    private struct ReadKey: Hashable { let identity: Identity; let active: Bool; let refresh: UUID }
 
     private var title: String { switch page {
     case .roots: "Mac Files"
@@ -144,15 +158,20 @@ struct MacFilesView: View {
     case .file(let row): row.name
     } }
 
-    private func destination<V: View>(_ page: Page, @ViewBuilder label: () -> V) -> some View {
+    private func destination<V: View>(_ page: MacFilesDestination, @ViewBuilder label: () -> V) -> some View {
         NavigationLink(value: WorkspaceDestination.macFiles(page), label: label)
     }
 
-    private func reset() {
+    private func reset(keepShare: Bool = false) {
         valid = UUID()
-        roots = nil; rows = nil; next = nil; preview = nil; issue = nil; more = nil
-        previewRequest = nil; export = nil; loadedPages = []
-        staged = nil // Never unlink a file the activity controller may still be using.
+        roots = nil; listing = nil; preview = nil; issue = nil; more = nil
+        previewRequest = nil; export = nil
+        if !keepShare { dismissShare() }
+    }
+
+    private func dismissShare() {
+        staged?.requestCleanup()
+        staged = nil
     }
 
     private func fail(_ error: Error) {
@@ -179,25 +198,38 @@ struct MacFilesView: View {
     }
 
     private func load() async {
-        let version = valid
+        let started = work
         do {
             switch page {
             case .roots:
                 let value = try await service.roots()
-                if !Task.isCancelled, valid == version, isCurrent() { roots = value }
+                if permits(started) { roots = value }
             case .folder(let id, _):
                 let value = try await service.page(id)
-                if !Task.isCancelled, valid == version, isCurrent() { rows = value.entries; next = value.next; loadedPages = [id] }
+                if permits(started) {
+                    var first = MacFilesListing()
+                    try first.append(value, requested: id)
+                    listing = first
+                }
             case .file:
                 break // No bytes before a distinct Preview or Share action.
             }
-        } catch { if !Task.isCancelled, valid == version, isCurrent() { fail(error) } }
+        } catch { if permits(started) { fail(error) } }
     }
 
     private func filePreview(_ row: MacFileEntry, purpose: MacFilePurpose) async throws -> Preview {
         let bytes = try await service.preview(row, purpose)
+        try Task.checkCancellation()
+        let decode = Task.detached(priority: .userInitiated) {
+            try Task.checkCancellation()
+            return Self.decodePreview(bytes, sourceSize: row.bytes ?? 0, purpose: purpose)
+        }
+        return try await withTaskCancellationHandler { try await decode.value } onCancel: { decode.cancel() }
+    }
+
+    nonisolated private static func decodePreview(_ bytes: Data, sourceSize: Int64, purpose: MacFilePurpose) -> Preview {
         if purpose == .text {
-            let truncated = (row.bytes ?? 0) > Int64(bytes.count)
+            let truncated = sourceSize > Int64(bytes.count)
             for drop in 0...(truncated ? min(3, bytes.count) : 0) {
                 let prefix = bytes.dropLast(drop)
                 if !prefix.contains(0), let text = String(data: Data(prefix), encoding: .utf8) {
@@ -215,7 +247,7 @@ struct MacFilesView: View {
                (1...8192).contains(width), (1...8192).contains(height), width * height <= 16_000_000,
                let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true,
                     kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceThumbnailMaxPixelSize: 1600] as CFDictionary) {
-                return .image(UIImage(cgImage: thumbnail))
+                return .image(thumbnail)
             }
         }
         return .unavailable
@@ -223,26 +255,27 @@ struct MacFilesView: View {
 }
 
 private struct ActivitySheet: UIViewControllerRepresentable {
-    let file: MacFilesStagedCopy
+    let lease: MacFilesShare.Lease
     let completed: () -> Void
 
-    func makeCoordinator() -> Coordinator { Coordinator(file: file) }
-
     func makeUIViewController(context: Context) -> UIActivityViewController {
-        let controller = UIActivityViewController(activityItems: [file.url], applicationActivities: nil)
-        // SwiftUI may dismiss/remove the view on a route change while UIKit is still
-        // using the item. The controller keeps this lease until completion or teardown.
-        let lease = context.coordinator
-        controller.completionWithItemsHandler = { _, _, _, _ in
+        let item = ActivityFile(lease: lease)
+        let controller = UIActivityViewController(activityItems: [item], applicationActivities: nil)
+        // The actual controller (not just the SwiftUI sheet) also owns the lease.
+        controller.completionWithItemsHandler = { [lease] _, _, _, _ in
             withExtendedLifetime(lease) { completed() }
         }
         return controller
     }
     func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 
-    final class Coordinator: Sendable {
-        let file: MacFilesStagedCopy
-        init(file: MacFilesStagedCopy) { self.file = file }
+    private final class ActivityFile: NSObject, UIActivityItemSource {
+        let lease: MacFilesShare.Lease
+        init(lease: MacFilesShare.Lease) { self.lease = lease }
+
+        func activityViewControllerPlaceholderItem(_ activityViewController: UIActivityViewController) -> Any { lease.url }
+        func activityViewController(_ activityViewController: UIActivityViewController,
+                                    itemForActivityType activityType: UIActivity.ActivityType?) -> Any? { lease.url }
     }
 }
 #endif

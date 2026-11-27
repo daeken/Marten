@@ -29,6 +29,84 @@ struct MacFilePage: Decodable, Sendable {
     let next: String?
 }
 
+enum MacFilesDestination: Hashable, Sendable {
+    case roots
+    case folder(String, String)
+    case file(MacFileEntry)
+}
+
+struct MacFilesWork: Hashable, Sendable {
+    let scope: MacFilesSession.Key
+    let destination: MacFilesDestination
+    let generation: UUID
+
+    struct Job<ID: Hashable>: Hashable {
+        let work: MacFilesWork
+        let id: ID
+    }
+
+    func job<ID: Hashable>(_ id: ID) -> Job<ID> { Job(work: self, id: id) }
+
+    func permits(_ current: Self, destinationIsCurrent: Bool) -> Bool {
+        self == current && destinationIsCurrent && !Task.isCancelled
+    }
+
+    @MainActor func share(_ copy: MacFilesStagedCopy, current: Self, destinationIsCurrent: Bool) -> MacFilesShare? {
+        guard permits(current, destinationIsCurrent: destinationIsCurrent) else {
+            copy.discardUnpublished()
+            return nil
+        }
+        return MacFilesShare(copy)
+    }
+}
+
+/// Both bounds are independent of server-provided IDs (including empty pages).
+struct MacFilesListing {
+    static let rowLimit = 2_048
+    static let pageLimit = 64
+    private(set) var rows: [MacFileEntry] = []
+    private(set) var next: String?
+    private(set) var reachedLimit = false
+    private var seen: Set<String> = []
+    private var entryIDs: Set<String> = []
+
+    mutating func append(_ page: MacFilePage, requested: String) throws {
+        guard !reachedLimit, seen.isEmpty || requested == next, !seen.contains(requested),
+              page.next.map({ $0 != requested && !seen.contains($0) }) ?? true else { throw ClientError.malformed }
+        let incoming = Set(page.entries.map(\.id))
+        guard incoming.count == page.entries.count, entryIDs.isDisjoint(with: incoming) else { throw ClientError.malformed }
+        guard page.entries.count <= Self.rowLimit - rows.count, seen.count < Self.pageLimit else {
+            next = nil
+            reachedLimit = true
+            return
+        }
+        seen.insert(requested)
+        rows.append(contentsOf: page.entries)
+        entryIDs.formUnion(incoming)
+        reachedLimit = page.next != nil && (rows.count == Self.rowLimit || seen.count == Self.pageLimit)
+        next = reachedLimit ? nil : page.next
+    }
+}
+
+/// App-side presentation ownership is separate from the strong UIKit lease.
+@MainActor final class MacFilesShare: Identifiable {
+    let id = UUID()
+    private var copy: MacFilesStagedCopy?
+
+    init(_ copy: MacFilesStagedCopy) { self.copy = copy }
+
+    func leaseForActivity() -> Lease? { copy.map(Lease.init) }
+
+    /// Marks cleanup pending: the copy survives only if the activity already owns it.
+    func requestCleanup() { copy = nil }
+
+    final class Lease: Sendable {
+        fileprivate let copy: MacFilesStagedCopy
+        var url: URL { copy.url }
+        fileprivate init(_ copy: MacFilesStagedCopy) { self.copy = copy }
+    }
+}
+
 enum MacFilePurpose: String, Sendable {
     case text, raster, share
 
@@ -187,7 +265,7 @@ struct MacFilesClient: Sendable {
     }
 }
 
-final class MacFilesStagedCopy: Identifiable, Sendable {
+final class MacFilesStagedCopy: Sendable {
     private let folder: URL
     let url: URL
     private static var parent: URL {

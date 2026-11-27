@@ -92,6 +92,121 @@ final class MacFilesClientTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(FileManager.default.fileExists(atPath: partial.path))
     }
 
+    @MainActor func testLatePublicationRejectsDestinationSessionRouteAndGeneration() throws {
+        let session = UUID(), route = UUID(), generation = UUID()
+        let scope = MacFilesSession.Key(endpoint: endpoint, pairedSession: session, route: route)
+        let destination = MacFilesDestination.file(row(bytes: 4))
+        let started = MacFilesWork(scope: scope, destination: destination, generation: generation)
+        let changed: [MacFilesWork] = [
+            .init(scope: scope, destination: .folder("home", "Home"), generation: generation),
+            .init(scope: scope, destination: .file(row(bytes: 5)), generation: generation),
+            .init(scope: scope, destination: destination, generation: UUID()),
+            .init(scope: .init(endpoint: endpoint, pairedSession: session, route: UUID()), destination: destination, generation: generation),
+            .init(scope: .init(endpoint: endpoint, pairedSession: UUID(), route: route), destination: destination, generation: generation),
+            .init(scope: .init(endpoint: try Endpoint("https://other.example.ts.net"), pairedSession: session, route: route),
+                  destination: destination, generation: generation)
+        ]
+        XCTAssertTrue(started.permits(started, destinationIsCurrent: true))
+        XCTAssertFalse(started.permits(started, destinationIsCurrent: false))
+        for current in changed {
+            XCTAssertFalse(started.permits(current, destinationIsCurrent: true)) // preview
+            let unpublished = try MacFilesStagedCopy.create(leaf: "test")
+            XCTAssertNil(started.share(unpublished, current: current, destinationIsCurrent: true))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: unpublished.url.path))
+        }
+    }
+
+    @MainActor func testCancelledLatePreviewCannotPublishAndShareLeaseSurvivesDismissal() async throws {
+        let key = MacFilesWork(scope: .init(endpoint: endpoint, pairedSession: UUID(), route: UUID()),
+                               destination: .file(row(bytes: 4)), generation: UUID())
+        let latch = Latch()
+        let preview = Task {
+            await latch.park()
+            return key.permits(key, destinationIsCurrent: true)
+        }
+        await latch.waitUntilParked()
+        preview.cancel()
+        await latch.release()
+        let canPublish = await preview.value
+        XCTAssertFalse(canPublish)
+
+        let activity = try XCTUnwrap(key.share(MacFilesStagedCopy.create(leaf: "test"),
+                                               current: key, destinationIsCurrent: true))
+        var lease = activity.leaseForActivity()
+        let path = try XCTUnwrap(lease).url.path
+        activity.requestCleanup() // expiry, navigation, or revocation only dismisses
+        XCTAssertNil(activity.leaseForActivity())
+        withExtendedLifetime(lease) {
+            XCTAssertTrue(FileManager.default.fileExists(atPath: path))
+        }
+        lease = nil // UIKit completes and releases ownership
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+    }
+
+    func testCancelledAfterWritingAChunkDeletesPartialShare() async throws {
+        let latch = Latch()
+        let fixture = Reader(mode: .midBody(latch))
+        let client = try client(fixture)
+        let entry = row(bytes: 64 * 1024 + 1)
+        let transfer = Task { try await client.share(entry) }
+        await latch.waitUntilParked()
+        let staging = await fixture.staging
+        let partial = try XCTUnwrap(staging)
+        let observed = try Data(contentsOf: partial).count
+        XCTAssertEqual(observed, 64 * 1024)
+        transfer.cancel()
+        await latch.release()
+        do { _ = try await transfer.value; XCTFail("cancelled staged body published") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: partial.path))
+    }
+
+    func testListingCapsRowsAndEmptyFreshCursorsIndependently() throws {
+        var empty = MacFilesListing()
+        for i in 0..<MacFilesListing.pageLimit {
+            try empty.append(.init(entries: [], next: "page-\(i+1)"), requested: "page-\(i)")
+        }
+        XCTAssertTrue(empty.reachedLimit)
+        XCTAssertNil(empty.next)
+        XCTAssertThrowsError(try empty.append(.init(entries: [], next: "never"), requested: "never"))
+
+        let rows = (0..<MacFilesListing.rowLimit).map {
+            MacFileEntry(id: "row-\($0)", name: "file", directory: false, bytes: 4, modified: "time")
+        }
+        var listing = MacFilesListing()
+        try listing.append(.init(entries: rows, next: "fresh"), requested: "home")
+        XCTAssertTrue(listing.reachedLimit)
+        XCTAssertNil(listing.next)
+        XCTAssertEqual(listing.rows.count, MacFilesListing.rowLimit)
+        var loop = MacFilesListing()
+        try loop.append(.init(entries: [], next: "two"), requested: "one")
+        XCTAssertThrowsError(try loop.append(.init(entries: [], next: "one"), requested: "two"))
+    }
+
+    private actor Latch {
+        private var parked: CheckedContinuation<Void, Never>?
+        private var observer: CheckedContinuation<Void, Never>?
+        private var emitted = 0
+
+        func park() async {
+            await withCheckedContinuation {
+                parked = $0
+                observer?.resume()
+                observer = nil
+            }
+        }
+        func waitUntilParked() async {
+            if parked != nil { return }
+            await withCheckedContinuation { observer = $0 }
+        }
+        func release() { parked?.resume(); parked = nil }
+        func next() async -> UInt8? {
+            emitted += 1
+            if emitted == 64 * 1024 + 1 { await park() }
+            return emitted <= 64 * 1024 + 1 ? 1 : nil
+        }
+    }
+
     private func client(_ fixture: Reader) throws -> MacFilesClient {
         try XCTUnwrap(MacFilesClient(api: API(endpoint: endpoint, token: token,
                                               transport: TailnetTransport(endpoint: endpoint, transport: fixture))))
@@ -102,7 +217,7 @@ final class MacFilesClientTests: XCTestCase, @unchecked Sendable {
     }
 
     private actor Reader: MacFilesTransport {
-        enum Mode { case valid, short, long, fail, suspend }
+        enum Mode { case valid, short, long, fail, suspend, midBody(Latch) }
         let mode: Mode
         private(set) var calls: [String] = []
         private(set) var staging: URL?
@@ -151,6 +266,8 @@ final class MacFilesClientTests: XCTestCase, @unchecked Sendable {
                 case .suspend:
                     try await Task.sleep(for: .seconds(10))
                     throw ClientError.network
+                case .midBody(let latch):
+                    return try await policy.consume(AsyncStream(unfolding: { await latch.next() }), staging: staging)
                 }
             }
             let reply = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: [
