@@ -532,8 +532,13 @@ private struct ConversationView: View {
 
     var body: some View {
         Group {
-            if timeline.page == nil { initialTranscriptState }
-            else { transcript }
+            if timeline.page == nil {
+                initialTranscriptState
+                #if os(iOS)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background { keyboardDismissSurface }
+                #endif
+            } else { transcript }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) { composer }
         .task(id: PendingHint(event: pendingHint, local: pending.changeHint, route: routeID, active: networkActive)) {
@@ -730,6 +735,25 @@ private struct ConversationView: View {
             ProgressView("Recalling message…").font(.footnote)
         } else if let notice = pending.recallNotice {
             Text(notice).font(.footnote).foregroundStyle(.secondary)
+            if let recovery = pending.uncertainRecall {
+                HStack {
+                    Text(recovery.text).font(.footnote).lineLimit(2)
+                        .accessibilityLabel("Unconfirmed recall: \(recovery.text)")
+                    Spacer()
+                    Button("Copy") {
+                        #if os(iOS)
+                        UIPasteboard.general.string = recovery.text
+                        #elseif os(macOS)
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(recovery.text, forType: .string)
+                        #endif
+                    }
+                    .accessibilityLabel("Copy unconfirmed message text")
+                    Button("Dismiss") { pending.dismissRecallRecovery() }
+                        .accessibilityLabel("Dismiss unconfirmed recall")
+                }
+                .buttonStyle(.borderless)
+            }
         }
     }
 

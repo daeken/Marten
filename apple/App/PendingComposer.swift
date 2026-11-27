@@ -45,6 +45,12 @@ struct PendingOperatorMessage: Decodable, Identifiable, Equatable, Sendable {
     private(set) var recalling = false
     private(set) var sending = false
     private(set) var recallNotice: String?
+    private(set) var uncertainRecall: PendingOperatorMessage?
+
+    func dismissRecallRecovery() {
+        uncertainRecall = nil
+        recallNotice = nil
+    }
 
     init(agent: String) { self.agent = agent }
 
@@ -57,13 +63,15 @@ struct PendingOperatorMessage: Decodable, Identifiable, Equatable, Sendable {
         draft = text
     }
 
-    var canRecall: Bool { !sending && !recalling && draft.isEmpty }
+    var canRecall: Bool { !sending && !recalling && uncertainRecall == nil && draft.isEmpty }
 
     func refresh(using api: API, route: UUID) async {
         guard !Task.isCancelled, !recalling else { return }
         let read = UUID()
         revision = read
-        let list = (try? await api.pendingMessages(agent)) ?? []
+        // A transport/server failure is not proof of an empty queue. Legacy
+        // endpoint responses are normalized to a successful empty list by API.
+        guard let list = try? await api.pendingMessages(agent) else { return }
         guard !Task.isCancelled, read == revision else { return }
         snapshotRoute = route
         messages = list
@@ -86,6 +94,7 @@ struct PendingOperatorMessage: Decodable, Identifiable, Equatable, Sendable {
                     recallNotice = "That message is no longer pending."
                 }
             } catch {
+                uncertainRecall = row
                 recallNotice = "Could not confirm recall. Check the pending messages and transcript before sending again."
             }
             // A previously started GET must never resurrect this row. Refetch

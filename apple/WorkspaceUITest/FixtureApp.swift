@@ -99,6 +99,15 @@ actor Fixture: Transport {
             let call = url.lastPathComponent
             let id = url.deletingLastPathComponent().lastPathComponent
             let archived = url.query?.contains("before=") == true
+            if id == "a", !archived,
+               let gate = ProcessInfo.processInfo.environment["MARTEN_FIXTURE_TRANSCRIPT_GATE"],
+               !FileManager.default.fileExists(atPath: gate) {
+                if latestReads[id] == nil {
+                    latestReads[id] = 0
+                    try await Task.sleep(for: .seconds(12))
+                }
+                return (Data(), HTTPURLResponse(url: url, statusCode: 503, httpVersion: nil, headerFields: nil)!)
+            }
             let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
             try record("\(id) \(call) \(archived ? "archive" : "latest") \(query.first { $0.name == "limit" }?.value ?? "missing-limit")")
             if ProcessInfo.processInfo.environment["MARTEN_FIXTURE_POSTURE_TRACE"] == "1" {
