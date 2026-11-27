@@ -103,6 +103,24 @@ public class RestartTests {
 		Assert.Empty(restarted.Requests);
 	}
 
+	[Fact]
+	public void EmptyAssistantWithRawReplayCompletesInterruptedWakeWithoutResuming() {
+		using var dir = new TempDir();
+		var agent = Manager(dir, new FakeBackend()).CreateChat("raw-only", dir.Path);
+		using var raw = System.Text.Json.JsonDocument.Parse("{\"type\":\"message\",\"content\":[]}");
+		agent.Transcript.Append(new Entry { Kind = EntryKind.Wake });
+		agent.Transcript.Append(new Entry { Kind = EntryKind.Assistant, Text = "", Raw = raw.RootElement, Provider = "openai" });
+		var backend = new FakeBackend();
+		var restarted = Manager(dir, backend);
+		restarted.LoadAll();
+		var again = restarted.Get(agent.Info.Id)!;
+		Assert.Equal([EntryKind.Wake, EntryKind.Assistant, EntryKind.Idle, EntryKind.Message], again.Transcript.Entries.Select(e => e.Kind));
+		var assistant = Assert.Single(again.View(), e => e.Kind == EntryKind.Assistant);
+		Assert.Equal("", assistant.Text);
+		Assert.Equal(raw.RootElement.GetRawText(), assistant.Raw!.Value.GetRawText());
+		Assert.Empty(backend.Requests);
+	}
+
 	sealed class HeldTool : ITool {
 		public readonly TaskCompletionSource Started = new(TaskCreationOptions.RunContinuationsAsynchronously);
 		public readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
