@@ -40,18 +40,33 @@ var enrollmentKey = regexp.MustCompile(`^tskey-auth-[a-zA-Z0-9_-]+$`)
 
 func main() {
 	log.SetOutput(io.Discard)
-	args := os.Args[1:]
-	var proof string
-	if len(args) == 5 && args[4] == "mac-files-v1" {
-		var payload [64]byte
-		if _, err := io.ReadFull(os.Stdin, payload[:]); err != nil || !regexp.MustCompile(`^[0-9a-f]{64}$`).Match(payload[:]) {
-			os.Exit(badConfig)
-		}
-		proof, args = string(payload[:]), args[:4]
+	args, proof, ok := readBootstrap(os.Args[1:], os.Stdin)
+	if !ok {
+		os.Exit(badConfig)
 	}
 	// The parent holds the only writer; EOF remains the lifetime lease.
-	go func() { _, _ = io.Copy(io.Discard, os.Stdin); os.Exit(0) }()
+	go func() { awaitLeaseEOF(os.Stdin); os.Exit(0) }()
 	os.Exit(run(args, proof))
+}
+
+var proofFormat = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+func readBootstrap(args []string, stdin io.Reader) ([]string, string, bool) {
+	if len(args) == 4 {
+		return args, "", true // legacy disabled mode reads no bootstrap bytes
+	}
+	if len(args) != 5 || args[4] != "mac-files-v1" {
+		return nil, "", false
+	}
+	var payload [64]byte
+	if _, err := io.ReadFull(stdin, payload[:]); err != nil || !proofFormat.Match(payload[:]) {
+		return nil, "", false
+	}
+	return args[:4], string(payload[:]), true
+}
+
+func awaitLeaseEOF(stdin io.Reader) {
+	_, _ = io.Copy(io.Discard, stdin)
 }
 
 func run(args []string, proof string) int {

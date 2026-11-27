@@ -122,7 +122,7 @@ public class MacFilesTests {
 		var resume = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 		var held = 0;
 		await using var f = await Fixture.Start(publicationFixture: async phase => {
-			if(phase == afterCommit && Interlocked.Exchange(ref held, 1) == 0) {
+			if(phase == (afterCommit ? MacFiles.PublicationPhase.Committed : MacFiles.PublicationPhase.Staged) && Interlocked.Exchange(ref held, 1) == 0) {
 				reached.SetResult();
 				await resume.Task.WaitAsync(TimeSpan.FromSeconds(10));
 			}
@@ -147,20 +147,30 @@ public class MacFilesTests {
 	public async Task CanonicalGoTlsToRealKestrelWhenFixtureExecutableProvided() {
 		var executable = Environment.GetEnvironmentVariable("MARTEN_MAC_FILES_PROXY_FIXTURE");
 		if(executable == null || !MacFileSystem.Supported) return;
-		await using var f = await Fixture.Start(host: "example.com");
+		var resume = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+		var chunks = 0;
+		await using var f = await Fixture.Start(host: "example.com", publicationFixture: async phase => {
+			if(phase == MacFiles.PublicationPhase.FirstChunk && Interlocked.Increment(ref chunks) == 2)
+				await resume.Task.WaitAsync(TimeSpan.FromSeconds(10));
+		});
 		await File.WriteAllTextAsync(Path.Combine(f.Root, ".fixture"), "scratch bytes");
-		await f.VerifyTls(executable);
+		using(var large = File.Create(Path.Combine(f.Root, "large"))) large.SetLength(4 * 1024 * 1024);
+		try { await f.VerifyTls(executable, resume); } finally { resume.TrySetResult(); }
+		using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+		while(f.ActiveOperations != 0) await Task.Delay(10, timeout.Token);
+		Assert.Equal(HttpStatusCode.OK, (await f.Get("roots", token: f.Other)).StatusCode);
 	}
 
 	sealed class Fixture(TempDir data, WebApplication app, string url, string root, string bearer, string other,
-		string op, string ingress, string host, DevicePairing pairing, Guid first) : IAsyncDisposable {
+		string op, string ingress, string host, DevicePairing pairing, Guid first, MacFiles files) : IAsyncDisposable {
 		readonly HttpClient client = new() { BaseAddress = new Uri(url) };
 		public string Other => other;
 		public string Operator => op;
 		public string Root => root;
 		string Host => host;
 		public void RevokeFirst() => Assert.True(pairing.Revoke(first));
-		public async Task VerifyTls(string executable) {
+		public int ActiveOperations => files.ActiveOperations;
+		public async Task VerifyTls(string executable, TaskCompletionSource resume) {
 			var start = new System.Diagnostics.ProcessStartInfo(executable) {
 				UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
 			};
@@ -170,15 +180,20 @@ public class MacFilesTests {
 			try {
 				await process.StandardInput.WriteLineAsync(JsonSerializer.Serialize(new { url, bearer, ingress }));
 				process.StandardInput.Close();
-				var output = process.StandardOutput.ReadToEndAsync();
 				var error = process.StandardError.ReadToEndAsync();
 				using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+				var signal = await process.StandardOutput.ReadLineAsync(timeout.Token);
+				var output = process.StandardOutput.ReadToEndAsync();
+				Assert.True(signal == "FIXTURE-FIRST-CHUNK", (signal ?? "") + (signal == "FIXTURE-FIRST-CHUNK" ? "" : await output));
+				Assert.Equal(1, ActiveOperations);
+				RevokeFirst();
+				resume.TrySetResult();
 				await process.WaitForExitAsync(timeout.Token);
 				Assert.True(process.ExitCode == 0, (await output) + (await error));
 			} finally { if(!process.HasExited) process.Kill(entireProcessTree: true); }
 		}
 
-		public static async Task<Fixture> Start(bool enabled = true, Func<bool, Task>? publicationFixture = null,
+		public static async Task<Fixture> Start(bool enabled = true, Func<MacFiles.PublicationPhase, Task>? publicationFixture = null,
 			string host = "mac-files.example") {
 			var data = new TempDir();
 			var root = Directory.CreateDirectory(data.File("scratch")).FullName;
@@ -204,7 +219,7 @@ public class MacFilesTests {
 			app.MapGet("/api/proof-control", (HttpContext ctx) => ctx.Request.Headers.ContainsKey(TailnetTransport.NativeProofHeader)
 				? Microsoft.AspNetCore.Http.Results.BadRequest() : Microsoft.AspNetCore.Http.Results.NoContent()).AllowPaired();
 			await app.StartAsync();
-			return new Fixture(data, app, app.Urls.Single(), root, bearer, other, security.Token, ingress, host, pairing, first);
+			return new Fixture(data, app, app.Urls.Single(), root, bearer, other, security.Token, ingress, host, pairing, first, files);
 		}
 
 		public async Task<HttpResponseMessage> Get(string tail, string? token = null, bool proof = true, string? host = null, bool range = false) {

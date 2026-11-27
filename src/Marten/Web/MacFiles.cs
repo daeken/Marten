@@ -8,8 +8,10 @@ using static Marten.Web.MacFileSystem;
 namespace Marten.Web;
 
 internal sealed class MacFiles(bool enabled, Func<HttpContext, bool> nativeIngress, DevicePairing pairing,
-	CancellationToken stopping, string rootPath = "/", Func<bool, Task>? publicationFixture = null, Func<bool>? ingressReady = null) {
+	CancellationToken stopping, string rootPath = "/", Func<MacFiles.PublicationPhase, Task>? publicationFixture = null, Func<bool>? ingressReady = null) {
 	internal sealed class Route;
+	internal enum PublicationPhase { Staged, Committed, FirstChunk }
+	internal int ActiveOperations { get { lock(gate) return busy.Count; } }
 	static readonly Regex NativeFilesTarget = new(@"\A/api/mac-files/(?:roots|entries/[0-9a-f]{32}|bytes/[0-9a-f]{32}/(?:text|raster|share))\z",
 		RegexOptions.NonBacktracking | RegexOptions.CultureInvariant);
 	static bool CanonicalGet(HttpContext ctx) => HttpMethods.IsGet(ctx.Request.Method) && !ctx.Request.Headers.ContainsKey("Origin") &&
@@ -66,7 +68,7 @@ internal sealed class MacFiles(bool enabled, Func<HttpContext, bool> nativeIngre
 			var pending = new Dictionary<string, object>();
 			stop.Token.ThrowIfCancellationRequested();
 			result = await Task.Run(() => prepare(device, pending, stop.Token), stop.Token);
-			if(publicationFixture != null) await publicationFixture(false);
+			if(publicationFixture != null) await publicationFixture(PublicationPhase.Staged);
 			if(!pairing.CommitIfActive(device, () => {
 				if(ingressReady?.Invoke() == false) throw new Denied(403);
 				Commit(device, pending, stop.Token);
@@ -74,7 +76,7 @@ internal sealed class MacFiles(bool enabled, Func<HttpContext, bool> nativeIngre
 			// Once committed, a cancellation aborts the transport, including a
 			// stalled write. It cannot retract bytes already handed to the proxy.
 			using var abort = stop.Token.Register(ctx.Abort);
-			if(publicationFixture != null) await publicationFixture(true);
+			if(publicationFixture != null) await publicationFixture(PublicationPhase.Committed);
 			stop.Token.ThrowIfCancellationRequested();
 			response.ContentType = result.Type;
 			response.ContentLength = result.Bytes.Length;
@@ -82,6 +84,10 @@ internal sealed class MacFiles(bool enabled, Func<HttpContext, bool> nativeIngre
 			for(var i = 0; i < result.Bytes.Length; i += 64 * 1024) {
 				stop.Token.ThrowIfCancellationRequested();
 				await response.Body.WriteAsync(result.Bytes.AsMemory(i, Math.Min(64 * 1024, result.Bytes.Length - i)), stop.Token);
+				if(i == 0 && result.Attachment && publicationFixture != null) {
+					await response.Body.FlushAsync(stop.Token);
+					await publicationFixture(PublicationPhase.FirstChunk);
+				}
 			}
 			await response.Body.FlushAsync(stop.Token);
 		} catch(Denied e) { Fail(ctx, e.Status); }

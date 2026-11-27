@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -21,6 +22,53 @@ import (
 )
 
 const testHost = "marten.example.ts.net"
+
+func TestBootstrapProofAndLease(t *testing.T) {
+	legacy := []string{testHost, "7450", "/scratch-state", "/scratch-key"}
+	proof := strings.Repeat("a1", 32)
+	if _, got, ok := readBootstrap(legacy, nil); !ok || got != "" {
+		t.Fatal("disabled handshake tried to read a proof")
+	}
+	for _, input := range []string{"", proof[:63], strings.Repeat("G", 64)} {
+		if _, _, ok := readBootstrap(append(legacy, "mac-files-v1"), strings.NewReader(input)); ok {
+			t.Fatal("accepted truncated or malformed bootstrap")
+		}
+	}
+	if _, _, ok := readBootstrap(append(legacy, "mac-files-v2"), nil); ok {
+		t.Fatal("accepted incompatible bootstrap")
+	}
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	booted, exited := make(chan bool, 1), make(chan struct{})
+	go func() {
+		args, got, ok := readBootstrap(append(legacy, "mac-files-v1"), reader)
+		booted <- ok && got == proof && len(args) == 4
+		if ok {
+			awaitLeaseEOF(reader)
+		}
+		close(exited)
+	}()
+	for _, part := range []string{proof[:7], proof[7:]} {
+		if _, err := io.WriteString(writer, part); err != nil {
+			t.Fatal("bootstrap fixture pipe failed")
+		}
+	}
+	if !<-booted {
+		t.Fatal("valid fixed-size bootstrap not admitted")
+	}
+	select {
+	case <-exited:
+		t.Fatal("helper lease ended before EOF")
+	default:
+	}
+	writer.Close()
+	select {
+	case <-exited:
+	case <-time.After(time.Second):
+		t.Fatal("helper lease did not end at EOF")
+	}
+}
 
 func TestRunRequiresPeerAPIServerAndLogUploadOmitted(t *testing.T) {
 	dir := t.TempDir()
@@ -270,7 +318,7 @@ func TestMacFilesProxyToKestrel(t *testing.T) {
 	}
 	_, body = get(native, front.URL, "mac-files/entries/"+root[0].ID, host, fixture.Bearer, "", 200)
 	var page struct{ Entries []struct{ ID, Name string } }
-	if json.Unmarshal(body, &page) != nil || len(page.Entries) != 1 || page.Entries[0].Name != ".fixture" {
+	if json.Unmarshal(body, &page) != nil || len(page.Entries) != 2 || page.Entries[0].Name != ".fixture" || page.Entries[1].Name != "large" {
 		t.Fatal("unexpected fixture entries")
 	}
 	h, body := get(native, front.URL, "mac-files/bytes/"+page.Entries[0].ID+"/share", host, fixture.Bearer, "", 200)
@@ -278,6 +326,27 @@ func TestMacFilesProxyToKestrel(t *testing.T) {
 		h.Get("Content-Type") != "application/octet-stream" || h.Get("Content-Disposition") != "attachment" || h.Get("Cache-Control") != "no-store" {
 		t.Fatal("unexpected fixture download")
 	}
+	const chunkSize = 64 * 1024
+	r, err := http.NewRequest(http.MethodGet, front.URL+"/api/mac-files/bytes/"+page.Entries[1].ID+"/share", nil)
+	if err != nil {
+		t.Fatal("invalid active download request")
+	}
+	r.Host = host
+	r.Header.Set("Authorization", "Bearer "+fixture.Bearer)
+	res, err := native.Do(r)
+	if err != nil || res.StatusCode != 200 || res.ContentLength != 4*1024*1024 {
+		t.Fatal("active byte transfer did not start")
+	}
+	defer res.Body.Close()
+	if _, err := io.ReadFull(res.Body, make([]byte, chunkSize)); err != nil {
+		t.Fatal("failed to receive first chunk through proxy")
+	}
+	fmt.Fprintln(os.Stdout, "FIXTURE-FIRST-CHUNK")
+	if n, err := io.Copy(io.Discard, res.Body); n != 0 || err != io.ErrUnexpectedEOF {
+		t.Fatalf("expected revoked transfer to truncate before second chunk: %d bytes, %v", n, err)
+	}
+	get(native, front.URL, roots, host, fixture.Bearer, "", 401)
+	get(native, front.URL, "status", host, fixture.Bearer, "", 401)
 }
 
 func TestWebSocketUpgradePreservesAuthorization(t *testing.T) {
