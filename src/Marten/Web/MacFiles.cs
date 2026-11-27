@@ -9,10 +9,15 @@ using static Marten.Web.MacFileSystem;
 namespace Marten.Web;
 
 internal sealed class MacFiles(bool enabled, Func<HttpContext, bool> nativeIngress, DevicePairing pairing,
-	CancellationToken stopping, string rootPath = "/", Func<MacFiles.PublicationPhase, Task>? publicationFixture = null, Func<bool>? ingressReady = null) {
+	CancellationToken stopping, string rootPath = "/", Func<MacFiles.PublicationPhase, Task>? publicationFixture = null, Func<bool>? ingressReady = null,
+	TimeProvider? clock = null, TimeSpan? sweepInterval = null, TimeSpan? operationBudget = null) {
 	internal sealed class Route;
 	internal enum PublicationPhase { Staged, Committed, FirstChunk }
 	internal int ActiveOperations { get { lock(gate) return busy.Count; } }
+	internal int RetainedStreams { get { lock(gate) return walks.Count; } }
+	internal Task SweepCompletion { get; private set; } = Task.CompletedTask;
+	readonly TimeProvider time = clock ?? TimeProvider.System;
+	bool Expired(long issued, long now) => time.GetElapsedTime(issued, now) >= TimeSpan.FromMinutes(3);
 	static readonly Regex NativeFilesTarget = new(@"\A/api/mac-files/(?:roots|entries/[0-9a-f]{32}|bytes/[0-9a-f]{32}/(?:text|raster|share))\z",
 		RegexOptions.NonBacktracking | RegexOptions.CultureInvariant);
 	static bool CanonicalGet(HttpContext ctx) => HttpMethods.IsGet(ctx.Request.Method) && !ctx.Request.Headers.ContainsKey("Origin") &&
@@ -25,12 +30,13 @@ internal sealed class MacFiles(bool enabled, Func<HttpContext, bool> nativeIngre
 		pairing.CommitIfActive(Security.DeviceRevocationOf(ctx), () => {
 			if(ingressReady?.Invoke() != false && !stopping.IsCancellationRequested) advertised = true;
 		});
+		if(advertised == true) ctx.Response.Headers.CacheControl = "no-store";
 		return advertised;
 	}
 	const int MaxScan = 256, PageSize = 100, MaxHandles = 4096, PerDeviceHandles = 2200;
 	readonly object gate = new();
 	readonly HashSet<CancellationToken> busy = [];
-	readonly Dictionary<string, (CancellationToken Device, object Value, long Expiry)> handles = [];
+	readonly Dictionary<string, (CancellationToken Device, object Value, long Issued)> handles = [];
 	sealed record Node(string Path, MacFileSystem.Version Version);
 	readonly HashSet<Walker> walks = [];
 	sealed class Walker(CancellationToken device, Node directory, SafeFileHandle fd) : IDisposable {
@@ -41,7 +47,6 @@ internal sealed class MacFiles(bool enabled, Func<HttpContext, bool> nativeIngre
 		public void Dispose() { try { Names.Dispose(); } finally { Fd.Dispose(); } }
 	}
 	sealed class Pending : Dictionary<string, object> {
-		public string? Consumed;
 		public Walker? Walk;
 		public bool More;
 		public bool Published;
@@ -53,7 +58,7 @@ internal sealed class MacFiles(bool enabled, Func<HttpContext, bool> nativeIngre
 	sealed class Denied(int status) : Exception { public int Status => status; }
 
 	public void Map(RouteGroupBuilder api) {
-		if(enabled) stopping.Register(() => Reap(default));
+		if(enabled && Supported) SweepCompletion = Task.Run(SweepAsync);
 		var files = api.MapGroup("/mac-files").WithMetadata(new Route());
 		files.MapGet("/roots", (HttpContext ctx) => Run(ctx, (device, pending, token) => Roots(pending))).AllowPaired();
 		files.MapGet("/entries/{handle}", (HttpContext ctx, string handle) => Run(ctx,
@@ -76,20 +81,17 @@ internal sealed class MacFiles(bool enabled, Func<HttpContext, bool> nativeIngre
 		if(!native) { response.StatusCode = 403; return; }
 		if(!Supported) { response.StatusCode = 404; return; }
 		if(ctx.Request.Headers.ContainsKey("Range")) { response.StatusCode = 416; return; }
+		if(stopping.IsCancellationRequested) { response.StatusCode = 503; return; }
 		lock(gate) {
 			if(busy.Count >= 4 || !busy.Add(device)) { response.StatusCode = 429; return; }
 		}
 		using var stop = CancellationTokenSource.CreateLinkedTokenSource(device, ctx.RequestAborted, stopping);
-		stop.CancelAfter(TimeSpan.FromSeconds(20));
+		stop.CancelAfter(operationBudget ?? TimeSpan.FromSeconds(20));
 		Prepared? result = null;
 		var pending = new Pending();
 		try {
 			stop.Token.ThrowIfCancellationRequested();
-			result = await Task.Run(() => {
-				Reap(device);
-				stop.Token.ThrowIfCancellationRequested();
-				return prepare(device, pending, stop.Token);
-			}, stop.Token);
+			result = await Task.Run(() => prepare(device, pending, stop.Token), stop.Token);
 			if(publicationFixture != null) await publicationFixture(PublicationPhase.Staged);
 			if(!pairing.CommitIfActive(device, () => {
 				if(ingressReady?.Invoke() == false) throw new Denied(403);
@@ -118,12 +120,8 @@ internal sealed class MacFiles(bool enabled, Func<HttpContext, bool> nativeIngre
 		finally {
 			if(result != null) Array.Clear(result.Bytes);
 			try {
-				if(pending.Walk is { } walk && (!pending.More || !pending.Published)) {
-					if(pending.Consumed is { } old) lock(gate) handles.Remove(old);
-					Release(walk);
-				}
-				if(stopping.IsCancellationRequested) Reap(device);
-			} finally { lock(gate) busy.Remove(device); }
+				if(pending.Walk is { } walk && (!pending.More || !pending.Published)) Release(walk);
+			} finally { FinishOperation(device); }
 		}
 	}
 
@@ -143,20 +141,44 @@ internal sealed class MacFiles(bool enabled, Func<HttpContext, bool> nativeIngre
 		return id;
 	}
 
-	void Reap(CancellationToken currentDevice) {
+	async Task SweepAsync() {
+		using var timer = new PeriodicTimer(sweepInterval ?? TimeSpan.FromSeconds(5));
+		try {
+			while(await timer.WaitForNextTickAsync(stopping).ConfigureAwait(false)) SweepIdle();
+		} catch(OperationCanceledException) when(stopping.IsCancellationRequested) { }
+		finally { SweepIdle(); }
+	}
+
+	// Called under gate. Unpublish first, but keep the stream charged in walks
+	// until the disposer actually returns. Active operations own their cursors.
+	List<Walker> DetachExpired(CancellationToken? finishing = null) {
 		var expiredWalks = new List<Walker>();
-		lock(gate) {
-			var now = Environment.TickCount64;
-			foreach(var (id, entry) in handles) {
-				if(!stopping.IsCancellationRequested && entry.Expiry > now && !entry.Device.IsCancellationRequested) continue;
-				if(entry.Value is Walker walk) {
-					if(entry.Device != currentDevice && busy.Contains(entry.Device)) continue;
-					expiredWalks.Add(walk);
-				}
-				handles.Remove(id);
-			}
+		var now = time.GetTimestamp();
+		foreach(var (id, entry) in handles) {
+			if(finishing is { } owner ? entry.Device != owner : busy.Contains(entry.Device)) continue;
+			if(!stopping.IsCancellationRequested && !Expired(entry.Issued, now) && !entry.Device.IsCancellationRequested) continue;
+			handles.Remove(id);
+			if(entry.Value is Walker walk) expiredWalks.Add(walk);
 		}
-		foreach(var walk in expiredWalks) Release(walk);
+		return expiredWalks;
+	}
+
+	void SweepIdle() {
+		List<Walker> expired;
+		lock(gate) expired = DetachExpired();
+		foreach(var walk in expired) Release(walk);
+	}
+
+	void FinishOperation(CancellationToken device) {
+		List<Walker> expired;
+		lock(gate) {
+			// Election and busy release are ordered together against the shutdown
+			// sweep: either it sees us idle, or we see stopping and own cleanup.
+			expired = DetachExpired(device);
+			if(expired.Count == 0) { busy.Remove(device); return; }
+		}
+		try { foreach(var walk in expired) Release(walk); }
+		finally { lock(gate) busy.Remove(device); }
 	}
 
 	void Release(Walker walk) {
@@ -171,28 +193,31 @@ internal sealed class MacFiles(bool enabled, Func<HttpContext, bool> nativeIngre
 				if(walks.Count >= 8 || walks.Count(w => w.Device == device) >= 2) throw new Denied(429);
 				walks.Add(walk);
 			}
-			if(pending.Consumed is { } old) handles.Remove(old);
 			var perDevice = handles.Values.Count(h => h.Device == device);
 			// Evict oldest rows, never another listing's position. A very large
 			// walk can keep making progress rather than freezing at its first quota.
 			var deviceEvictions = Math.Max(0, perDevice + pending.Count - PerDeviceHandles);
 			var globalEvictions = Math.Max(0, handles.Count - deviceEvictions + pending.Count - MaxHandles);
 			if(deviceEvictions != 0 || globalEvictions != 0) {
-				var ordered = handles.Where(h => h.Value.Value is Node).OrderBy(h => h.Value.Expiry).ToArray();
+				var ordered = handles.Where(h => h.Value.Value is Node).OrderBy(h => h.Value.Issued).ThenBy(h => h.Key, StringComparer.Ordinal).ToArray();
 				foreach(var h in ordered.Where(h => h.Value.Device == device).Take(deviceEvictions)) handles.Remove(h.Key);
 				foreach(var h in ordered.Where(h => handles.ContainsKey(h.Key)).Take(globalEvictions)) handles.Remove(h.Key);
 			}
-			var now = Environment.TickCount64;
-			foreach(var (id, value) in pending) handles.Add(id, (device, value, now + 180_000));
+			var now = time.GetTimestamp();
+			foreach(var (id, value) in pending) handles.Add(id, (device, value, now));
 			pending.Published = true;
 		}
 	}
 
-	object Load(CancellationToken device, string handle) {
+	object Load(CancellationToken device, string handle, Pending? claim = null) {
 		if(handle.Length != 32 || !handle.All(char.IsAsciiHexDigitLower)) throw new Denied(404);
 		lock(gate) {
-			if(!handles.TryGetValue(handle, out var entry) || entry.Device != device || entry.Expiry <= Environment.TickCount64)
+			if(!handles.TryGetValue(handle, out var entry) || entry.Device != device || Expired(entry.Issued, time.GetTimestamp()))
 				throw new Denied(404);
+			if(claim != null && entry.Value is Walker cursor) {
+				handles.Remove(handle); // one use claimed before advancing native state
+				claim.Walk = cursor;
+			}
 			return entry.Value;
 		}
 	}
@@ -205,12 +230,8 @@ internal sealed class MacFiles(bool enabled, Func<HttpContext, bool> nativeIngre
 	}
 
 	Prepared Entries(CancellationToken device, Pending pending, string handle, CancellationToken ct) {
-		var target = Load(device, handle);
+		var target = Load(device, handle, pending);
 		var node = target switch { Node n when n.Version.Stat.Directory => n, Walker w => w.Directory, _ => throw new Denied(404) };
-		if(target is Walker consumed) {
-			pending.Walk = consumed;
-			pending.Consumed = handle;
-		}
 		using var root = Root(rootPath);
 		using var dir = Descendant(root, node.Path);
 		var revision = Inspect(dir);
@@ -235,7 +256,7 @@ internal sealed class MacFiles(bool enabled, Func<HttpContext, bool> nativeIngre
 				rows.Add((name, new Node(path, Inspect(item))));
 			} catch(IOException) { /* unbrowseable or replaced before inspection */ }
 		}
-		var page = rows.OrderBy(r => !r.Node.Version.Stat.Directory).ThenBy(r => r.Name, StringComparer.Ordinal).Select(row => {
+		var page = rows.Select(row => {
 			var stat = row.Node.Version.Stat;
 			return new FileRow(Stage(pending, row.Node), row.Name, stat.Directory, stat.Directory ? null : stat.Size,
 				DateTimeOffset.FromUnixTimeSeconds(stat.ModifySec));

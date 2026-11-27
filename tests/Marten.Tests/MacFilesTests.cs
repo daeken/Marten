@@ -149,6 +149,96 @@ public class MacFilesTests {
 		Assert.Equal(HttpStatusCode.OK, (await f.Get($"entries/{other}", token: f.Other)).StatusCode);
 	}
 
+	sealed class CursorClock : TimeProvider {
+		long ticks;
+		public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+		public override long GetTimestamp() => Interlocked.Read(ref ticks);
+		public void Expire() => Interlocked.Add(ref ticks, TimeSpan.FromMinutes(4).Ticks);
+	}
+
+	[Theory]
+	[InlineData("expiry")]
+	[InlineData("revoke")]
+	[InlineData("shutdown")]
+	public async Task AutonomousIdleCleanupNeedsNoFollowUpRequest(string mode) {
+		if(!MacFileSystem.Supported) return;
+		var time = new CursorClock();
+		await using var f = await Fixture.Start(clock: time);
+		for(var i = 0; i < 102; i++) File.WriteAllText(Path.Combine(f.Root, $"f{i:000}"), "");
+		var root = (await f.Json("roots"))[0].GetProperty("id").GetString();
+		await f.Json($"entries/{root}");
+		Assert.Equal(1, f.RetainedStreams);
+		if(mode == "expiry") time.Expire();
+		else if(mode == "revoke") f.RevokeFirst();
+		else f.Stop();
+		await f.WaitForIdle();
+		if(mode == "shutdown") await f.SweepCompletion.WaitAsync(TimeSpan.FromSeconds(5));
+	}
+
+	[Theory]
+	[InlineData(false)]
+	[InlineData(true)]
+	public async Task ClaimedPositionCannotReplayAndFailedPublicationReleasesStream(bool shutdown) {
+		if(!MacFileSystem.Supported) return;
+		var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+		var resume = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+		var arm = 0;
+		await using var f = await Fixture.Start(operationBudget: TimeSpan.FromMilliseconds(700), publicationFixture: async phase => {
+			if(phase == MacFiles.PublicationPhase.Staged && Interlocked.Exchange(ref arm, 0) == 1) {
+				reached.SetResult();
+				await resume.Task.WaitAsync(TimeSpan.FromSeconds(5));
+			}
+		});
+		for(var i = 0; i < 210; i++) File.WriteAllText(Path.Combine(f.Root, $"f{i:000}"), "");
+		var root = (await f.Json("roots"))[0].GetProperty("id").GetString();
+		var cursor = (await f.Json($"entries/{root}")).GetProperty("next").GetString();
+		Interlocked.Exchange(ref arm, 1);
+		var pending = f.Get($"entries/{cursor}");
+		try {
+			await reached.Task.WaitAsync(TimeSpan.FromSeconds(5));
+			Assert.Equal(HttpStatusCode.TooManyRequests, (await f.Get($"entries/{cursor}")).StatusCode);
+			if(shutdown) { f.Stop(); await f.SweepCompletion.WaitAsync(TimeSpan.FromSeconds(5)); }
+			else await Task.Delay(800);
+			Assert.Equal(1, f.RetainedStreams);
+		} finally { resume.TrySetResult(); }
+		using var result = await pending;
+		Assert.Equal(HttpStatusCode.ServiceUnavailable, result.StatusCode);
+		await f.WaitForIdle();
+		if(!shutdown) Assert.Equal(HttpStatusCode.NotFound, (await f.Get($"entries/{cursor}")).StatusCode);
+	}
+
+	[Fact]
+	public async Task LostCommittedPageDoesNotReplayAndSuccessorExpires() {
+		if(!MacFileSystem.Supported) return;
+		var time = new CursorClock();
+		var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+		var resume = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+		var arm = 0;
+		await using var f = await Fixture.Start(clock: time, publicationFixture: async phase => {
+			if(phase == MacFiles.PublicationPhase.Committed && Interlocked.Exchange(ref arm, 0) == 1) {
+				reached.SetResult();
+				await resume.Task.WaitAsync(TimeSpan.FromSeconds(5));
+			}
+		});
+		for(var i = 0; i < 202; i++) File.WriteAllText(Path.Combine(f.Root, $"f{i:000}"), "");
+		var root = (await f.Json("roots"))[0].GetProperty("id").GetString();
+		var position = (await f.Json($"entries/{root}")).GetProperty("next").GetString();
+		Interlocked.Exchange(ref arm, 1);
+		using var clientAborted = new CancellationTokenSource();
+		var pending = f.Get($"entries/{position}", cancellationToken: clientAborted.Token);
+		try {
+			await reached.Task.WaitAsync(TimeSpan.FromSeconds(5));
+			clientAborted.Cancel();
+			await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await pending);
+		} finally { resume.TrySetResult(); }
+		using var idleTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+		while(f.ActiveOperations != 0) await Task.Delay(10, idleTimeout.Token);
+		Assert.Equal(HttpStatusCode.NotFound, (await f.Get($"entries/{position}")).StatusCode);
+		Assert.Equal(1, f.RetainedStreams);
+		time.Expire();
+		await f.WaitForIdle();
+	}
+
 	[Theory]
 	[InlineData(false)]
 	[InlineData(true)]
@@ -206,6 +296,13 @@ public class MacFilesTests {
 		string Host => host;
 		public void RevokeFirst() => Assert.True(pairing.Revoke(first));
 		public int ActiveOperations => files.ActiveOperations;
+		public int RetainedStreams => files.RetainedStreams;
+		public Task SweepCompletion => files.SweepCompletion;
+		public void Stop() => app.Lifetime.StopApplication();
+		public async Task WaitForIdle() {
+			using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+			while(ActiveOperations != 0 || RetainedStreams != 0) await Task.Delay(10, timeout.Token);
+		}
 		public async Task VerifyTls(string executable, TaskCompletionSource resume) {
 			var start = new System.Diagnostics.ProcessStartInfo(executable) {
 				UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
@@ -214,23 +311,29 @@ public class MacFilesTests {
 			start.Environment["MARTEN_TEST_MAC_FILES_KESTREL"] = "1";
 			using var process = System.Diagnostics.Process.Start(start)!;
 			try {
-				await process.StandardInput.WriteLineAsync(JsonSerializer.Serialize(new { url, bearer, ingress }));
-				process.StandardInput.Close();
-				var error = process.StandardError.ReadToEndAsync();
 				using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+				await process.StandardInput.WriteLineAsync(JsonSerializer.Serialize(new { url, bearer, ingress }).AsMemory(), timeout.Token);
+				process.StandardInput.Close();
+				var error = process.StandardError.ReadToEndAsync(timeout.Token);
 				var signal = await process.StandardOutput.ReadLineAsync(timeout.Token);
-				var output = process.StandardOutput.ReadToEndAsync();
+				var output = process.StandardOutput.ReadToEndAsync(timeout.Token);
 				Assert.True(signal == "FIXTURE-FIRST-CHUNK", (signal ?? "") + (signal == "FIXTURE-FIRST-CHUNK" ? "" : await output));
 				Assert.Equal(1, ActiveOperations);
 				RevokeFirst();
 				resume.TrySetResult();
 				await process.WaitForExitAsync(timeout.Token);
 				Assert.True(process.ExitCode == 0, (await output) + (await error));
-			} finally { if(!process.HasExited) process.Kill(entireProcessTree: true); }
+			} finally {
+				if(!process.HasExited) {
+					try { process.Kill(entireProcessTree: true); } catch(InvalidOperationException) when(process.HasExited) { }
+					using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+					await process.WaitForExitAsync(cleanup.Token);
+				}
+			}
 		}
 
 		public static async Task<Fixture> Start(bool enabled = true, Func<MacFiles.PublicationPhase, Task>? publicationFixture = null,
-			string host = "mac-files.example") {
+			string host = "mac-files.example", TimeProvider? clock = null, TimeSpan? operationBudget = null) {
 			var data = new TempDir();
 			var root = Directory.CreateDirectory(data.File("scratch")).FullName;
 			if(root.StartsWith("/var/", StringComparison.Ordinal)) root = "/private" + root;
@@ -249,7 +352,8 @@ public class MacFilesTests {
 			app.UseRouting(); app.Use(security.Middleware);
 			var proof = System.Text.Encoding.ASCII.GetBytes(ingress);
 			var files = new MacFiles(enabled, ctx => TailnetTransport.ConsumeNativeProof(ctx, proof),
-				pairing, app.Lifetime.ApplicationStopping, root, publicationFixture);
+				pairing, app.Lifetime.ApplicationStopping, root, publicationFixture, clock: clock,
+				sweepInterval: TimeSpan.FromMilliseconds(20), operationBudget: operationBudget);
 			files.Map(app.MapGroup("/api"));
 			app.MapGet("/api/status", (HttpContext ctx) => Results.Json(new { macFiles = files.StatusCapability(ctx) }, JsonIO.Options)).AllowPaired();
 			app.MapGet("/api/proof-control", (HttpContext ctx) => ctx.Request.Headers.ContainsKey(TailnetTransport.NativeProofHeader)
@@ -258,13 +362,14 @@ public class MacFilesTests {
 			return new Fixture(data, app, app.Urls.Single(), root, bearer, other, security.Token, ingress, host, pairing, first, files);
 		}
 
-		public async Task<HttpResponseMessage> Get(string tail, string? token = null, bool proof = true, string? host = null, bool range = false) {
+		public async Task<HttpResponseMessage> Get(string tail, string? token = null, bool proof = true, string? host = null, bool range = false,
+			CancellationToken cancellationToken = default) {
 			using var request = new HttpRequestMessage(HttpMethod.Get, $"/api/mac-files/{tail}");
 			request.Headers.Host = host ?? this.Host;
 			if(proof) request.Headers.Add(TailnetTransport.NativeProofHeader, ingress);
 			if(range) request.Headers.Range = new(0, 1);
 			if((token ?? bearer).Length != 0) request.Headers.Authorization = new("Bearer", token ?? bearer);
-			return await client.SendAsync(request);
+			return await client.SendAsync(request, cancellationToken);
 		}
 		public async Task<JsonElement> Json(string tail) {
 			using var r = await Get(tail);
@@ -273,6 +378,10 @@ public class MacFilesTests {
 			using var document = JsonDocument.Parse(await r.Content.ReadAsByteArrayAsync());
 			return document.RootElement.Clone();
 		}
-		public async ValueTask DisposeAsync() { client.Dispose(); await app.StopAsync(); await app.DisposeAsync(); data.Dispose(); }
+		public async ValueTask DisposeAsync() {
+			client.Dispose(); await app.StopAsync();
+			await files.SweepCompletion.WaitAsync(TimeSpan.FromSeconds(5));
+			await app.DisposeAsync(); data.Dispose();
+		}
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -37,7 +38,10 @@ func TestBootstrapProofAndLease(t *testing.T) {
 	if _, _, ok := readBootstrap(append(legacy, "mac-files-v2"), nil); ok {
 		t.Fatal("accepted incompatible bootstrap")
 	}
-	reader, writer := io.Pipe()
+	reader, writer := net.Pipe()
+	if err := writer.SetWriteDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal("could not arm bootstrap watchdog")
+	}
 	defer reader.Close()
 	defer writer.Close()
 	booted, exited := make(chan bool, 1), make(chan struct{})
@@ -54,8 +58,13 @@ func TestBootstrapProofAndLease(t *testing.T) {
 			t.Fatal("bootstrap fixture pipe failed")
 		}
 	}
-	if !<-booted {
-		t.Fatal("valid fixed-size bootstrap not admitted")
+	select {
+	case ok := <-booted:
+		if !ok {
+			t.Fatal("valid fixed-size bootstrap not admitted")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("bootstrap did not finish")
 	}
 	select {
 	case <-exited:
@@ -354,16 +363,23 @@ func TestMacFilesProxyToKestrel(t *testing.T) {
 	}
 	_, body = get(native, front.URL, "mac-files/entries/"+root[0].ID, host, fixture.Bearer, "", 200)
 	var page struct{ Entries []struct{ ID, Name string } }
-	if json.Unmarshal(body, &page) != nil || len(page.Entries) != 2 || page.Entries[0].Name != ".fixture" || page.Entries[1].Name != "large" {
+	if json.Unmarshal(body, &page) != nil || len(page.Entries) != 2 {
 		t.Fatal("unexpected fixture entries")
 	}
-	h, body := get(native, front.URL, "mac-files/bytes/"+page.Entries[0].ID+"/share", host, fixture.Bearer, "", 200)
+	ids := make(map[string]string)
+	for _, row := range page.Entries {
+		ids[row.Name] = row.ID
+	}
+	if ids[".fixture"] == "" || ids["large"] == "" {
+		t.Fatal("unexpected fixture names")
+	}
+	h, body := get(native, front.URL, "mac-files/bytes/"+ids[".fixture"]+"/share", host, fixture.Bearer, "", 200)
 	if string(body) != "scratch bytes" || h.Get("Content-Length") != strconv.Itoa(len(body)) ||
 		h.Get("Content-Type") != "application/octet-stream" || h.Get("Content-Disposition") != "attachment" || h.Get("Cache-Control") != "no-store" {
 		t.Fatal("unexpected fixture download")
 	}
 	const chunkSize = 64 * 1024
-	r, err := http.NewRequest(http.MethodGet, front.URL+"/api/mac-files/bytes/"+page.Entries[1].ID+"/share", nil)
+	r, err := http.NewRequest(http.MethodGet, front.URL+"/api/mac-files/bytes/"+ids["large"]+"/share", nil)
 	if err != nil {
 		t.Fatal("invalid active download request")
 	}

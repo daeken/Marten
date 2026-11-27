@@ -188,6 +188,10 @@ func tailnetProxy(host string, upstream *url.URL) http.Handler {
 	return tailnetProxyWithProof(host, upstream, "")
 }
 
+func filesRequest(r *http.Request) bool {
+	return r != nil && strings.HasPrefix(strings.ToLower(r.URL.Path), "/api/mac-files/")
+}
+
 func tailnetProxyWithProof(host string, upstream *url.URL, proof string) http.Handler {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil // never send Marten credentials through an environment proxy
@@ -209,9 +213,21 @@ func tailnetProxyWithProof(host string, upstream *url.URL, proof string) http.Ha
 			// peer identity substitutes for Marten's existing authentication.
 		},
 		ErrorLog: log.New(io.Discard, "", 0),
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, _ error) {
+			if filesRequest(r) {
+				w.Header().Set("Cache-Control", "no-store")
+			}
+			w.WriteHeader(http.StatusBadGateway)
+		},
+		ModifyResponse: func(r *http.Response) error {
+			if filesRequest(r.Request) {
+				r.Header.Set("Cache-Control", "no-store")
+			}
+			return nil
+		},
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		files := strings.HasPrefix(strings.ToLower(r.URL.Path), "/api/mac-files/")
+		files := filesRequest(r)
 		if files {
 			w.Header().Set("Cache-Control", "no-store")
 		}
