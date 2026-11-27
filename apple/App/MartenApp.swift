@@ -30,12 +30,21 @@ struct RootView: View {
     var body: some View {
         Group {
             if let api = connections.connected {
+                let generation = connections.transportGeneration
+                let workspace = connections.workspaceID
+                let foreground = foregroundEpoch
                 WorkspaceView(api: api, showServers: { connections.showServers = true },
                               endPairedSession: connections.pairingEnabled && api.endpoint.url.scheme == "https"
                                   ? { connections.endRejectedPairedSession(api) } : nil,
                               routeID: connections.transportGeneration,
                               networkActive: phase == .active && foregroundEpoch != nil && !connections.busy && connections.routeUsable,
-                              composers: connections.composers, macFilesSession: macFilesSession(api))
+                              composers: connections.composers,
+                              artifactSessionIsCurrent: {
+                    phase == .active && foreground != nil && foregroundEpoch == foreground
+                        && !connections.busy && connections.routeUsable && !connections.showServers
+                        && connections.workspaceID == workspace && connections.transportGeneration == generation
+                        && connections.connected?.endpoint == api.endpoint && connections.connected?.token == api.token
+                }, macFilesSession: macFilesSession(api))
                     .id(connections.workspaceID)
             } else {
                 ServerScreen(connections: connections)
@@ -70,9 +79,9 @@ struct RootView: View {
         return MacFilesSession(key: key, foregroundEpoch: epoch, isCurrent: {
             connections.connected?.endpoint == key.endpoint && connections.connected?.token == api.token &&
             connections.workspaceID == key.pairedSession && connections.transportGeneration == key.route &&
-            connections.routeUsable && !connections.busy
+            connections.routeUsable && !connections.busy && !connections.showServers
         }, canTransfer: {
-            epoch != nil && foregroundEpoch == epoch && UIApplication.shared.applicationState == .active
+            phase == .active && epoch != nil && foregroundEpoch == epoch && UIApplication.shared.applicationState == .active
         })
         #else
         return nil

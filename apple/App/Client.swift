@@ -133,7 +133,12 @@ protocol EventTransport: Transport {
     func events(for request: URLRequest) throws -> EventStream
 }
 
-struct URLSessionTransport: EventTransport, MacFilesTransport {
+// No buffering fallback for artifacts: production must enforce the cap while receiving.
+protocol ArtifactByteTransport: Transport {
+    func artifactBytes(for request: URLRequest, limit: Int) async throws -> (Data, HTTPURLResponse)
+}
+
+struct URLSessionTransport: EventTransport, ArtifactByteTransport, MacFilesTransport {
     private let session: URLSession
     private let notebookSession: URLSession
     static let notebookRerunTimeout: TimeInterval = 180
@@ -208,6 +213,10 @@ struct URLSessionTransport: EventTransport, MacFilesTransport {
         guard let http = response as? HTTPURLResponse else { throw ClientError.malformed }
         try policy.check(http, for: request)
         return try await policy.consume(bytes, staging: staging)
+    }
+
+    func artifactBytes(for request: URLRequest, limit: Int) async throws -> (Data, HTTPURLResponse) {
+        try await boundedData(for: request, limit: limit)
     }
 
     func invalidate() {
@@ -303,6 +312,7 @@ struct Entry: Decodable, Identifiable, Sendable {
     private(set) var seqs: [Int64]? = nil
     private(set) var model: String? = nil
     private(set) var images: [TranscriptImage]? = nil
+    @ArtifactReferences private(set) var artifacts: [ArtifactReference] = []
 }
 
 struct TranscriptImage: Decodable, Hashable, Sendable {
@@ -432,6 +442,24 @@ struct API: Sendable {
 
     func status() async throws -> ServerStatus {
         try await decode(ServerStatus.self, call("GET", "/api/status"))
+    }
+
+    var supportsArtifacts: Bool {
+        endpoint.url.scheme == "https" && transport is TailnetTransport && token.map(Self.validToken) == true
+    }
+
+    func artifact(_ ref: ArtifactReference, agent: String, purpose: ArtifactPurpose) async throws -> ArtifactPayload {
+        guard supportsArtifacts, let wire = transport as? TailnetTransport else { throw ClientError.unauthorized }
+        guard ref.valid, purpose == .download || ref.preview == purpose else { throw ClientError.attachment }
+        try Task.checkCancellation()
+        let path = try route(agent, "artifacts/\(ref.id)" + (purpose == .download ? "" : "/preview"))
+        do {
+            let (data, reply) = try await response("GET", path, accept: purpose.mime, limit: min(ref.bytes, purpose.limit), artifactWire: wire)
+            try Task.checkCancellation()
+            return try ArtifactPayload(data: data, reply: reply, reference: ref, purpose: purpose)
+        } catch ClientError.response(404) {
+            throw ArtifactUnavailable()
+        }
     }
 
     func image(_ ref: TranscriptImage, agent: String) async throws -> Data {
@@ -745,7 +773,8 @@ struct API: Sendable {
     }
 
     private func response(_ method: String, _ path: String, body: Data? = nil, query: [URLQueryItem] = [],
-                          accept: String = "application/json", limit: Int? = nil, timeout: TimeInterval? = nil) async throws -> (Data, HTTPURLResponse) {
+                          accept: String = "application/json", limit: Int? = nil, timeout: TimeInterval? = nil,
+                          artifactWire: TailnetTransport? = nil) async throws -> (Data, HTTPURLResponse) {
         var url = URLComponents(url: endpoint.url, resolvingAgainstBaseURL: false)!
         url.path = path
         if !query.isEmpty { url.queryItems = query }
@@ -758,7 +787,8 @@ struct API: Sendable {
         if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         let (data, response): (Data, HTTPURLResponse)
         do {
-            if let limit { (data, response) = try await transport.boundedData(for: request, limit: limit) }
+            if let artifactWire, let limit { (data, response) = try await artifactWire.artifactBytes(for: request, limit: limit) }
+            else if let limit { (data, response) = try await transport.boundedData(for: request, limit: limit) }
             else { (data, response) = try await transport.data(for: request) }
         } catch let error as ClientError {
             throw error

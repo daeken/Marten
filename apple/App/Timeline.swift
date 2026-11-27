@@ -112,6 +112,7 @@ struct EntryRow: View {
     let agent: String
     let active: Bool
     let route: UUID
+    let artifactRouteIsCurrent: @MainActor () -> Bool
 
     @ViewBuilder var body: some View {
         switch entry.kind {
@@ -143,6 +144,12 @@ struct EntryRow: View {
                     if let text = entry.text {
                         if entry.kind == "message" && entry.from == "Sera" { Text(text).textSelection(.enabled) }
                         else { RichTranscript(text: text) }
+                    }
+                }
+                if api.supportsArtifacts {
+                    ForEach(result?.artifacts ?? entry.artifacts, id: \.id) { ref in
+                        ArtifactCard(ref: ref, api: api, agent: agent, active: active, route: route,
+                                     isCurrent: artifactRouteIsCurrent).id(ref)
                     }
                 }
                 if let stamp = entry.ts { InboxTime(stamp: stamp) }
