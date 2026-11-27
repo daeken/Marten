@@ -43,13 +43,21 @@ public class PairedUiParityTests {
 		const string fixtureId = "artifact-fixture";
 		ArtifactRef? artifact = null;
 		const string missingId = "abcdabcdabcdabcdabcdabcdabcdabcd";
+		const string privateLeaf = "fixture-private-leaf.txt", privateLabel = "fixture-private-label", privateRaw = "fixture-private-raw";
 		if(ArtifactFiles.Supported) {
 			var fixture = home.AgentDir(fixtureId);
 			var log = new Transcript(Path.Combine(fixture, "transcript"));
-			var store = new Artifacts();
-			store.Recover(fixture, log);
+			using var store = new Artifacts(home, message => throw new Exception(message));
+			store.PrepareAgent(fixtureId);
 			await File.WriteAllTextAsync(Path.Combine(fixture, Artifacts.Staging, "example.txt"), new string('a', Artifacts.MaxText + 1));
-			artifact = await store.Publish(fixture, "example.txt", null, default);
+			artifact = await store.Publish(fixtureId, "example.txt", null, default);
+			log.Append(new Entry { Kind = EntryKind.ToolCall, Name = "publish_artifact", CallId = "fixture-call",
+				Arguments = JsonIO.Serialize(new { filename = privateLeaf, label = privateLabel }),
+				Raw = JsonSerializer.SerializeToElement(new { name = "publish_artifact", arguments = privateRaw }) });
+			log.Append(new Entry { Kind = EntryKind.ToolCall, Name = "call_tool", CallId = "delegated",
+				Arguments = JsonIO.Serialize(new { name = "publish_artifact", arguments = new { filename = privateLeaf, label = privateLabel } }),
+				Raw = JsonSerializer.SerializeToElement(new { name = "call_tool", arguments = privateRaw }) });
+			log.Append(new Entry { Kind = EntryKind.ToolCall, Name = "read_file", Arguments = "unrelated-legacy-arguments" });
 			log.Append(new Entry { Kind = EntryKind.ToolResult, Artifacts = [artifact] });
 			// A reference-only restore must not read replacement bytes from the agent-writable inbox.
 			var missing = artifact with { Id = missingId };
@@ -227,6 +235,9 @@ public class PairedUiParityTests {
 				await Check(HttpMethod.Get, missing + "/preview", [HttpStatusCode.NotFound]);
 				using var retained = await http.GetAsync(fixture + "/transcript?limit=80", timeout.Token);
 				Assert.Contains(missingId, await retained.Content.ReadAsStringAsync(timeout.Token));
+				using var operatorHistory = await http.GetAsync(fixture + "/transcript", timeout.Token);
+				Assert.True(operatorHistory.Headers.CacheControl?.NoStore);
+				Assert.Contains(privateRaw, await operatorHistory.Content.ReadAsStringAsync(timeout.Token));
 				using var isolated = new HttpClient { BaseAddress = http.BaseAddress };
 				using var queryOnly = await isolated.GetAsync(download + "?token=" + op, timeout.Token);
 				Assert.Equal(HttpStatusCode.Forbidden, queryOnly.StatusCode);
@@ -237,10 +248,13 @@ public class PairedUiParityTests {
 				var outsider = await File.ReadAllTextAsync(Path.Combine(home.Secrets, "clients", "parity.token"), timeout.Token);
 				await Check(HttpMethod.Get, download, [HttpStatusCode.Forbidden], authority: local, bearer: outsider);
 				isolated.DefaultRequestHeaders.Authorization = new("Bearer", outsider);
-				foreach(var suffix in new[] { "/transcript", "/transcript?limit=80", "/transcript?before=2&limit=80" }) {
-					using var history = await isolated.GetAsync(fixture + suffix, timeout.Token);
+				foreach(var path in new[] { fixture + "/transcript", fixture + "/transcript?limit=80", fixture + "/transcript?before=6&limit=80", $"/api/ext/agents/{fixtureId}/transcript" }) {
+					using var history = await isolated.GetAsync(path, timeout.Token);
 					Assert.Equal(HttpStatusCode.OK, history.StatusCode);
-					Assert.DoesNotContain(artifact.Id, await history.Content.ReadAsStringAsync(timeout.Token));
+					Assert.True(history.Headers.CacheControl?.NoStore);
+					var json = await history.Content.ReadAsStringAsync(timeout.Token);
+					foreach(var hidden in new[] { artifact.Id, missingId, privateLeaf, privateLabel, privateRaw }) Assert.DoesNotContain(hidden, json);
+					Assert.Contains("unrelated-legacy-arguments", json);
 				}
 			}
 			await Check(HttpMethod.Delete, "/api/clients/parity", [HttpStatusCode.OK]);

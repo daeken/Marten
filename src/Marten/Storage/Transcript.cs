@@ -71,10 +71,12 @@ public sealed record TranscriptPage(IReadOnlyList<Entry> Entries, bool HasOlder)
 public sealed class Transcript {
 	const long SegmentBytes = 4 << 20;
 	readonly string Dir;
+	internal string DirectoryPath => Dir;
 	readonly List<Entry> entries = new();
 	readonly Dictionary<string, ArtifactRef> artifacts = new(StringComparer.Ordinal);
 	readonly object gate = new();
 	string segmentPath;
+	long lastReservedSequence;
 
 	public Transcript(string dir) {
 		Dir = dir;
@@ -84,46 +86,40 @@ public sealed class Transcript {
 		segmentPath = segments.Count > 0 ? segments[^1] : SegmentName(1);
 	}
 
+	const string RejectedTail = " !incomplete-artifact";
+
 	void LoadSegment(string path, bool latest) {
-		// The newline is part of the commit record. A crash may leave fully parseable JSON
-		// without it; a later normal append must not turn that artifact ref into authorization.
-		long tailStart = 0;
 		bool unterminated;
-		using(var file = File.OpenRead(path)) {
+		using(var file = File.OpenRead(path))
 			unterminated = file.Length > 0 && file.Seek(-1, SeekOrigin.End) >= 0 && file.ReadByte() != '\n';
-			if(unterminated) {
-				Span<byte> buffer = stackalloc byte[4096];
-				for(long end = file.Length; end > 0;) {
-					var count = (int) Math.Min(end, buffer.Length);
-					end -= count;
-					file.Position = end;
-					file.ReadExactly(buffer[..count]);
-					var newline = buffer[..count].LastIndexOf((byte) '\n');
-					if(newline >= 0) { tailStart = end + newline + 1; break; }
-				}
-			}
+		using var lines = File.ReadLines(path).GetEnumerator();
+		var more = lines.MoveNext();
+		while(more) {
+			var line = lines.Current;
+			more = lines.MoveNext();
+			if(string.IsNullOrWhiteSpace(line) || line.EndsWith(RejectedTail, StringComparison.Ordinal)) continue;
+			try {
+				if(JsonIO.Deserialize<Entry>(line) is not { } e) continue;
+				if(!more && unterminated && e.Artifacts is { Count: > 0 }) continue;
+				Remember(e);
+			} catch(JsonException) when(latest) { }
 		}
-		bool drop = false;
-		using(var lines = File.ReadLines(path).GetEnumerator()) {
-			var more = lines.MoveNext();
-			while(more) {
-				var line = lines.Current;
-				more = lines.MoveNext();
-				if(string.IsNullOrWhiteSpace(line)) continue;
-				try {
-					if(JsonIO.Deserialize<Entry>(line) is not { } e) continue;
-					if(!more && unterminated && e.Artifacts is { Count: > 0 }) drop = true;
-					else Remember(e);
-				} catch(JsonException) when(latest) {
-					// Existing recovery for legacy entries and incomplete JSON.
-				}
-			}
-		}
-		if(drop) {
-			using var file = File.OpenWrite(path);
-			file.SetLength(tailStart);
-			file.Flush(flushToDisk: true);
-		}
+	}
+
+	static string Terminator(Stream source) {
+		if(source.Length == 0 || source.Seek(-1, SeekOrigin.End) < 0 || source.ReadByte() == '\n') return "";
+		// Runtime-generated artifact result records are small; never normalize a valid artifact tail into a commit.
+		var count = (int) Math.Min(source.Length, 64 * 1024);
+		source.Seek(-count, SeekOrigin.End);
+		var bytes = new byte[count];
+		source.ReadExactly(bytes);
+		int offset = bytes.AsSpan().LastIndexOf((byte) '\n') + 1;
+		if(offset == 0 && count < source.Length) return RejectedTail + "\n";
+		try {
+			if(JsonIO.Deserialize<Entry>(Encoding.UTF8.GetString(bytes.AsSpan(offset)))?.Artifacts is { Count: > 0 })
+				return RejectedTail + "\n";
+		} catch(JsonException) { }
+		return "\n";
 	}
 
 	void Remember(Entry entry) {
@@ -161,23 +157,38 @@ public sealed class Transcript {
 		get { lock(gate) return entries.Count > 0 ? entries[^1] : null; }
 	}
 
-	public Entry Append(Entry entry) {
+	public Entry Append(Entry entry) => AppendCore(entry, null, null, null);
+
+	internal Entry AppendArtifact(Entry entry, Func<string, FileStream> open, Action syncDirectory, Action afterFlush) =>
+		AppendCore(entry, open, syncDirectory, afterFlush);
+
+	Entry AppendCore(Entry entry, Func<string, FileStream>? open, Action? syncDirectory, Action? afterFlush) {
 		lock(gate) {
 			entry = entry with {
-				Seq = entries.Count > 0 ? entries[^1].Seq + 1 : 1,
+				Seq = Math.Max(lastReservedSequence, entries.Count > 0 ? entries[^1].Seq : 0) + 1,
 				Ts = entry.Ts == default ? DateTimeOffset.UtcNow : entry.Ts,
 			};
 			if(File.Exists(segmentPath) && new FileInfo(segmentPath).Length > SegmentBytes)
 				segmentPath = SegmentName(int.Parse(Path.GetFileNameWithoutExtension(segmentPath)) + 1);
-			using(var fs = new FileStream(segmentPath, FileMode.Append, FileAccess.Write, FileShare.Read)) {
-				// Make sure a torn line from a crash doesn't glue itself onto this one.
+			if(open == null) {
+				using var fs = new FileStream(segmentPath, FileMode.Append, FileAccess.Write, FileShare.Read);
 				if(fs.Length > 0) {
 					using var check = new FileStream(segmentPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-					check.Seek(-1, SeekOrigin.End);
-					if(check.ReadByte() != '\n') fs.WriteByte((byte) '\n');
+					fs.Write(Encoding.UTF8.GetBytes(Terminator(check)));
 				}
 				fs.Write(Encoding.UTF8.GetBytes(JsonIO.Serialize(entry) + "\n"));
 				fs.Flush(flushToDisk: true);
+			} else {
+				using var fs = open(Path.GetFileName(segmentPath));
+				var terminator = Terminator(fs);
+				fs.Seek(0, SeekOrigin.End);
+				// Sync the segment name before publishing any record that authorizes a blob.
+				syncDirectory!();
+				// Even a failed write/flush can have left a complete record on disk. Do not reuse its sequence.
+				lastReservedSequence = entry.Seq;
+				fs.Write(Encoding.UTF8.GetBytes(terminator + JsonIO.Serialize(entry) + "\n"));
+				fs.Flush(flushToDisk: true);
+				afterFlush?.Invoke();
 			}
 			Remember(entry);
 			return entry;

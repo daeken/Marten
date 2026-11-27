@@ -21,7 +21,7 @@ internal static class ArtifactEndpoints {
 			return;
 		}
 		if(!Artifacts.IdValid(artifactId) || manager.Get(id) is not { } agent || agent.Transcript.Artifact(artifactId) is not { } item ||
-			(preview && item.PreviewKind is not ("text" or "png")) || Artifacts.Open(agent.Directory, item) is not { } file) {
+			(preview && item.PreviewKind is not ("text" or "png")) || manager.ArtifactStore?.Open(id, item, agent.Transcript) is not { } file) {
 			response.StatusCode = StatusCodes.Status404NotFound;
 			return;
 		}

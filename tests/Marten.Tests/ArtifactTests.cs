@@ -16,7 +16,9 @@ public sealed class ArtifactTests {
 		backend.Script.Enqueue(_ => FakeBackend.Say("Done."));
 		AgentManager manager = null!;
 		var tool = new PublishArtifactTool(() => manager);
-		manager = new AgentManager(new Home(temp.File("home")), new Config(), backend, new ToolRegistry().Add(tool));
+		var home = new Home(temp.File("home"));
+		using var store = new Artifacts(home, message => throw new Exception(message));
+		manager = new AgentManager(home, new Config(), backend, new ToolRegistry().Add(tool)) { ArtifactStore = store };
 		var agent = manager.CreateChat("artifact test", temp.Path);
 		var incr = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
 		manager.Events += e => {
@@ -38,15 +40,17 @@ public sealed class ArtifactTests {
 	public async Task SnapshotSurvivesSourceDeletionAndRecoveryButOnlyCommittedIdIsIndexed() {
 		if(!ArtifactFiles.Supported) return;
 		using var home = new TempDir();
-		var directory = home.File("agent");
+		var runtimeHome = new Home(home.File("runtime"));
+		const string agentId = "agent";
+		var directory = runtimeHome.AgentDir(agentId);
 		var transcriptDir = Path.Combine(directory, "transcript");
 		var transcript = new Transcript(transcriptDir);
-		var store = new Artifacts();
-		store.Recover(directory, transcript);
+		using var store = new Artifacts(runtimeHome, message => throw new Exception(message));
+		store.PrepareAgent(agentId);
 		var source = Path.Combine(directory, Artifacts.Staging, "draft.txt");
 		await File.WriteAllTextAsync(source, "hello, snapshot");
-		var orphan = await store.Publish(directory, "draft.txt", null, default);
-		var item = await store.Publish(directory, "draft.txt", "nice\u202E/label", default);
+		var orphan = await store.Publish(agentId, "draft.txt", null, default);
+		var item = await store.Publish(agentId, "draft.txt", "nice\u202E/label", default);
 		Assert.Equal("text", item.PreviewKind);
 		Assert.Equal("nicelabel.txt", item.Name);
 		Assert.Null(transcript.Artifact(item.Id));
@@ -55,9 +59,11 @@ public sealed class ArtifactTests {
 		var loaded = new Transcript(transcriptDir);
 		Assert.Equal(item, loaded.Artifact(item.Id));
 		Assert.Equal(item, Assert.Single(Assert.Single(loaded.ReadPage(80).Entries).Artifacts!));
-		new Artifacts().Recover(directory, loaded);
-		Assert.Null(Artifacts.Open(directory, orphan));
-		using var blob = Artifacts.Open(directory, item);
+		store.Dispose();
+		using var resumed = new Artifacts(runtimeHome, message => throw new Exception(message));
+		Assert.Null(loaded.Artifact(orphan.Id));
+		Assert.True(File.Exists(Path.Combine(runtimeHome.Root, Artifacts.Store, agentId + "." + orphan.Id)));
+		using var blob = resumed.Open(agentId, item);
 		Assert.NotNull(blob);
 		using var reader = new StreamReader(blob!);
 		Assert.Equal("hello, snapshot", await reader.ReadToEndAsync());
@@ -67,21 +73,23 @@ public sealed class ArtifactTests {
 	public async Task UnterminatedArtifactRecordDoesNotAuthorizeAfterRecoveryOrLaterAppend() {
 		if(!ArtifactFiles.Supported) return;
 		using var temp = new TempDir();
-		var directory = temp.File("agent");
+		var runtimeHome = new Home(temp.File("runtime"));
+		const string agentId = "agent";
+		var directory = runtimeHome.AgentDir(agentId);
 		var path = Path.Combine(directory, "transcript");
 		var log = new Transcript(path);
-		var store = new Artifacts();
-		store.Recover(directory, log);
+		using var store = new Artifacts(runtimeHome, message => throw new Exception(message));
+		store.PrepareAgent(agentId);
 		await File.WriteAllTextAsync(Path.Combine(directory, Artifacts.Staging, "fixture.txt"), "uncommitted");
-		var item = await store.Publish(directory, "fixture.txt", null, default);
+		var item = await store.Publish(agentId, "fixture.txt", null, default);
 		log.Append(new Entry { Kind = EntryKind.ToolCall, CallId = "test" });
 		await File.AppendAllTextAsync(Path.Combine(path, "000001.jsonl"),
 			JsonIO.Serialize(new Entry { Kind = EntryKind.ToolResult, Seq = 2, CallId = "test", Artifacts = [item] }));
+		var original = await File.ReadAllBytesAsync(Path.Combine(path, "000001.jsonl"));
 		var recovered = new Transcript(path);
+		Assert.Equal(original, await File.ReadAllBytesAsync(Path.Combine(path, "000001.jsonl")));
 		Assert.Null(recovered.Artifact(item.Id));
 		Assert.Single(recovered.Entries);
-		new Artifacts().Recover(directory, recovered);
-		Assert.Null(Artifacts.Open(directory, item));
 		Assert.Equal(2, recovered.Append(new Entry { Kind = EntryKind.ToolResult, CallId = "test" }).Seq);
 		Assert.Null(new Transcript(path).Artifact(item.Id));
 	}
@@ -90,10 +98,12 @@ public sealed class ArtifactTests {
 	public async Task StagingRejectsTraversalLinksFifoAndOversizeAndLeavesNoCancelledCopy() {
 		if(!ArtifactFiles.Supported) return;
 		using var home = new TempDir();
-		var directory = home.File("agent");
+		var runtimeHome = new Home(home.File("runtime"));
+		const string agentId = "agent";
+		var directory = runtimeHome.AgentDir(agentId);
 		var transcript = new Transcript(Path.Combine(directory, "transcript"));
-		var store = new Artifacts();
-		store.Recover(directory, transcript);
+		using var store = new Artifacts(runtimeHome, message => throw new Exception(message));
+		store.PrepareAgent(agentId);
 		var inbox = Path.Combine(directory, Artifacts.Staging);
 		var privatePath = home.File("private.txt");
 		await File.WriteAllTextAsync(privatePath, "private");
@@ -103,13 +113,86 @@ public sealed class ArtifactTests {
 		Directory.CreateDirectory(Path.Combine(inbox, "dir"));
 		using(var large = File.Create(Path.Combine(inbox, "large.txt"))) large.SetLength(Artifacts.MaxBytes + 1L);
 		foreach(var leaf in new[] { "../private.txt", privatePath, "symlink.txt", "hard.txt", "fifo.txt", "dir", "large.txt" })
-			await Assert.ThrowsAsync<IOException>(() => store.Publish(directory, leaf, null, default));
+			await Assert.ThrowsAsync<IOException>(() => store.Publish(agentId, leaf, null, default));
 		await File.WriteAllTextAsync(Path.Combine(inbox, "draft.txt"), "finished");
-		await Assert.ThrowsAnyAsync<OperationCanceledException>(() => store.Publish(directory, "draft.txt", null, new(true)));
-		Assert.Empty(Directory.EnumerateFiles(Path.Combine(directory, Artifacts.Store)));
+		await Assert.ThrowsAnyAsync<OperationCanceledException>(() => store.Publish(agentId, "draft.txt", null, new(true)));
+		Assert.Empty(Directory.EnumerateFiles(Path.Combine(runtimeHome.Root, Artifacts.Store)));
 		Directory.Move(inbox, inbox + "-old");
 		Directory.CreateSymbolicLink(inbox, inbox + "-old");
-		await Assert.ThrowsAsync<IOException>(() => store.Publish(directory, "draft.txt", null, default));
+		await Assert.ThrowsAsync<IOException>(() => store.Publish(agentId, "draft.txt", null, default));
+	}
+
+	[Theory]
+	[InlineData("snapshot namespace", false)]
+	[InlineData("transcript namespace", false)]
+	[InlineData("after result flush", true)]
+	public async Task IndeterminateFailureRetainsFinalizedBlobAndDefersResultAuthorization(string point, bool committedOnDisk) {
+		if(!ArtifactFiles.Supported) return;
+		using var scratch = new TempDir();
+		var home = new Home(scratch.File("runtime"));
+		const string id = "agent";
+		var directory = home.AgentDir(id);
+		var history = Path.Combine(directory, "transcript");
+		var log = new Transcript(history);
+		var warnings = new List<string>();
+		using var store = new Artifacts(home, warnings.Add, p => { if(p == point) throw new IOException("Injected I/O fault."); });
+		Assert.True(store.Enabled);
+		store.PrepareAgent(id);
+		await File.WriteAllTextAsync(Path.Combine(directory, Artifacts.Staging, "report.txt"), "report bytes");
+		ArtifactRef? item = null;
+		await Assert.ThrowsAsync<IOException>(async () => {
+			item = await store.Publish(id, "report.txt", null, default);
+			store.Commit(id, log, new Entry { Kind = EntryKind.ToolResult, Artifacts = [item] });
+		});
+		Assert.False(store.Enabled);
+		Assert.Single(warnings);
+		Assert.Empty(log.Entries);
+		var snapshots = Directory.GetFiles(Path.Combine(home.Root, Artifacts.Store), "agent.*");
+		Assert.Single(snapshots);
+		using var competing = new Artifacts(home, _ => { });
+		Assert.False(competing.Enabled); // Disabled while in doubt, but still owns the lease.
+		store.Dispose();
+		using var reopened = new Artifacts(home, warnings.Add);
+		Assert.True(reopened.Enabled);
+		Assert.True(File.Exists(snapshots[0]));
+		Assert.Equal(committedOnDisk, new Transcript(history).Entries.Count == 1);
+		if(committedOnDisk) { using var file = reopened.Open(id, item!); Assert.NotNull(file); }
+	}
+
+	[Fact]
+	public async Task LeaseAndInventoryFailClosedAndHomeAliasDoesNotRetarget() {
+		if(!ArtifactFiles.Supported) return;
+		using var scratch = new TempDir();
+		var original = new Home(scratch.File("original"));
+		var alternate = new Home(scratch.File("alternate"));
+		var alias = scratch.File("home-alias");
+		Directory.CreateSymbolicLink(alias, original.Root);
+		const string id = "agent";
+		Directory.CreateDirectory(original.AgentDir(id));
+		Directory.CreateDirectory(alternate.AgentDir(id));
+		var warnings = new List<string>();
+		using var store = new Artifacts(new Home(alias), warnings.Add);
+		Assert.True(store.Enabled);
+		store.PrepareAgent(id);
+		var filename = Path.Combine(original.AgentDir(id), Artifacts.Staging, "launch.exe");
+		await File.WriteAllTextAsync(filename, "original bytes");
+		using var competing = new Artifacts(original, warnings.Add);
+		Assert.False(competing.Enabled);
+		Directory.Delete(alias);
+		Directory.CreateSymbolicLink(alias, alternate.Root);
+		var item = await store.Publish(id, "launch.exe", "CON", default);
+		Assert.Equal("artifact.bin", item.Name);
+		Assert.False(Directory.Exists(Path.Combine(alternate.Root, Artifacts.Store)));
+		var agent = original.AgentDir(id);
+		Directory.Move(agent, agent + "-old");
+		Directory.CreateSymbolicLink(agent, agent + "-old");
+		await Assert.ThrowsAsync<IOException>(() => store.Publish(id, "launch.exe", null, default));
+		store.Dispose();
+		var unverified = Path.Combine(original.Root, Artifacts.Store, "malformed");
+		await File.WriteAllTextAsync(unverified, "leave untouched");
+		using var partial = new Artifacts(original, warnings.Add);
+		Assert.False(partial.Enabled);
+		Assert.True(File.Exists(unverified));
 	}
 
 	[Fact]

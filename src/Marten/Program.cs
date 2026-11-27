@@ -91,9 +91,9 @@ var childWatcher = new ChildProcessWatcher();
 var restart = new RestartDrain();
 var scriptTools = new ScriptToolSource(getManager);
 var mcp = new Marten.Mcp.McpHub(getManager);
+using var artifacts = new Artifacts(home, Console.Error.WriteLine);
 var tools = new ToolRegistry()
 	.Add(new ReadFileTool())
-	.Add(new PublishArtifactTool(getManager))
 	.Add(new EditFileTool(new MemoryGuard(getManager)))
 	.Add(new PowerShellTool(() => managerRef!.Config.CommandTimeoutSeconds, () => managerRef!.Config.StopGraceSeconds, childWatcher, restart.Stopping))
 	.Add(new SendMessageTool(getManager))
@@ -118,7 +118,8 @@ var tools = new ToolRegistry()
 	.Add(new RemoveToolTool(getManager, scriptTools))
 	.AddSource(scriptTools)
 	.AddSource(mcp);
-var manager = managerRef = new AgentManager(home, config, backend, tools) { Launcher = new ProcessLauncher(), Mcp = mcp, Restart = restart };
+if(artifacts.Enabled) tools.Add(new PublishArtifactTool(getManager));
+var manager = managerRef = new AgentManager(home, config, backend, tools) { Launcher = new ProcessLauncher(), Mcp = mcp, Restart = restart, ArtifactStore = artifacts };
 var hub = new EventHub();
 manager.Events += hub.Broadcast;
 var pairing = new DevicePairing(home);
@@ -298,11 +299,13 @@ ext.MapGet("/inbox", async (HttpContext ctx, bool? ack, int? wait) => {
 	return Results.Ok(list.Select(m => new { file = Path.GetFileName(m.File), headers = m.Headers, m.Text }));
 });
 ext.MapGet("/agents/{id}/transcript", (HttpContext ctx, string id, long? since, int? limit) => {
+	ctx.Response.Headers.CacheControl = "no-store";
 	if(ClientOf(ctx) is null) return NeedsClient();
 	if(manager.Get(id) is not { } a) return Results.NotFound();
 	static string? Cut(string? s, int n) => s == null || s.Length <= n ? s : s[..n] + $"… ({s.Length - n} more chars)";
 	return Results.Ok(a.Transcript.Entries.Where(e => e.Seq > (since ?? 0) && e.Kind is not (EntryKind.Reasoning or EntryKind.Elide))
 		.TakeLast(Math.Clamp(limit ?? 50, 1, 500))
+		.Select(ArtifactTranscriptProjection.Outside)
 		.Select(e => new { e.Seq, e.Ts, e.Kind, e.From, Text = Cut(e.Text, 4000), e.Name, Arguments = Cut(e.Arguments, 1000), e.IsError }));
 });
 ext.MapGet("/agents/{id}/tasks", (HttpContext ctx, string id) =>
@@ -328,14 +331,16 @@ api.MapPut("/config", (ConfigUpdate update) => {
 api.MapGet("/agents", () => manager.Agents.Select(AgentSummary)).AllowPaired();
 api.MapPost("/agents", (CreateAgent req) => AgentSummary(manager.CreateChat(req.Name, Blank(req.WorkingDirectory)))).AllowPaired();
 api.MapGet("/agents/{id}/transcript", (HttpContext ctx, string id, int? limit, long? before) => {
+	ctx.Response.Headers.CacheControl = "no-store";
 	if(manager.Get(id) is not { } a) return Results.NotFound();
 	var outside = ctx.Items.ContainsKey("client");
 	if(limit is int size) {
 		var page = a.Transcript.ReadPage(size, before);
 		// Replay payloads (notably encrypted reasoning) can dwarf the text the UI displays.
-		return Results.Ok(new { Entries = page.Entries.Select(e => e with { Raw = null, Instructions = null, Artifacts = outside ? null : e.Artifacts }), page.HasOlder });
+		var entries = outside ? page.Entries.Select(ArtifactTranscriptProjection.Outside) : page.Entries;
+		return Results.Ok(new { Entries = entries.Select(e => e with { Raw = null, Instructions = null }), page.HasOlder });
 	}
-	return outside ? Results.Ok(a.Transcript.Entries.Select(e => e with { Artifacts = null })) : Results.Ok(a.Transcript.Entries);
+	return outside ? Results.Ok(a.Transcript.Entries.Select(ArtifactTranscriptProjection.Outside)) : Results.Ok(a.Transcript.Entries);
 }).AllowPaired();
 api.MapArtifacts(manager);
 api.MapPost("/agents/{id}/messages", (string id, SendMessage req) => {

@@ -30,7 +30,7 @@ public sealed record BackupInfo(string Path, DateTimeOffset Taken, long Bytes, b
 /// </summary>
 public sealed class Backups(Home home, Func<BackupSettings> settings) {
 	public static readonly string[] AlwaysExcluded = [
-		"agents/*/artifact-inbox/**", "agents/*/artifacts/**",
+		"agents/*/artifact-inbox/**", "artifact-store/**",
 		"secrets/**", "agents/*/browser/**", "agents/*/browser-out/**", "projects/*/worktrees/**", "**/node_modules/**", "**/*.tmp", "paused",
 	];
 	const string Prefix = "marten-", Stamp = "yyyyMMdd-HHmmss";
