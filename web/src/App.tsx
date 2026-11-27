@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { DevicePairing } from './DevicePairing';
 import { AgentMessage, AgentSummary, Api, Backend, BackupStatus, Entry, NotebookCell, OutsideClient, McpServer, Project, ProjectMemory, Schedule, ScriptToolInfo, SeraMessage, ServerEvent, Status_, TaskItem, takeToken, TranscriptPage, transcriptPageSize } from './api';
 import { ProcessPanels } from './ProcessPanels';
+import { Composer, ComposerDrafts } from './Composer';
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh'];
 
@@ -47,6 +48,8 @@ export function App() {
   const [models, setModels] = useState<string[]>([]);
   /** Bumped on task and memory events so open panels refetch. */
   const [tick, setTick] = useState(0);
+  const [pendingTick, setPendingTick] = useState(0);
+  const [drafts] = useState(() => new ComposerDrafts());
   /** Changes whenever a backend connects or disconnects, so the model list refetches. */
   const connected = status ? [status.auth.connected, ...status.backends.map(b => b.connected)].map(Number).join('') : '';
   useEffect(() => {
@@ -131,6 +134,7 @@ export function App() {
           setStatus(s => s && { ...s, agents: s.agents.map(a => a.id === e.agentId ? { ...a, status: e.status, statusDetail: e.detail, retryAt: e.retryAt } : a) });
           break;
         case 'inbox':
+          if (e.agentId === selectedRef.current) setPendingTick(t => t + 1);
           setStatus(s => s && { ...s, agents: s.agents.map(a => a.id === e.agentId ? { ...a, pending: e.pending } : a) });
           break;
         case 'flag':
@@ -149,6 +153,7 @@ export function App() {
       // A reconnect may be to a fresh process; its attempt ids start over.
       setStatus(s => s && { ...s, agents: s.agents.map(a => ({ ...a, modelCall: null })) });
       setStreaming({});
+      setPendingTick(t => t + 1);
       setTick(t => t + 1);
       refresh();
       if (selectedRef.current) loadTranscript(selectedRef.current);
@@ -164,7 +169,7 @@ export function App() {
   const project = agent ? status.projects.find(p => p.id === agent.projectId) : undefined;
   let main;
   if (agent)
-    main = <><AgentView key={agent.id} api={api} agent={agent} project={project} agents={status.agents} models={models} tick={tick} defaultModel={status.config.model ?? status.config.defaultModel ?? models[0]} defaultEffort={status.config.effort} onChange={refresh} onSelect={setSelected} entries={tail?.id === agent.id ? tail.entries : undefined} hasOlder={tail?.id === agent.id && tail.hasOlder} streaming={streaming[agent.id] ?? ''} runningCall={running[agent.id]} />{tailError?.id === agent.id && <div role="alert" className="banner">Couldn’t load the transcript: {tailError.message} <button onClick={() => loadTranscript(agent.id)}>Retry</button></div>}</>;
+    main = <><AgentView key={agent.id} api={api} agent={agent} pendingTick={pendingTick} drafts={drafts} project={project} agents={status.agents} models={models} tick={tick} defaultModel={status.config.model ?? status.config.defaultModel ?? models[0]} defaultEffort={status.config.effort} onChange={refresh} onSelect={setSelected} entries={tail?.id === agent.id ? tail.entries : undefined} hasOlder={tail?.id === agent.id && tail.hasOlder} streaming={streaming[agent.id] ?? ''} runningCall={running[agent.id]} />{tailError?.id === agent.id && <div role="alert" className="banner">Couldn’t load the transcript: {tailError.message} <button onClick={() => loadTranscript(agent.id)}>Retry</button></div>}</>;
   else if (selected === 'processes')
     main = <ProcessesView api={api} tick={tick} onSelect={setSelected} />;
   else if (selected === 'inbox')
@@ -395,8 +400,9 @@ type ArchivePage = {
   cursors: number[];
 };
 
-function AgentView({ api, agent, project, agents, models, tick, defaultModel, defaultEffort, onChange, onSelect, entries: transcript, hasOlder, streaming, runningCall }: {
+function AgentView({ api, agent, project, agents, models, tick, pendingTick, drafts, defaultModel, defaultEffort, onChange, onSelect, entries: transcript, hasOlder, streaming, runningCall }: {
   api: Api; agent: AgentSummary; project?: Project; agents: AgentSummary[]; models: string[]; tick: number;
+  pendingTick: number; drafts: ComposerDrafts;
   defaultModel?: string; defaultEffort?: string; onChange: () => void; onSelect: (id: string) => void;
   entries?: Entry[]; hasOlder: boolean; streaming: string; runningCall?: string;
 }) {
@@ -441,8 +447,6 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   useEffect(() => { api.schedules(agent.id).then(setSchedules).catch(() => setSchedules([])); }, [api, agent.id, tick]);
   const parent = agents.find(a => a.id === agent.parentId);
-  const [text, setText] = useState('');
-  const [mode, setMode] = useState<'queued' | 'immediate'>('queued');
   const [showNotebook, setShowNotebook] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [resetError, setResetError] = useState<string | null>(null);
@@ -504,13 +508,6 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
       setResetting(false);
       onChange();
     }
-  };
-
-  const send = async () => {
-    const t = text.trim();
-    if (!t) return;
-    setText('');
-    await api.send(agent.id, t, busy ? mode : 'queued');
   };
 
   return (
@@ -615,27 +612,7 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
         {!archive && agent.status === 'waiting_for_slot' && <Thinking label="Waiting for slot" />}
         {!archive && agentQuestions.filter(q => !q.answer).map(card)}
       </div>
-      <footer className="composer">
-        <div className="composer-row">
-          <textarea
-            value={text}
-            placeholder={busy ? 'Message (agent is working)' : 'Message'}
-            onChange={e => setText(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
-            rows={3}
-          />
-          <div className="actions">
-            <button className="primary" onClick={send} disabled={!text.trim()}>Send</button>
-            {busy && <button onClick={() => api.interrupt(agent.id)}>Stop</button>}
-          </div>
-        </div>
-        {busy && (
-          <div className="modes">
-            <label><input type="radio" checked={mode === 'queued'} onChange={() => setMode('queued')} /> Queue</label>
-            <label><input type="radio" checked={mode === 'immediate'} onChange={() => setMode('immediate')} /> Steer now</label>
-          </div>
-        )}
-      </footer>
+      <Composer api={api} id={agent.id} busy={busy} pendingTick={pendingTick} drafts={drafts} />
     </div>
   );
 }

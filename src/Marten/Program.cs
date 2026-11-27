@@ -354,8 +354,16 @@ api.MapGet("/agents/{id}/transcript", (string id, int? limit, long? before) => {
 api.MapPost("/agents/{id}/messages", (string id, SendMessage req) => {
 	if(manager.Get(id) is not { } a) return Results.NotFound();
 	if(string.IsNullOrWhiteSpace(req.Text)) return Results.BadRequest();
-	a.Send(new Inbound("Sera", req.Text, req.Mode ?? SendMode.Queued));
+	a.SendOperator(req.Text, req.Mode ?? SendMode.Queued);
 	return Results.Accepted();
+}).AllowPaired();
+api.MapGet("/agents/{id}/pending-messages", (HttpContext ctx, string id) => {
+	ctx.Response.Headers.CacheControl = "no-store";
+	return manager.Get(id) is { } a ? Results.Ok(a.GetPendingMessages()) : Results.NotFound();
+}).AllowPaired();
+api.MapDelete("/agents/{id}/pending-messages/{messageId}", (HttpContext ctx, string id, string messageId) => {
+	ctx.Response.Headers.CacheControl = "no-store";
+	return manager.Get(id)?.RecallPendingMessage(messageId) is { } removed ? Results.Ok(removed) : Results.NotFound();
 }).AllowPaired();
 api.MapPut("/agents/{id}/settings", (string id, ConfigUpdate update) => {
 	if(manager.Get(id) is not { } a) return Results.NotFound();

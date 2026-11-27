@@ -148,6 +148,14 @@ Agents message within a project and across orchestrators, but task agents never 
 - **Queued** holds the message until the recipient goes idle, and wakes a recipient that already is.
 - **Loop breaker.** When two agents exchange `loopMessages` (20) messages within `loopWindowMinutes` (10) without Sera, with at least a quarter going each way, the send that tips it is refused, both agents are paused, and Sera gets an inbox message. A message from Sera to either agent clears the count; `loopMessages: 0` turns it off.
 
+### Pending operator chat
+
+- Only authenticated operator composer sends (`POST /api/agents/{id}/messages`) get opaque per-message IDs. The shared runtime inbox can also contain agent messages, outside messages, answers, and internal nudges; none of those are exposed as pending chat, regardless of sender display name. The inbox remains in memory; there is no restart replay of pending chat.
+- `GET /api/agents/{id}/pending-messages` returns a FIFO snapshot of the operator's still-pending messages as `[{id,text,mode}]`, with the same `queued`/`immediate` string encoding as send. An unknown agent returns `404`.
+- `DELETE /api/agents/{id}/pending-messages/{messageId}` competes with delivery under the same inbox lock. It returns `200` with the removed record only for a queued message it withdrew before claim. An invalid, unknown, already-claimed, or immediate message returns `404`. Successful recall does not record a transcript entry or resend; if claim wins, normal delivery records the message. Recalling the last pending input before a turn claims it does not start an empty turn.
+- Both routes use the operator web/paired app policy and `Cache-Control: no-store`; outside scopes are unchanged. The existing `inbox` event carries only agent ID and total inbox count, not pending IDs or text. Clients refresh the selected agent's snapshot on its inbox event (even if the count is unchanged) and on reconnect, coalescing bursts and rejecting stale responses.
+- Show pending rows above the composer. Steering is read-only and goes into the transcript on delivery. On successful recall, edit the server-returned text as a draft; don't overwrite an existing draft or restore a message on recall failure.
+
 ## Tasks and wake-ups
 
 Besides messages, two things can wake an agent: an unfinished task and a schedule. All three go through one wake path that records the reason.
