@@ -7,7 +7,7 @@ internal static class ServerShutdown {
 	public static readonly TimeSpan HostTimeout = TimeSpan.FromSeconds(3);
 
 	public static async Task<bool> RunAsync(WebApplication app, RestartDrain restart, Func<int> stopGraceSeconds,
-		Action cleanForeground, Func<Task> stopMcp) {
+		Action cleanForeground, Func<Task> stopMcp, Func<Task>? stopTailnet = null) {
 		var signalled = new TaskCompletionSource<Task>(TaskCreationOptions.RunContinuationsAsynchronously);
 		var start = Stopwatch.GetTimestamp();
 		void Report(string phase) => Console.Error.WriteLine($"Marten shutdown +{Stopwatch.GetElapsedTime(start).TotalMilliseconds:0}ms {phase}");
@@ -42,12 +42,12 @@ internal static class ServerShutdown {
 		} catch {
 			// Match RunAsync on a startup failure, but don't leave startup tools running.
 			app.Lifetime.StopApplication();
-			await Task.WhenAll(Drain(), Dispose());
+			await Task.WhenAll(Drain(), Dispose(), StopTailnet());
 			throw;
 		}
 
 		await signalled.Task;
-		var results = await Task.WhenAll(Drain(), StopHost());
+		var results = await Task.WhenAll(Drain(), StopHost(), StopTailnet());
 		var clean = results.All(ok => ok);
 		Report(clean ? "exit" : "exit incomplete");
 		return clean;
@@ -70,6 +70,8 @@ internal static class ServerShutdown {
 			}
 			return (await Phase("mcp-stop", stopMcp, TimeSpan.FromSeconds(5))).Ok && drained;
 		}
+
+		async Task<bool> StopTailnet() => stopTailnet == null || (await Phase("tailnet-stop", stopTailnet, TimeSpan.FromSeconds(5))).Ok;
 
 		Task<(bool Ok, bool Finished)> Dispose() => Phase("host-dispose", () => app.DisposeAsync().AsTask(), TimeSpan.FromSeconds(3));
 

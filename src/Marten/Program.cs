@@ -120,10 +120,21 @@ var tools = new ToolRegistry()
 var manager = managerRef = new AgentManager(home, config, backend, tools) { Launcher = new ProcessLauncher(), Mcp = mcp, Restart = restart };
 var hub = new EventHub();
 manager.Events += hub.Broadcast;
-var security = new Security(home, config) { ClientAuth = manager.Outside.Authenticate };
+var pairing = new DevicePairing(home);
+var tailnet = new TailnetTransport(config);
+var security = new Security(home, config, tailnet) { ClientAuth = manager.Outside.Authenticate, Pairing = pairing };
+if(config.PairingOrigin != null) {
+	if(config.Tailnet != null) Console.Error.WriteLine("Ignoring pairingOrigin in embedded mode; pairing uses the verified tailnet.host.");
+	else if(security.ConfiguredPairingOrigin == null) Console.Error.WriteLine("Pairing disabled: pairingOrigin must be a valid HTTPS origin.");
+}
 
 var builder = WebApplication.CreateSlimBuilder(args);
 builder.WebHost.UseUrls($"http://127.0.0.1:{config.Port}");
+if(config.Tailnet != null) builder.WebHost.ConfigureKestrel(kestrel => {
+	// Ignore configured Kestrel endpoints in embedded mode. Only the helper listens on the tailnet.
+	kestrel.Configure(new ConfigurationBuilder().Build());
+	kestrel.Listen(System.Net.IPAddress.Loopback, config.Port);
+});
 builder.Logging.SetMinimumLevel(LogLevel.Warning);
 builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = ServerShutdown.HostTimeout);
 builder.Services.ConfigureHttpJsonOptions(o => {
@@ -132,6 +143,7 @@ builder.Services.ConfigureHttpJsonOptions(o => {
 	foreach(var c in JsonIO.Options.Converters) o.SerializerOptions.Converters.Add(c);
 });
 var app = builder.Build();
+app.UseRouting();
 app.Use(security.Middleware);
 app.UseWebSockets();
 
@@ -168,6 +180,7 @@ object BackendSummary(MessagesBackend b) => new {
 object ProjectSummary(Project p) => new { p.Info.Id, p.Info.Name, p.Info.Created, p.Info.Bindings, p.Info.WorktreesByDefault, p.Info.OrchestratorId, p.Info.Paused };
 
 var api = app.MapGroup("/api");
+api.MapPairing(pairing, security);
 api.MapGet("/status", () => new {
 	auth = new { connected = auth.Connected, email = auth.Email, signingIn = auth.SigningIn, lastError = auth.LastError },
 	backends = messagesBackends.Select(BackendSummary),
@@ -179,63 +192,63 @@ api.MapGet("/status", () => new {
 	paused = manager.PausedAll,
 	spentToday = ledger.SpentToday(),
 	totalBudget = manager.Config.Budgets.TryGetValue("total", out var totalCap) ? totalCap : (decimal?) null,
-});
+}).AllowPaired();
 api.MapPost("/pause", (PauseRequest req) => {
 	manager.SetPausedAll(req.Paused);
 	return Results.Ok();
-});
+}).AllowPaired();
 api.MapPost("/agents/{id}/close", (string id, CloseRequest req) => {
 	if(manager.Get(id) is not { } a) return Results.NotFound();
 	a.SetClosed(req.Closed);
 	return Results.Ok(AgentSummary(a));
-});
+}).AllowPaired();
 // This mutation is under UI-token auth, not /api/ext or the outside read allowlist.
 api.MapPost("/agents/{id}/start-fresh-context", (string id) => {
 	if(manager.Get(id) is not { } a) return Results.NotFound();
 	return a.StartFreshContext() is { } conflict ? Results.Problem(conflict, statusCode: 409) : Results.NoContent();
-});
+}).AllowPaired();
 api.MapPost("/agents/{id}/pause", (string id, PauseRequest req) => {
 	if(manager.Get(id) is not { } a) return Results.NotFound();
 	a.SetPaused(req.Paused);
 	return Results.Ok(AgentSummary(a));
-});
+}).AllowPaired();
 api.MapPost("/projects/{id}/pause", (string id, PauseRequest req) => {
 	if(manager.GetProject(id) is not { } p) return Results.NotFound();
 	manager.SetProjectPaused(p, req.Paused);
 	return Results.Ok(ProjectSummary(p));
-});
-api.MapPost("/auth/login", () => new { url = auth.BeginLogin() });
-api.MapPost("/auth/logout", () => { auth.Logout(); return Results.Ok(); });
+}).AllowPaired();
+api.MapPost("/auth/login", () => new { url = auth.BeginLogin() }).AllowPaired();
+api.MapPost("/auth/logout", () => { auth.Logout(); return Results.Ok(); }).AllowPaired();
 api.MapPut("/backends/{name}/key", (string name, BackendKey req) => {
 	if(messagesBackends.FirstOrDefault(b => b.Provider == name) is not { } b) return Results.NotFound();
 	b.SetKey(req.Key);
 	manager.Publish(new { type = "config" });
 	return Results.Ok(BackendSummary(b));
-});
+}).AllowPaired();
 object BackupSummary() => new {
 	backups.Directory, backups.Encrypting, manager.Config.Backup.IntervalMinutes,
 	Snapshots = backups.List().Take(20).Select(b => new { Name = Path.GetFileName(b.Path), b.Taken, b.Bytes, b.Encrypted }),
 };
-api.MapGet("/backups", BackupSummary);
+api.MapGet("/backups", BackupSummary).AllowPaired();
 api.MapPost("/backups", async (CancellationToken ct) => {
 	await backups.TakeAsync(force: true, ct);
 	return Results.Ok(BackupSummary());
-});
+}).AllowPaired();
 api.MapPut("/backups/passphrase", (BackendKey req) => {
 	backups.SetPassphrase(req.Key);
 	return Results.Ok(BackupSummary());
-});
+}).AllowPaired();
 // ---- Outside agents ----
 object ClientSummary(OutsideClient c) => new {
 	c.Name, c.Created, tokenPath = manager.Outside.TokenPath(c.Name),
 	unread = manager.Outside.Inbox(c.Name, false).Count,
 };
-api.MapGet("/clients", () => manager.Outside.Clients.Select(ClientSummary));
+api.MapGet("/clients", () => manager.Outside.Clients.Select(ClientSummary)).AllowPaired();
 api.MapPost("/clients", (ClientRequest req) => {
 	try { return Results.Ok(ClientSummary(manager.Outside.Register(req.Name ?? "", req.Rotate ?? false))); }
 	catch(ArgumentException e) { return Results.Problem(e.Message, statusCode: 400); }
-});
-api.MapDelete("/clients/{name}", (string name) => manager.Outside.Remove(name) ? Results.Ok() : Results.NotFound());
+}).AllowPaired();
+api.MapDelete("/clients/{name}", (string name) => manager.Outside.Remove(name) ? Results.Ok() : Results.NotFound()).AllowPaired();
 
 var ext = api.MapGroup("/ext");
 string? ClientOf(HttpContext ctx) => ctx.Items["client"] as string;
@@ -294,7 +307,7 @@ ext.MapGet("/agents/{id}/transcript", (HttpContext ctx, string id, long? since, 
 ext.MapGet("/agents/{id}/tasks", (HttpContext ctx, string id) =>
 	ClientOf(ctx) is null ? NeedsClient() : manager.Get(id) is { } a ? Results.Ok(a.Tasks) : Results.NotFound());
 
-api.MapGet("/usage", (int? days) => ledger.Recent(Math.Clamp(days ?? 7, 1, 90)));
+api.MapGet("/usage", (int? days) => ledger.Recent(Math.Clamp(days ?? 7, 1, 90))).AllowPaired();
 api.MapGet("/models", async (CancellationToken ct) => {
 	try {
 		using var operation = restart.Enter();
@@ -306,13 +319,13 @@ api.MapGet("/models", async (CancellationToken ct) => {
 	} catch(Exception e) when(e is NotConnectedException or InvalidOperationException or TransientModelException or ProviderUnreachableException or RateLimitedException) {
 		return Results.Problem(e.Message, statusCode: 502);
 	}
-});
+}).AllowPaired();
 api.MapPut("/config", (ConfigUpdate update) => {
 	manager.UpdateConfig(c => c with { Model = Blank(update.Model), Effort = Blank(update.Effort) });
 	return Results.Ok();
-});
-api.MapGet("/agents", () => manager.Agents.Select(AgentSummary));
-api.MapPost("/agents", (CreateAgent req) => AgentSummary(manager.CreateChat(req.Name, Blank(req.WorkingDirectory))));
+}).AllowPaired();
+api.MapGet("/agents", () => manager.Agents.Select(AgentSummary)).AllowPaired();
+api.MapPost("/agents", (CreateAgent req) => AgentSummary(manager.CreateChat(req.Name, Blank(req.WorkingDirectory)))).AllowPaired();
 api.MapGet("/agents/{id}/transcript", (string id, int? limit, long? before) => {
 	if(manager.Get(id) is not { } a) return Results.NotFound();
 	if(limit is int size) {
@@ -321,25 +334,25 @@ api.MapGet("/agents/{id}/transcript", (string id, int? limit, long? before) => {
 		return Results.Ok(new { Entries = page.Entries.Select(e => e with { Raw = null, Instructions = null }), page.HasOlder });
 	}
 	return Results.Ok(a.Transcript.Entries);
-});
+}).AllowPaired();
 api.MapPost("/agents/{id}/messages", (string id, SendMessage req) => {
 	if(manager.Get(id) is not { } a) return Results.NotFound();
 	if(string.IsNullOrWhiteSpace(req.Text)) return Results.BadRequest();
 	a.Send(new Inbound("Sera", req.Text, req.Mode ?? SendMode.Queued));
 	return Results.Accepted();
-});
+}).AllowPaired();
 api.MapPut("/agents/{id}/settings", (string id, ConfigUpdate update) => {
 	if(manager.Get(id) is not { } a) return Results.NotFound();
 	a.UpdateSettings(Blank(update.Model), Blank(update.Effort));
 	return Results.Ok(AgentSummary(a));
-});
+}).AllowPaired();
 api.MapPost("/agents/{id}/interrupt", (string id) => {
 	if(manager.Get(id) is not { } a) return Results.NotFound();
 	a.Interrupt();
 	return Results.Ok();
-});
+}).AllowPaired();
 api.MapGet("/agents/{id}/notebook", (string id, int? limit) =>
-	manager.Get(id) is { } a ? Results.Ok(a.Notebook().TakeLast(Math.Clamp(limit ?? 100, 1, 2000))) : Results.NotFound());
+	manager.Get(id) is { } a ? Results.Ok(a.Notebook().TakeLast(Math.Clamp(limit ?? 100, 1, 2000))) : Results.NotFound()).AllowPaired();
 api.MapPost("/agents/{id}/notebook/{n:int}/rerun", async (string id, int n, CancellationToken ct) => {
 	if(manager.Get(id) is not { } a) return Results.NotFound();
 	try {
@@ -350,24 +363,24 @@ api.MapPost("/agents/{id}/notebook/{n:int}/rerun", async (string id, int n, Canc
 	} catch(OperationCanceledException) when(restart.IsStopping) {
 		return Results.StatusCode(503);
 	}
-});
+}).AllowPaired();
 api.MapGet("/agents/{id}/notebook.ipynb", (string id) =>
-	manager.Get(id) is { } a ? Results.File(System.Text.Encoding.UTF8.GetBytes(a.NotebookIpynb()), "application/x-ipynb+json", $"{a.Info.Name}-notebook.ipynb") : Results.NotFound());
+	manager.Get(id) is { } a ? Results.File(System.Text.Encoding.UTF8.GetBytes(a.NotebookIpynb()), "application/x-ipynb+json", $"{a.Info.Name}-notebook.ipynb") : Results.NotFound()).AllowPaired();
 api.MapGet("/agents/{id}/tasks", (string id) =>
-	manager.Get(id) is { } a ? Results.Ok(a.Tasks) : Results.NotFound());
+	manager.Get(id) is { } a ? Results.Ok(a.Tasks) : Results.NotFound()).AllowPaired();
 api.MapGet("/agents/{id}/schedules", (string id) =>
-	manager.Get(id) is { } a ? Results.Ok(a.Schedules.Where(s => !s.Done)) : Results.NotFound());
+	manager.Get(id) is { } a ? Results.Ok(a.Schedules.Where(s => !s.Done)) : Results.NotFound()).AllowPaired();
 api.MapDelete("/agents/{id}/schedules/{scheduleId:int}", (string id, int scheduleId) =>
-	manager.Get(id) is { } a && a.RemoveSchedule(scheduleId) ? Results.Ok() : Results.NotFound());
+	manager.Get(id) is { } a && a.RemoveSchedule(scheduleId) ? Results.Ok() : Results.NotFound()).AllowPaired();
 object ProcessSummary(Agent a, BackgroundProcess p) => new {
 	agentId = a.Info.Id, agentName = a.Info.Name, p.Id, p.Name, p.Command, p.WorkingDirectory, p.Pid, p.Started, p.Stopped, p.LogPath,
 	state = p.Stopped != null ? "stopped" : Posix.Alive(p.Pid) ? "running" : "exited",
 };
-api.MapGet("/processes", () => manager.Agents.SelectMany(a => a.Processes.OrderByDescending(p => p.Started).Select(p => ProcessSummary(a, p))));
+api.MapGet("/processes", () => manager.Agents.SelectMany(a => a.Processes.OrderByDescending(p => p.Started).Select(p => ProcessSummary(a, p)))).AllowPaired();
 api.MapGet("/agents/{id}/processes", (string id, bool? includeStopped) =>
-	manager.Get(id) is { } a ? Results.Ok(a.Processes.Where(p => includeStopped == true || p.Stopped == null).Select(p => ProcessSummary(a, p))) : Results.NotFound());
+	manager.Get(id) is { } a ? Results.Ok(a.Processes.Where(p => includeStopped == true || p.Stopped == null).Select(p => ProcessSummary(a, p))) : Results.NotFound()).AllowPaired();
 api.MapPost("/agents/{id}/processes/{n:int}/stop", async (string id, int n) =>
-	manager.Get(id) is { } a && await a.StopProcess(n) is { } p ? Results.Ok(ProcessSummary(a, p)) : Results.NotFound());
+	manager.Get(id) is { } a && await a.StopProcess(n) is { } p ? Results.Ok(ProcessSummary(a, p)) : Results.NotFound()).AllowPaired();
 api.MapGet("/agents/{id}/processes/{n:int}/log", (string id, int n, int? lines) => {
 	if(manager.Get(id)?.Processes.FirstOrDefault(p => p.Id == n) is not { } p) return Results.NotFound();
 	if(!File.Exists(p.LogPath)) return Results.Text("");
@@ -377,7 +390,7 @@ api.MapGet("/agents/{id}/processes/{n:int}/log", (string id, int n, int? lines) 
 	var text = new StreamReader(stream).ReadToEnd();
 	var all = text.Split('\n');
 	return Results.Text(string.Join('\n', all.TakeLast(Math.Clamp(lines ?? 200, 1, 5000))));
-});
+}).AllowPaired();
 api.MapGet("/tools", (string? projectId) => {
 	var dirs = new List<(string Scope, string Dir)> { ("global", scriptTools.GlobalDir) };
 	if(manager.GetProject(projectId) is { } p) dirs.Add((p.Info.Id, ScriptToolSource.ProjectDir(p)));
@@ -389,7 +402,7 @@ api.MapGet("/tools", (string? projectId) => {
 		return new { name, scope = d.Scope == "global" ? "global" : "project", path = f, script, description, error, modified = File.GetLastWriteTimeUtc(f),
 			pendingReview = !manager.Guard.ToolApproved(f, script) };
 	})).OrderBy(t => t.name);
-});
+}).AllowPaired();
 api.MapPost("/tools/approve", (ToolApproval req) => {
 	var dirs = new List<string> { scriptTools.GlobalDir };
 	dirs.AddRange(manager.Projects.Select(ScriptToolSource.ProjectDir));
@@ -397,12 +410,12 @@ api.MapPost("/tools/approve", (ToolApproval req) => {
 	if(!dirs.Any(d => Path.GetDirectoryName(path) == Path.GetFullPath(d)) || !path.EndsWith(".ps1") || !File.Exists(path)) return Results.NotFound();
 	manager.Guard.ApproveTool(path, File.ReadAllText(path));
 	return Results.Ok();
-});
+}).AllowPaired();
 api.MapGet("/agents/{id}/images/{file}", (string id, string file) => {
 	if(manager.Get(id) is not { } a || file.Contains('/') || file.Contains('\\') || file.StartsWith('.')) return Results.NotFound();
 	var path = Path.Combine(a.Directory, "images", file);
 	return File.Exists(path) && ImageFiles.MimeFor(path) is { } mime ? Results.File(path, mime) : Results.NotFound();
-});
+}).AllowPaired();
 api.MapGet("/mcp", () => {
 	var running = mcp.Running.ToList();
 	return manager.Config.Mcp.Select(kv => new {
@@ -412,14 +425,14 @@ api.MapGet("/mcp", () => {
 		error = mcp.Schemas.TryGetValue(kv.Key, out var s3) ? s3.Error : null,
 		running = running.Where(r => r.Server == kv.Key).Select(r => new { agentId = r.AgentId, agentName = manager.Get(r.AgentId)?.Info.Name, pid = r.Pid }),
 	});
-});
+}).AllowPaired();
 // config.json is Sera's to edit by hand; this picks up its MCP section and re-reads changed servers.
 api.MapPost("/mcp/refresh", async () => {
 	var fresh = Config.Load(home);
 	manager.UpdateConfig(c => c with { Mcp = fresh.Mcp });
 	await RefreshMcp(true);
 	return Results.Ok();
-});
+}).AllowPaired();
 api.MapPost("/projects", (CreateProject req) => {
 	try {
 		var (project, orchestrator) = manager.CreateProject(req.Name ?? "", req.Bindings ?? [], req.Prompt, req.WorktreesByDefault ?? false);
@@ -428,10 +441,10 @@ api.MapPost("/projects", (CreateProject req) => {
 	} catch(ArgumentException e) {
 		return Results.Problem(e.Message, statusCode: 400);
 	}
-});
+}).AllowPaired();
 api.MapGet("/projects/{id}/memory", (string id) =>
-	manager.GetProject(id) is { } p ? Results.Ok(new { path = p.MemoryPath, text = p.Memory, log = p.MemoryLog(), prompt = p.Prompt }) : Results.NotFound());
-api.MapGet("/inbox", () => manager.SeraInbox().AsEnumerable().Reverse());
+	manager.GetProject(id) is { } p ? Results.Ok(new { path = p.MemoryPath, text = p.Memory, log = p.MemoryLog(), prompt = p.Prompt }) : Results.NotFound()).AllowPaired();
+api.MapGet("/inbox", () => manager.SeraInbox().AsEnumerable().Reverse()).AllowPaired();
 api.MapPost("/questions/{id}/answer", (string id, AnswerRequest req) => {
 	try {
 		return Results.Ok(manager.AnswerQuestion(id, req.Choice, req.Text));
@@ -440,10 +453,10 @@ api.MapPost("/questions/{id}/answer", (string id, AnswerRequest req) => {
 	} catch(Exception e) when(e is InvalidOperationException or ArgumentException) {
 		return Results.Problem(e.Message, statusCode: 409);
 	}
-});
+}).AllowPaired();
 api.MapGet("/messages", (string? agentId, string? projectId, int? limit) =>
-	manager.AgentMessages(agentId, projectId, Math.Clamp(limit ?? 500, 1, 5000)).AsEnumerable().Reverse());
-api.Map("/events", async (HttpContext ctx) => {
+	manager.AgentMessages(agentId, projectId, Math.Clamp(limit ?? 500, 1, 5000)).AsEnumerable().Reverse()).AllowPaired();
+api.MapGet("/events", (RequestDelegate)(async ctx => {
 	if(!ctx.WebSockets.IsWebSocketRequest) {
 		ctx.Response.StatusCode = 400;
 		return;
@@ -453,8 +466,8 @@ api.Map("/events", async (HttpContext ctx) => {
 		return;
 	}
 	using var socket = await ctx.WebSockets.AcceptWebSocketAsync();
-	await hub.Serve(socket, ctx.RequestAborted, restart.Stopping);
-});
+	await hub.Serve(socket, ctx.RequestAborted, restart.Stopping, Security.DeviceRevocationOf(ctx));
+})).AllowPaired();
 
 async Task RefreshMcp(bool force) {
 	using var operation = restart.Enter();
@@ -472,7 +485,13 @@ Console.WriteLine($"Backups: {backups.Directory}{(backups.Encrypting ? " (encryp
 Console.WriteLine(webRoot == null
 	? "No built UI found (web/dist). Run `npm run build` in web/, or set MARTEN_WEB_ROOT."
 	: $"Marten UI: http://127.0.0.1:{config.Port}/ (paste the token from the Marten home's secrets/ui-token into the page)");
-var cleanStop = await ServerShutdown.RunAsync(app, restart, () => manager.Config.StopGraceSeconds, childWatcher.CleanForeground, mcp.StopAll);
+Task? tailnetRun = null;
+using var onStarted = app.Lifetime.ApplicationStarted.Register(() => {
+	if(config.Tailnet != null) tailnetRun = Task.Run(() => tailnet.RunAsync(home,
+		Console.Error.WriteLine, app.Lifetime.ApplicationStopping));
+});
+var cleanStop = await ServerShutdown.RunAsync(app, restart, () => manager.Config.StopGraceSeconds,
+	childWatcher.CleanForeground, mcp.StopAll, config.Tailnet != null ? () => tailnetRun ?? Task.CompletedTask : null);
 modelHttp.Dispose();
 authHttp.Dispose();
 // PowerShell may leave a non-background pipeline thread after an abandoned runspace.

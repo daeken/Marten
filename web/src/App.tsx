@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { DevicePairing } from './DevicePairing';
 import { AgentMessage, AgentSummary, Api, Backend, BackupStatus, Entry, NotebookCell, OutsideClient, McpServer, Project, ProjectMemory, Schedule, ScriptToolInfo, SeraMessage, ServerEvent, Status_, TaskItem, takeToken, TranscriptPage, transcriptPageSize } from './api';
 import { ProcessPanels } from './ProcessPanels';
 
@@ -279,6 +280,7 @@ function Sidebar({ api, status, selected, onSelect, onChange }: {
                 {status.auth.lastError && <div className="error small">{status.auth.lastError}</div>}
               </>
             )}
+            <DevicePairing api={api} />
             {status.backends.map(b => <BackendRow key={b.provider} api={api} backend={b} onChange={onChange} />)}
           </section>
         </details>

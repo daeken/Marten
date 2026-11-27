@@ -15,8 +15,8 @@ public sealed class EventHub {
 		foreach(var client in clients.Values) client.Writer.TryWrite(json);
 	}
 
-	public async Task Serve(WebSocket socket, CancellationToken requestAborted, CancellationToken stopping) {
-		using var session = CancellationTokenSource.CreateLinkedTokenSource(requestAborted, stopping);
+	public async Task Serve(WebSocket socket, CancellationToken requestAborted, CancellationToken stopping, CancellationToken deviceRevoked = default) {
+		using var session = CancellationTokenSource.CreateLinkedTokenSource(requestAborted, stopping, deviceRevoked);
 		var ct = session.Token;
 		var id = Guid.NewGuid();
 		// A slow client drops its oldest events rather than stalling agents; it resyncs on reconnect.

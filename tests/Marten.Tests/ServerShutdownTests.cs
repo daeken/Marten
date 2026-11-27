@@ -13,6 +13,37 @@ namespace Marten.Tests;
 
 public sealed class ServerShutdownTests(ITestOutputHelper output) {
 	[Fact]
+	public async Task ExternalSigtermWaitsForEmbeddedHelperEofWithoutEnrolling() {
+		if(!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) return;
+		using var dir = new TempDir();
+		var home = new Home(dir.File("home"));
+		var port = FreePort();
+		const string host = "marten.shutdown-fixture.ts.net";
+		new Config { Port = port, Tailnet = new() { Host = host }, Backup = new() { IntervalMinutes = 0 } }.Save(home);
+		var bin = Path.Combine(home.Root, "bin");
+		Directory.CreateDirectory(bin);
+		var helper = Path.Combine(bin, "marten-tsnet");
+		File.WriteAllText(helper, "#!/bin/sh\nprintf 'READY\\n'\nread unused || :\nsleep 0.1\nprintf '%s' eof > helper-exit\n");
+		if(!OperatingSystem.IsWindows()) File.SetUnixFileMode(helper, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+		await using var server = new Server(home, port, output);
+		await server.Ready();
+		using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}"), Timeout = TimeSpan.FromSeconds(2) };
+		using var ready = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+		while(true) {
+			using var request = new HttpRequestMessage(HttpMethod.Get, "/api/status");
+			request.Headers.Host = host;
+			using var response = await http.SendAsync(request, ready.Token);
+			if(response.StatusCode == HttpStatusCode.Unauthorized) break; // canonical request passes the readiness gate
+			await Task.Delay(30, ready.Token);
+		}
+		Posix.Terminate(server.Pid, group: false);
+		await server.Exited.WaitAsync(TimeSpan.FromSeconds(6));
+		Assert.Equal(0, server.ExitCode);
+		Assert.Equal("eof", File.ReadAllText(Path.Combine(home.Root, "helper-exit")));
+		Assert.Contains("tailnet-stop end", await server.ShutdownTimings());
+	}
+
+	[Fact]
 	public async Task ExternalSigtermDropsPassiveAuthenticatedWebSocket() {
 		if(!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) return;
 		using var dir = new TempDir();

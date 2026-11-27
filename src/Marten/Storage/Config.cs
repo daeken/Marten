@@ -59,6 +59,10 @@ public sealed record Config {
 	public Dictionary<string, Marten.Mcp.McpServerConfig> Mcp { get; init; } = new();
 	/// <summary>Host names Marten is also reached by through an HTTPS proxy on this machine, e.g. "mac.tailnet.ts.net" for `tailscale serve`. Marten itself still listens only on 127.0.0.1.</summary>
 	public List<string> RemoteHosts { get; init; } = new();
+	/// <summary>Canonical HTTPS origin advertised to paired devices. Null disables new pairing.</summary>
+	public string? PairingOrigin { get; init; }
+	/// <summary>Opt-in embedded native transport, separate from manually configured web proxies.</summary>
+	public TailnetSettings? Tailnet { get; init; }
 	/// <summary>Extra Origin allowed to call the API, e.g. the Vite dev server.</summary>
 	public string? DevOrigin { get; init; }
 
