@@ -167,7 +167,7 @@ public sealed partial class Agent : IPowerShellOwner {
 	// Called under gate (or during single-threaded recovery). The regular queued-inbox
 	// lifecycle holds these for paused/closed agents without reopening them.
 	void QueueDependencyWake(string text) {
-		inbox.Add(new Inbound(NudgeSender, text, SendMode.Queued, DependencyWake));
+		Enqueue(new Inbound(NudgeSender, text, SendMode.Queued, DependencyWake));
 		signal.Release();
 	}
 
@@ -185,7 +185,7 @@ public sealed partial class Agent : IPowerShellOwner {
 			if(Info.Closed == closed) return;
 			SaveClosed(closed);
 			if(closed) {
-				resumeReason = null;
+				ClearRecoveryWake();
 				activeTurn?.Cancel(closed: true);
 			}
 		}
@@ -226,8 +226,7 @@ public sealed partial class Agent : IPowerShellOwner {
 
 	/// <summary>Repair the log after a restart and decide whether a turn was cut short.</summary>
 	public void Recover() {
-		foreach(var item in Tasks)
-			foreach(var text in item.PendingDependencyWakes ?? []) QueueDependencyWake(text);
+		var dependencyWakes = Tasks.SelectMany(item => item.PendingDependencyWakes ?? []).ToList();
 		AnswerDanglingCalls("Interrupted: Marten stopped while this was running. It was not re-run; check its effects before retrying.");
 		var history = Transcript.Capture();
 		var reset = history.LastSeq(RowKind.Reset);
@@ -244,7 +243,21 @@ public sealed partial class Agent : IPowerShellOwner {
 		Append(new Entry { Kind = EntryKind.Message, From = NudgeSender, Text =
 			"Marten restarted. Interrupted calls were not re-run. Check logs, files, and external state before retrying; partial effects are possible." +
 			(interruptedTurn ? " Your previous turn was interrupted." : "") + interruptedOperations });
-		if(!Info.Closed && (interruptedTurn || interruptedOperations.Length > 0)) resumeReason = "restart";
+		// Publish recovered work only after all fallible disk repair. LoadAll removes an
+		// agent on repair failure; dependency wake records remain in tasks.json for
+		// the next successful recovery, with no orphaned in-memory registrations.
+		foreach(var text in dependencyWakes) QueueDependencyWake(text);
+		if(!Info.Closed && (interruptedTurn || interruptedOperations.Length > 0) && resumeReason == null) {
+			manager.Restart.ChangePendingMessages(1);
+			resumeReason = "restart";
+		}
+	}
+
+	// Called with gate held, either by explicit close or after acquiring a turn admission.
+	void ClearRecoveryWake() {
+		if(resumeReason == null) return;
+		resumeReason = null;
+		manager.Restart.ChangePendingMessages(-1);
 	}
 
 	/// <summary>Every tool call needs a result before the next model call; give unanswered ones an error.</summary>
@@ -286,7 +299,7 @@ public sealed partial class Agent : IPowerShellOwner {
 					reopened = true;
 				}
 			}
-			inbox.Add(message);
+			Enqueue(message);
 			if(message.From == "Sera" && (state.NudgeStreak != 0 || state.NudgesStopped))
 				state = state with { NudgeStreak = 0, NudgesStopped = false };
 		}
@@ -304,6 +317,13 @@ public sealed partial class Agent : IPowerShellOwner {
 		manager.Publish(new { type = "agents" });
 	}
 
+	// Every in-memory inbound counts, not just composer messages. Call under gate or
+	// during recovery, before the server accepts release requests.
+	void Enqueue(Inbound message) {
+		manager.Restart.ChangePendingMessages(1);
+		inbox.Add(message);
+	}
+
 	public int PendingCount { get { lock(gate) return inbox.Count; } }
 
 	internal PendingMessage[] GetPendingMessages() {
@@ -318,6 +338,7 @@ public sealed partial class Agent : IPowerShellOwner {
 			if(index < 0) return null;
 			removed = inbox[index];
 			inbox.RemoveAt(index);
+			manager.Restart.ChangePendingMessages(-1);
 		}
 		manager.Publish(new { type = "inbox", agentId = Info.Id, pending = PendingCount });
 		return new PendingMessage(id, removed.Text, removed.Mode);
@@ -326,17 +347,20 @@ public sealed partial class Agent : IPowerShellOwner {
 	/// <summary>Stop the current turn. The in-flight model call or tool is cancelled and the agent goes idle.</summary>
 	public void Interrupt() { lock(gate) activeTurn?.Cancel(); }
 
-	List<Inbound> Take(Func<Inbound, bool> which) {
-		lock(gate) {
-			var taken = inbox.Where(which).ToList();
-			inbox.RemoveAll(m => taken.Contains(m));
-			return taken;
+	// The caller holds gate and an admitted turn. Do not forget queued messages when
+	// transcript storage fails: readiness must stay busy, not mistake loss for a save.
+	List<Inbound> Deliver(Func<Inbound, bool> which) {
+		var delivered = new List<Inbound>();
+		for(int i = 0; i < inbox.Count;) {
+			var m = inbox[i];
+			if(!which(m)) { i++; continue; }
+			Append(new Entry { Kind = EntryKind.Message, From = m.From, Text = m.Text });
+			inbox.RemoveAt(i);
+			manager.Restart.ChangePendingMessages(-1);
+			delivered.Add(m);
 		}
-	}
-
-	void Deliver(IEnumerable<Inbound> messages) {
-		foreach(var m in messages) Append(new Entry { Kind = EntryKind.Message, From = m.From, Text = m.Text });
 		manager.Publish(new { type = "inbox", agentId = Info.Id, pending = PendingCount });
+		return delivered;
 	}
 
 	async Task Loop() {
@@ -344,7 +368,7 @@ public sealed partial class Agent : IPowerShellOwner {
 		while(!manager.Restart.IsStopping) {
 			try { await signal.WaitAsync(stopping); }
 			catch(OperationCanceledException) when(stopping.IsCancellationRequested) { return; }
-			using var operation = manager.Restart.Enter();
+			using var operation = await manager.Restart.EnterTurnAsync();
 			if(operation == null) return;
 			string reason;
 			if(Transcript.AppendFailed) return;
@@ -355,7 +379,7 @@ public sealed partial class Agent : IPowerShellOwner {
 				var reasons = inbox.Select(m => m.Reason ?? (m.From == NudgeSender ? "nudge" : "message")).Distinct().ToList();
 				resuming = resumeReason != null;
 				reason = resumeReason ?? (reasons.Count == 1 ? reasons[0] : "message");
-				resumeReason = null;
+				ClearRecoveryWake();
 				activeTurn = turn = new Turn();
 			}
 			try {
@@ -394,8 +418,7 @@ public sealed partial class Agent : IPowerShellOwner {
 				ReloadChangedPrompt();
 				NoteMemoryChanges();
 				NoteToolChanges();
-				var messages = Take(_ => true);
-				Deliver(messages);
+				var messages = Deliver(_ => true);
 				if(pendingProjectIdleWork is long work && messages.Any(m => m.Reason == ProjectIdleWake)) {
 					state = state with { ProjectIdleWorkSeen = work };
 					pendingProjectIdleWork = null;
@@ -422,7 +445,7 @@ public sealed partial class Agent : IPowerShellOwner {
 				}
 				lock(gate) {
 					slots.ThrowIfStopped(modelCts.Token);
-					Deliver(Take(m => m.Mode == SendMode.Immediate));
+					Deliver(m => m.Mode == SendMode.Immediate);
 				}
 			}
 			lock(gate) {

@@ -69,6 +69,7 @@ public sealed class MartenApi(Agent agent, AgentManager manager, CancellationTok
 			else agent.CheckNestedTool(turnCancellation, runCancellation);
 		}
 		Admit();
+		using var operation = manager.Restart.EnterNested(runCancellation) ?? throw new OperationCanceledException("Marten cannot admit this tool.", runCancellation);
 		var tool = manager.Tools.Find(agent, name) ?? throw new ArgumentException($"Unknown tool: {name}");
 		if(tool.PowerShellBody != null) throw new InvalidOperationException($"{name} runs inline in PowerShell; call it as a function: {name} -param value.");
 		if(!tool.CallableFromPowerShell) throw new InvalidOperationException($"{name} can't be called from PowerShell.");

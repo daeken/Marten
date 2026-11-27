@@ -349,6 +349,32 @@ public class PairedUiParityTests {
 			await Check(HttpMethod.Post, $"{ad}/messages", [HttpStatusCode.Accepted], new { text = "operator queued" }, authority: local, bearer: op);
 			await Check(HttpMethod.Post, $"{ad}/messages", [HttpStatusCode.Accepted], new { text = "paired steering", mode = "immediate" });
 			var pendingPath = $"{ad}/pending-messages";
+			const string releasePath = "/api/release/drain";
+			const string releaseId = "619a3c89e5534dfa84db8bee20acc33b";
+			using(var seal = new HttpRequestMessage(HttpMethod.Post, releasePath)) {
+				seal.Headers.Host = local;
+				seal.Headers.Authorization = new("Bearer", op);
+				seal.Content = JsonContent.Create(new { id = releaseId, pid = process.Id, leaseSeconds = 15 });
+				using var sealedResponse = await http.SendAsync(seal, timeout.Token);
+				Assert.Equal(HttpStatusCode.OK, sealedResponse.StatusCode);
+				Assert.True(sealedResponse.Headers.CacheControl?.NoStore);
+				var status = await sealedResponse.Content.ReadFromJsonAsync<JsonElement>(timeout.Token);
+				Assert.Equal("busy", status.GetProperty("state").GetString());
+				Assert.Equal(3, status.GetProperty("pendingMessages").GetInt32());
+			}
+			await Check(HttpMethod.Post, $"{ad}/messages", [HttpStatusCode.ServiceUnavailable], new { text = "not accepted" });
+			await Check(HttpMethod.Post, "/api/ext/messages", [HttpStatusCode.ServiceUnavailable], new { to = id, text = "not accepted" }, authority: local, bearer: outside);
+			await Check(HttpMethod.Get, "/api/ext/inbox?ack=false", [HttpStatusCode.OK], authority: local, bearer: outside);
+			await Check(HttpMethod.Get, "/api/ext/inbox", [HttpStatusCode.ServiceUnavailable], authority: local, bearer: outside);
+			await Check(HttpMethod.Get, pendingPath, [HttpStatusCode.OK]);
+			using(var abort = new HttpRequestMessage(HttpMethod.Delete, releasePath)) {
+				abort.Headers.Host = local;
+				abort.Headers.Authorization = new("Bearer", op);
+				abort.Headers.Add("X-Marten-Drain-Id", releaseId);
+				abort.Headers.Add("X-Marten-Drain-Pid", process.Id.ToString(System.Globalization.CultureInfo.InvariantCulture));
+				using var aborted = await http.SendAsync(abort, timeout.Token);
+				Assert.Equal(HttpStatusCode.NoContent, aborted.StatusCode);
+			}
 			using var pendingResponse = await http.GetAsync(pendingPath, timeout.Token);
 			Assert.Equal(HttpStatusCode.OK, pendingResponse.StatusCode);
 			Assert.True(pendingResponse.Headers.CacheControl?.NoStore);

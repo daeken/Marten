@@ -112,15 +112,20 @@ public sealed class Scheduler(AgentManager manager) {
 	readonly Dictionary<(string, int), Inbound> waiting = new();
 	public const int MinimumIntervalSeconds = 10;
 
-	public void Start(CancellationToken ct) => _ = Task.Run(async () => {
+	public void Start(CancellationToken ct) {
+		// Run startup-only normalization before HTTP starts accepting release requests.
 		SkipMissedIntervals(DateTimeOffset.UtcNow);
-		while(!ct.IsCancellationRequested) {
-			try { Tick(DateTimeOffset.UtcNow); } catch { /* one bad schedule must not stop the rest */ }
-			await Task.Delay(1000, ct).ContinueWith(_ => { });
-		}
-	});
+		_ = Task.Run(async () => {
+			while(!ct.IsCancellationRequested) {
+				try { Tick(DateTimeOffset.UtcNow); } catch { /* one bad schedule must not stop the rest */ }
+				await Task.Delay(1000, ct).ContinueWith(_ => { });
+			}
+		});
+	}
 
 	public void SkipMissedIntervals(DateTimeOffset now) {
+		using var operation = manager.Restart.Enter();
+		if(operation == null) return;
 		foreach(var a in manager.Agents)
 			foreach(var s in a.Schedules.Where(s => s.EverySeconds != null && s.NextRun <= now))
 				a.UpdateSchedule(s.Id, x => x with { NextRun = Next(x, now), LastResult = "skipped: missed while Marten was down" });
@@ -151,6 +156,8 @@ public sealed class Scheduler(AgentManager manager) {
 			foreach(var s in a.Schedules.Where(s => !s.Done && s.NextRun <= now)) {
 				string? skip = a.Info.Closed ? "skipped: agent closed" : a.IsPaused ? "skipped: paused" : Busy(a, s) ? "skipped: previous run still going or undelivered" : null;
 				if(skip != null) {
+					using var operation = manager.Restart.Enter();
+					if(operation == null) return started;
 					// One-shots wait for the owner; interval runs are simply skipped.
 					if(s.EverySeconds != null) a.UpdateSchedule(s.Id, x => x with { NextRun = Next(x, now), LastResult = skip });
 					continue;
