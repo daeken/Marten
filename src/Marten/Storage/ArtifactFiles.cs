@@ -45,11 +45,36 @@ internal static partial class ArtifactFiles {
 		if(expected.Device != actual.Device || expected.Inode != actual.Inode) throw new IOException("Artifact directory identity changed.");
 	}
 
-	public static SafeFileHandle Lease(SafeFileHandle dir) {
+	internal sealed class HomeLease(SafeFileHandle root, SafeFileHandle lease) : IDisposable {
+		public SafeFileHandle Root { get; } = root;
+		public void Dispose() { lease.Dispose(); Root.Dispose(); }
+	}
+
+	internal sealed class BusyException() : IOException("Another Marten runtime owns this home (artifact writer lease).");
+
+	public static HomeLease? AcquireHome(string path, Action<string> warning) {
+		SafeFileHandle? root = null;
+		try {
+			if(!Supported) throw new IOException("Artifact storage is unsupported on this host.");
+			if(!Directory.Exists(path)) Directory.CreateDirectory(path);
+			root = PinHome(path);
+			return new HomeLease(root, Lease(root));
+		} catch(BusyException) { root?.Dispose(); throw; }
+		catch(Exception e) when(e is IOException or UnauthorizedAccessException or EntryPointNotFoundException or DllNotFoundException) {
+			root?.Dispose();
+			warning($"Artifact publishing disabled: {e.Message}");
+			return null;
+		}
+	}
+
+	static SafeFileHandle Lease(SafeFileHandle dir) {
 		var file = OpenChild(dir, ".artifact-writer.lock", ReadFlags | (Mac ? 0x202 : 0x42), PrivateFile);
 		try {
 			CheckFile(dir, file, privateMode: true);
-			if(Flock(file, 6) != 0) throw new IOException("Another process owns the artifact store or locking is unavailable.");
+			if(Flock(file, 6) != 0) {
+				if(Marshal.GetLastPInvokeError() == (Mac ? 35 : 11)) throw new BusyException();
+				throw new IOException("Artifact locking is unavailable.");
+			}
 			return file;
 		} catch { file.Dispose(); throw; }
 	}
@@ -195,7 +220,7 @@ internal static partial class ArtifactFiles {
 	private static partial int RenameLinux(SafeFileHandle src, string source, SafeFileHandle dst, string destination, uint flags);
 	[LibraryImport("libc", EntryPoint = "renameatx_np", StringMarshalling = StringMarshalling.Utf8)]
 	private static partial int RenameMac(SafeFileHandle src, string source, SafeFileHandle dst, string destination, uint flags);
-	[LibraryImport("libc", EntryPoint = "flock")]
+	[LibraryImport("libc", EntryPoint = "flock", SetLastError = true)]
 	private static partial int Flock(SafeFileHandle fd, int flags);
 	[LibraryImport("libc", EntryPoint = "dup")]
 	private static partial int Duplicate(SafeFileHandle fd);

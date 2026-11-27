@@ -20,19 +20,22 @@ internal sealed class Artifacts : IDisposable {
 	public static bool IdValid(string id) => id.Length == 32 && id.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
 	static bool CanFailClosed(Exception e) => e is IOException or UnauthorizedAccessException or EntryPointNotFoundException or DllNotFoundException;
 
-	readonly SafeFileHandle? root, data, lease;
+	readonly SafeFileHandle? root, data;
+	readonly ArtifactFiles.HomeLease? localLease;
 	readonly Action<string> warning;
 	readonly Action<string>? fault;
 	volatile bool enabled;
 	public bool Enabled => enabled;
 
-	public Artifacts(Home home, Action<string> warning, Action<string>? fault = null) {
+	public Artifacts(Home home, Action<string> warning, Action<string>? fault = null, ArtifactFiles.HomeLease? ownedHome = null, bool useOwnedHomeOnly = false) {
 		this.warning = warning;
 		this.fault = fault;
 		try {
-			root = ArtifactFiles.PinHome(home.Root);
+			if(ownedHome == null && !useOwnedHomeOnly) localLease = ArtifactFiles.AcquireHome(home.Root, warning);
+			root = (ownedHome ?? localLease)?.Root;
+			if(root == null) return;
+			ArtifactFiles.RequireSameDirectory(root, home.Root);
 			using var agents = ArtifactFiles.DirectoryAt(root, "agents");
-			lease = ArtifactFiles.Lease(root);
 			data = ArtifactFiles.DirectoryAt(root, Store, create: true, privateMode: true);
 			Sync(root, "home namespace");
 			Recover();
@@ -96,9 +99,8 @@ internal sealed class Artifacts : IDisposable {
 
 	public void Dispose() {
 		enabled = false;
-		lease?.Dispose();
+		localLease?.Dispose();
 		data?.Dispose();
-		root?.Dispose();
 	}
 
 	void StopWrites() {

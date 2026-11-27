@@ -49,14 +49,14 @@ public sealed partial class Agent : IPowerShellOwner {
 		Instructions = instructions;
 		Transcript = new Transcript(Path.Combine(directory, "transcript"));
 		manager.ArtifactStore?.PrepareAgent(info.Id);
-		var entries = Transcript.Entries;
-		lastWakeSeq = entries.LastOrDefault(e => e.Kind == EntryKind.Wake)?.Seq ?? 0;
-		if(entries.LastOrDefault(e => e.Kind is EntryKind.Compaction or EntryKind.Reload or EntryKind.ContextReset)?.Instructions is { } rebuilt)
+		var history = Transcript.Capture();
+		lastWakeSeq = history.LastSeq(RowKind.Wake) ?? 0;
+		if(history.ReadLast(RowKind.Instructions)?.Instructions is { } rebuilt)
 			Instructions = rebuilt;
 		state = JsonIO.Load(StatePath, () => new AgentState());
-		if(entries.LastOrDefault(e => e.Kind == EntryKind.ContextReset) is { } reset && state.ContextResetSeq != reset.Seq)
+		if(history.LastSeq(RowKind.Reset) is long reset && state.ContextResetSeq != reset)
 			// The marker is durable even if shutdown interrupted the derived state writes. Never diff against old baselines.
-			state = WithFreshContextBaselines(reset.Seq, null, null);
+			state = WithFreshContextBaselines(reset, null, null);
 		Files = new FileTracker(state.FileHashes);
 		Files.Changed += SaveState;
 	}
@@ -229,15 +229,16 @@ public sealed partial class Agent : IPowerShellOwner {
 		foreach(var item in Tasks)
 			foreach(var text in item.PendingDependencyWakes ?? []) QueueDependencyWake(text);
 		AnswerDanglingCalls("Interrupted: Marten stopped while this was running. It was not re-run; check its effects before retrying.");
-		var entries = ContextEntries();
-		var lastWake = entries.LastOrDefault(e => e.Kind == EntryKind.Wake)?.Seq ?? 0;
-		var idle = entries.LastOrDefault(e => e.Kind == EntryKind.Idle);
+		var history = Transcript.Capture();
+		var reset = history.LastSeq(RowKind.Reset);
+		var lastWake = history.LastSeq(RowKind.Wake, reset) ?? 0;
+		var idle = history.ReadLast(RowKind.Idle, reset);
 		var lastIdle = idle?.Seq ?? 0;
 		// Recovery doesn't resolve a terminal error. In particular, don't treat an errored
 		// project as newly idle just because the in-memory status was reconstructed.
 		if(lastIdle > lastWake && idle?.Reason == "turn_error")
-			SetStatus(AgentStatus.Error, entries.LastOrDefault(e => e.Kind == EntryKind.Error)?.Text);
-		var interruptedTurn = lastWake > lastIdle && Transcript.Last?.Kind != EntryKind.Assistant;
+			SetStatus(AgentStatus.Error, history.ReadLast(RowKind.Error, reset)?.Text);
+		var interruptedTurn = lastWake > lastIdle && history.LastKind != RowKind.Assistant;
 		if(lastWake > lastIdle && !interruptedTurn) Append(new Entry { Kind = EntryKind.Idle });
 		var interruptedOperations = RecoverSchedules() + RecoverNotebookReplays();
 		Append(new Entry { Kind = EntryKind.Message, From = NudgeSender, Text =
@@ -248,9 +249,12 @@ public sealed partial class Agent : IPowerShellOwner {
 
 	/// <summary>Every tool call needs a result before the next model call; give unanswered ones an error.</summary>
 	void AnswerDanglingCalls(string text) {
-		var entries = ContextEntries();
-		var answered = entries.Where(e => e.Kind == EntryKind.ToolResult).Select(e => e.CallId).ToHashSet();
-		foreach(var call in entries.Where(e => e.Kind == EntryKind.ToolCall && !answered.Contains(e.CallId)))
+		var history = Transcript.Capture();
+		var reset = history.LastSeq(RowKind.Reset);
+		if(history.LastSeq(RowKind.Call, reset) == null) return;
+		// Recovery still pairs calls across compaction, but never across a fresh-context boundary.
+		var answered = history.ReadCalls(RowKind.Result, reset).Select(e => e.CallId).ToHashSet();
+		foreach(var call in history.ReadCalls(RowKind.Call, reset).Where(e => !answered.Contains(e.CallId)))
 			Append(new Entry {
 				Kind = EntryKind.ToolResult, CallId = call.CallId, Name = call.Name, IsError = true,
 				Text = text,
@@ -343,6 +347,7 @@ public sealed partial class Agent : IPowerShellOwner {
 			using var operation = manager.Restart.Enter();
 			if(operation == null) return;
 			string reason;
+			if(Transcript.AppendFailed) return;
 			bool resuming;
 			Turn turn;
 			lock(gate) {
@@ -428,6 +433,8 @@ public sealed partial class Agent : IPowerShellOwner {
 			MaybeNudge(changesAtStart);
 		} catch(OperationCanceledException) when(manager.Restart.IsStopping) {
 			throw;
+		} catch(Exception) when(Transcript.AppendFailed) {
+			SetStatus(AgentStatus.Error, "Transcript write outcome unknown; restart to reconcile before resuming.");
 		} catch(Exception) when(token.IsCancellationRequested && !manager.Restart.IsStopping) {
 			AnswerDanglingCalls(turn.Closed ? "Cancelled because the agent was closed. Check for partial effects before retrying." : "Interrupted by Sera before this finished.");
 			Append(new Entry { Kind = EntryKind.Idle, Reason = "interrupted" });

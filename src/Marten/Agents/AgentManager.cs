@@ -158,15 +158,25 @@ public sealed partial class AgentManager {
 		foreach(var dir in Directory.GetDirectories(Home.Projects))
 			if(Project.Load(dir) is { } project) projects[project.Info.Id] = project;
 		foreach(var dir in Directory.GetDirectories(Home.Agents)) {
-			var infoPath = Path.Combine(dir, "agent.json");
-			if(!File.Exists(infoPath)) continue;
-			var info = JsonIO.Load<AgentInfo?>(infoPath, () => null);
-			if(info == null) continue;
-			var instructions = File.ReadAllText(Path.Combine(dir, "system.md"));
-			var agent = new Agent(this, dir, info, instructions);
-			agents[info.Id] = agent;
+			try {
+				var infoPath = Path.Combine(dir, "agent.json");
+				if(!File.Exists(infoPath)) continue;
+				var info = JsonIO.Load<AgentInfo?>(infoPath, () => null);
+				if(info == null) continue;
+				var instructions = File.ReadAllText(Path.Combine(dir, "system.md"));
+				var agent = new Agent(this, dir, info, instructions);
+				agents[info.Id] = agent;
+			} catch(Exception e) when(e is IOException or InvalidDataException or UnauthorizedAccessException or System.Text.Json.JsonException) {
+				Console.Error.WriteLine($"Unable to load agent {Path.GetFileName(dir)} ({e.GetType().Name}). Its files were retained.");
+			}
 		}
-		foreach(var agent in agents.Values) agent.Recover();
+		foreach(var agent in agents.Values) {
+			try { agent.Recover(); }
+			catch(Exception e) when(e is IOException or UnauthorizedAccessException or System.Text.Json.JsonException) {
+				agents.TryRemove(agent.Info.Id, out _);
+				Console.Error.WriteLine($"Unable to recover agent {agent.Info.Id} ({e.GetType().Name}). Its files were retained.");
+			}
+		}
 		ReconcileTaskDependencies();
 		foreach(var agent in agents.Values) agent.Start();
 	}

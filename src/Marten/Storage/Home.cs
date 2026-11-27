@@ -9,10 +9,12 @@ namespace Marten.Storage;
 public sealed class Home {
 	public string Root { get; }
 
-	public Home(string? root = null) {
-		Root = Path.GetFullPath(root
+	internal static string ResolveRoot(string? root = null) => Path.GetFullPath(root
 			?? Environment.GetEnvironmentVariable("MARTEN_HOME")
 			?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".marten"));
+
+	public Home(string? root = null) {
+		Root = ResolveRoot(root);
 		Directory.CreateDirectory(Root);
 		Directory.CreateDirectory(Secrets);
 		Directory.CreateDirectory(Agents);

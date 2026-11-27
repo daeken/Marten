@@ -8,6 +8,64 @@ namespace Marten.Tests;
 
 public sealed class ArtifactTests {
 	[Fact]
+	public async Task RuntimeAndStartupDoNotSynthesizeFailureAfterResultFsync() {
+		if(!ArtifactFiles.Supported) return;
+		using var temp = new TempDir();
+		var home = new Home(temp.File("runtime"));
+		var initial = new FakeBackend();
+		initial.Script.Enqueue(_ => FakeBackend.Call("publish-once", "publish_artifact", "{\"filename\":\"note.txt\"}"));
+		using var store = new Artifacts(home, _ => { }, p => { if(p == "after result flush") throw new IOException("fixture failure"); });
+		AgentManager manager = null!;
+		manager = new AgentManager(home, new Config(), initial, new ToolRegistry().Add(new PublishArtifactTool(() => manager))) { ArtifactStore = store };
+		var agent = manager.CreateChat("indeterminate", temp.Path);
+		var events = new System.Collections.Concurrent.ConcurrentQueue<string>();
+		manager.Events += e => events.Enqueue(JsonIO.Serialize(e));
+		await File.WriteAllTextAsync(Path.Combine(agent.Directory, Artifacts.Staging, "note.txt"), "example");
+		agent.Send(new Inbound("Sera", "Publish it", SendMode.Queued));
+		await Wait.Until(() => agent.Status == AgentStatus.Error);
+		Assert.Single(initial.Requests);
+		Assert.DoesNotContain(agent.Transcript.ReadPage(100).Entries, e => e.Kind == EntryKind.ToolResult);
+		var persisted = Assert.Single(new Transcript(Path.Combine(agent.Directory, "transcript")).Entries, e => e.Kind == EntryKind.ToolResult);
+		var artifact = Assert.Single(persisted.Artifacts!);
+		Assert.Null(agent.Transcript.Artifact(artifact.Id));
+		Assert.DoesNotContain(events, e => e.Contains("\"artifacts\":["));
+		store.Dispose();
+		using var reopened = new Artifacts(home, _ => { });
+		var resumed = new FakeBackend();
+		resumed.Script.Enqueue(_ => FakeBackend.Say("Recovered successfully"));
+		var next = new AgentManager(home, new Config(), resumed, new ToolRegistry()) { ArtifactStore = reopened };
+		next.Events += e => events.Enqueue(JsonIO.Serialize(e));
+		next.LoadAll();
+		var recovered = next.Get(agent.Info.Id)!;
+		await Wait.Until(() => recovered.Transcript.Last?.Kind == EntryKind.Idle);
+		var result = Assert.Single(recovered.Transcript.ReadPage(100).Entries, e => e.Kind == EntryKind.ToolResult && e.CallId == "publish-once");
+		Assert.False(result.IsError == true);
+		Assert.Equal(artifact, recovered.Transcript.Artifact(artifact.Id));
+		using var bytes = reopened.Open(agent.Info.Id, artifact, recovered.Transcript);
+		Assert.NotNull(bytes);
+		var replay = Assert.Single(Assert.Single(resumed.Requests).History, e => e.Kind == EntryKind.ToolResult && e.CallId == "publish-once");
+		Assert.False(replay.IsError == true);
+		Assert.DoesNotContain(events, e => e.Contains("\"artifacts\":["));
+	}
+
+	[Fact]
+	public void OlderMalformedSegmentDoesNotPreventHealthyAgentStarting() {
+		using var temp = new TempDir();
+		var home = new Home(temp.File("runtime"));
+		var manager = new AgentManager(home, new Config(), new FakeBackend(), new ToolRegistry());
+		var damaged = manager.CreateChat("damaged", temp.Path);
+		var healthy = manager.CreateChat("healthy", temp.Path);
+		var log = Path.Combine(damaged.Directory, "transcript");
+		File.WriteAllText(Path.Combine(log, "000001.jsonl"), "{broken\n");
+		File.WriteAllText(Path.Combine(log, "000002.jsonl"), "");
+		var restarted = new AgentManager(home, new Config(), new FakeBackend(), new ToolRegistry());
+		restarted.LoadAll();
+		Assert.Null(restarted.Get(damaged.Info.Id));
+		Assert.NotNull(restarted.Get(healthy.Info.Id));
+		Assert.Equal("{broken\n", File.ReadAllText(Path.Combine(log, "000001.jsonl")));
+	}
+
+	[Fact]
 	public async Task ToolProducesDurableResultAndEntryEvent() {
 		if(!ArtifactFiles.Supported) return;
 		using var temp = new TempDir();
@@ -69,8 +127,10 @@ public sealed class ArtifactTests {
 		Assert.Equal("hello, snapshot", await reader.ReadToEndAsync());
 	}
 
-	[Fact]
-	public async Task UnterminatedArtifactRecordDoesNotAuthorizeAfterRecoveryOrLaterAppend() {
+	[Theory]
+	[InlineData("")]
+	[InlineData(" !incom")]
+	public async Task UnterminatedArtifactRecordDoesNotAuthorizeAfterRecoveryOrLaterAppend(string interruptedMarker) {
 		if(!ArtifactFiles.Supported) return;
 		using var temp = new TempDir();
 		var runtimeHome = new Home(temp.File("runtime"));
@@ -82,15 +142,20 @@ public sealed class ArtifactTests {
 		store.PrepareAgent(agentId);
 		await File.WriteAllTextAsync(Path.Combine(directory, Artifacts.Staging, "fixture.txt"), "uncommitted");
 		var item = await store.Publish(agentId, "fixture.txt", null, default);
-		log.Append(new Entry { Kind = EntryKind.ToolCall, CallId = "test" });
+		log.Append(new Entry { Kind = EntryKind.ToolCall, CallId = "test", Arguments = new string('x', (4 << 20) + 1) });
 		await File.AppendAllTextAsync(Path.Combine(path, "000001.jsonl"),
-			JsonIO.Serialize(new Entry { Kind = EntryKind.ToolResult, Seq = 2, CallId = "test", Artifacts = [item] }));
+			JsonIO.Serialize(new Entry { Kind = EntryKind.ToolResult, Seq = 2, CallId = "test", Artifacts = [item] }) + interruptedMarker);
 		var original = await File.ReadAllBytesAsync(Path.Combine(path, "000001.jsonl"));
 		var recovered = new Transcript(path);
 		Assert.Equal(original, await File.ReadAllBytesAsync(Path.Combine(path, "000001.jsonl")));
 		Assert.Null(recovered.Artifact(item.Id));
 		Assert.Single(recovered.Entries);
 		Assert.Equal(2, recovered.Append(new Entry { Kind = EntryKind.ToolResult, CallId = "test" }).Seq);
+		Assert.Single(Directory.GetFiles(path, "*.jsonl")); // Never roll a damaged newest segment into the archive.
+		if(interruptedMarker.Length == 0) {
+			// A durably marked artifact tail remains rejected even when a later segment exists.
+			await File.WriteAllTextAsync(Path.Combine(path, "000002.jsonl"), JsonIO.Serialize(new Entry { Kind = EntryKind.Idle, Seq = 3 }) + "\n");
+		}
 		Assert.Null(new Transcript(path).Artifact(item.Id));
 	}
 
@@ -149,8 +214,7 @@ public sealed class ArtifactTests {
 		Assert.Empty(log.Entries);
 		var snapshots = Directory.GetFiles(Path.Combine(home.Root, Artifacts.Store), "agent.*");
 		Assert.Single(snapshots);
-		using var competing = new Artifacts(home, _ => { });
-		Assert.False(competing.Enabled); // Disabled while in doubt, but still owns the lease.
+		Assert.Throws<ArtifactFiles.BusyException>(() => ArtifactFiles.AcquireHome(home.Root, _ => { }));
 		store.Dispose();
 		using var reopened = new Artifacts(home, warnings.Add);
 		Assert.True(reopened.Enabled);
@@ -176,8 +240,7 @@ public sealed class ArtifactTests {
 		store.PrepareAgent(id);
 		var filename = Path.Combine(original.AgentDir(id), Artifacts.Staging, "launch.exe");
 		await File.WriteAllTextAsync(filename, "original bytes");
-		using var competing = new Artifacts(original, warnings.Add);
-		Assert.False(competing.Enabled);
+		Assert.Throws<ArtifactFiles.BusyException>(() => ArtifactFiles.AcquireHome(original.Root, warnings.Add));
 		Directory.Delete(alias);
 		Directory.CreateSymbolicLink(alias, alternate.Root);
 		var item = await store.Publish(id, "launch.exe", "CON", default);

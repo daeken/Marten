@@ -57,6 +57,9 @@ public class PairedUiParityTests {
 			log.Append(new Entry { Kind = EntryKind.ToolCall, Name = "call_tool", CallId = "delegated",
 				Arguments = JsonIO.Serialize(new { name = "publish_artifact", arguments = new { filename = privateLeaf, label = privateLabel } }),
 				Raw = JsonSerializer.SerializeToElement(new { name = "call_tool", arguments = privateRaw }) });
+			log.Append(new Entry { Kind = EntryKind.ToolResult, Name = "call_tool", CallId = "delegated", Text = privateLabel });
+			log.Append(new Entry { Kind = EntryKind.ToolCall, Name = "call_tool", CallId = "unrelated-delegated",
+				Arguments = JsonIO.Serialize(new { name = "read_file", arguments = "unrelated-publish_artifact-mention" }) });
 			log.Append(new Entry { Kind = EntryKind.ToolCall, Name = "read_file", Arguments = "unrelated-legacy-arguments" });
 			log.Append(new Entry { Kind = EntryKind.ToolResult, Artifacts = [artifact] });
 			// A reference-only restore must not read replacement bytes from the agent-writable inbox.
@@ -100,6 +103,29 @@ public class PairedUiParityTests {
 					Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 					break;
 				} catch(HttpRequestException) { await Task.Delay(50, timeout.Token); }
+			}
+
+			if(!embedded && ArtifactFiles.Supported) {
+				using var other = new TcpListener(IPAddress.Loopback, 0);
+				other.Start();
+				var otherPort = ((IPEndPoint) other.LocalEndpoint).Port;
+				other.Stop();
+				(config with { Port = otherPort }).Save(home);
+				var alias = dir.File("alias");
+				Directory.CreateSymbolicLink(alias, home.Root);
+				var inventory = Snapshot();
+				start.Environment["MARTEN_HOME"] = alias;
+				using var loser = Process.Start(start)!;
+				try {
+					var error = loser.StandardError.ReadToEndAsync(timeout.Token);
+					await loser.WaitForExitAsync(timeout.Token);
+					Assert.Equal(1, loser.ExitCode);
+					Assert.Contains("artifact writer lease", await error);
+					Assert.Equal(inventory, Snapshot());
+				} finally { if(!loser.HasExited) loser.Kill(entireProcessTree: true); }
+				config.Save(home);
+				(string Path, DateTime Modified, long Bytes)[] Snapshot() => Directory.GetFileSystemEntries(home.Root, "*", SearchOption.AllDirectories)
+					.Order(StringComparer.Ordinal).Select(p => (p, File.GetLastWriteTimeUtc(p), File.Exists(p) ? new FileInfo(p).Length : -1L)).ToArray();
 			}
 
 			await Check(HttpMethod.Get, "/", [HttpStatusCode.Forbidden]);
@@ -248,13 +274,14 @@ public class PairedUiParityTests {
 				var outsider = await File.ReadAllTextAsync(Path.Combine(home.Secrets, "clients", "parity.token"), timeout.Token);
 				await Check(HttpMethod.Get, download, [HttpStatusCode.Forbidden], authority: local, bearer: outsider);
 				isolated.DefaultRequestHeaders.Authorization = new("Bearer", outsider);
-				foreach(var path in new[] { fixture + "/transcript", fixture + "/transcript?limit=80", fixture + "/transcript?before=6&limit=80", $"/api/ext/agents/{fixtureId}/transcript" }) {
+				foreach(var path in new[] { fixture + "/transcript", fixture + "/transcript?limit=80", fixture + "/transcript?before=8&limit=80", $"/api/ext/agents/{fixtureId}/transcript" }) {
 					using var history = await isolated.GetAsync(path, timeout.Token);
 					Assert.Equal(HttpStatusCode.OK, history.StatusCode);
 					Assert.True(history.Headers.CacheControl?.NoStore);
 					var json = await history.Content.ReadAsStringAsync(timeout.Token);
 					foreach(var hidden in new[] { artifact.Id, missingId, privateLeaf, privateLabel, privateRaw }) Assert.DoesNotContain(hidden, json);
 					Assert.Contains("unrelated-legacy-arguments", json);
+					Assert.Contains("unrelated-publish_artifact-mention", json);
 				}
 			}
 			await Check(HttpMethod.Post, "/api/pause", [HttpStatusCode.OK], new { paused = true });

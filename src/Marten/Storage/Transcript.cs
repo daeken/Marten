@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text;
 using System.Text.Json;
 
@@ -56,7 +57,6 @@ public sealed record Entry {
 	public string? Instructions { get; init; }
 	/// <summary>Images a tool result shows the model (MCP tools, View-Image): absolute paths of saved files.</summary>
 	public List<ImageRef>? Images { get; init; }
-	/// <summary>Published operator artifacts; never model attachments.</summary>
 	public IReadOnlyList<ArtifactRef>? Artifacts { get; init; }
 }
 
@@ -64,133 +64,240 @@ public sealed record ImageRef(string Path, string MimeType);
 
 public sealed record TranscriptPage(IReadOnlyList<Entry> Entries, bool HasOlder);
 
-/// <summary>
-/// Append-only JSONL log split into segments, so a long-lived agent never rewrites a big file.
-/// A torn last line from a crash is dropped on load.
-/// </summary>
+[Flags]
+internal enum RowKind {
+	Other = 1, Wake = 2, Idle = 4, Error = 8, Call = 16, Result = 32, Reasoning = 64,
+	Elide = 128, Compaction = 256, Reload = 512, Reset = 1024, Assistant = 2048,
+	Instructions = Compaction | Reload | Reset,
+	ViewChange = Elide | Instructions,
+	All = -1,
+}
+
+internal sealed record CallRecord(string? CallId, string? Name);
+
+/// <summary>Append-only JSONL. Only row locations and kind tags are resident, not the entries.</summary>
 public sealed class Transcript {
 	const long SegmentBytes = 4 << 20;
-	readonly string Dir;
-	internal string DirectoryPath => Dir;
-	readonly List<Entry> entries = new();
+	readonly List<string> segments;
+	readonly HashSet<string> artifactCalls = new(StringComparer.Ordinal);
+	internal bool IsArtifactCall(string? id) { lock(gate) return id != null && artifactCalls.Contains(id); }
 	readonly Dictionary<string, ArtifactRef> artifacts = new(StringComparer.Ordinal);
+	internal string DirectoryPath { get; }
+	internal bool AppendFailed { get { lock(gate) return appendFailed; } }
+	internal ArtifactRef? Artifact(string id) { lock(gate) return artifacts.GetValueOrDefault(id); }
+	readonly List<Row> rows = new();
 	readonly object gate = new();
-	string segmentPath;
-	long lastReservedSequence;
+	bool damagedTail, rejectUnterminatedArtifact;
+	bool appendFailed;
+
+	readonly record struct Row(long Seq, long Offset, int Length, int Segment, RowKind Kind);
+
+	static RowKind Tag(string kind) => kind switch {
+		EntryKind.Wake => RowKind.Wake, EntryKind.Idle => RowKind.Idle, EntryKind.Error => RowKind.Error,
+		EntryKind.ToolCall => RowKind.Call, EntryKind.ToolResult => RowKind.Result,
+		EntryKind.Reasoning => RowKind.Reasoning, EntryKind.Elide => RowKind.Elide,
+		EntryKind.Compaction => RowKind.Compaction, EntryKind.Reload => RowKind.Reload,
+		EntryKind.ContextReset => RowKind.Reset, EntryKind.Assistant => RowKind.Assistant,
+		_ => RowKind.Other,
+	};
+
+	static FileStream OpenRead(string path) => new(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
 
 	public Transcript(string dir) {
-		Dir = dir;
+		DirectoryPath = dir;
 		Directory.CreateDirectory(dir);
-		var segments = Directory.GetFiles(dir, "*.jsonl").Order(StringComparer.Ordinal).ToList();
-		foreach(var seg in segments) LoadSegment(seg, seg == segments[^1]);
-		segmentPath = segments.Count > 0 ? segments[^1] : SegmentName(1);
+		segments = Directory.GetFiles(dir, "*.jsonl").Order(StringComparer.Ordinal).ToList();
+		if(segments.Count == 0) { segments.Add(Path.Combine(dir, "000001.jsonl")); return; }
+		var block = new byte[64 << 10];
+		for(var i = 0; i < segments.Count; i++) IndexSegment(i, block);
 	}
 
-	const string RejectedTail = " !incomplete-artifact";
+	void IndexSegment(int segment, byte[] block) {
+		using var fs = OpenRead(segments[segment]);
+		var partial = new ArrayBufferWriter<byte>();
+		long offset = 0;
+		int n;
+		while((n = fs.Read(block)) != 0) {
+			ReadOnlySpan<byte> rest = block.AsSpan(0, n);
+			if(offset == 0 && partial.WrittenCount == 0 &&
+				(rest.StartsWith(new byte[] { 0xff, 0xfe }) || rest.StartsWith(new byte[] { 0xfe, 0xff }) ||
+				 rest.StartsWith(new byte[] { 0, 0, 0xfe, 0xff })))
+				throw new InvalidDataException("Transcript segments must use UTF-8.");
+			int newline;
+			while((newline = rest.IndexOfAny((byte) '\n', (byte) '\r')) >= 0) {
+				var line = rest[..newline];
+				if(partial.WrittenCount != 0) {
+					partial.Write(line);
+					line = partial.WrittenSpan;
+				}
+				IndexLine(line, offset, segment);
+				offset += line.Length + 1L;
+				partial.ResetWrittenCount();
+				rest = rest[(newline + 1)..];
+			}
+			partial.Write(rest);
+		}
+		if(partial.WrittenCount > 0) IndexLine(partial.WrittenSpan, offset, segment, terminated: false);
+	}
 
-	void LoadSegment(string path, bool latest) {
-		bool unterminated;
-		using(var file = File.OpenRead(path))
-			unterminated = file.Length > 0 && file.Seek(-1, SeekOrigin.End) >= 0 && file.ReadByte() != '\n';
-		using var lines = File.ReadLines(path).GetEnumerator();
-		var more = lines.MoveNext();
-		while(more) {
-			var line = lines.Current;
-			more = lines.MoveNext();
-			if(string.IsNullOrWhiteSpace(line) || line.EndsWith(RejectedTail, StringComparison.Ordinal)) continue;
-			try {
-				if(JsonIO.Deserialize<Entry>(line) is not { } e) continue;
-				if(!more && unterminated && e.Artifacts is { Count: > 0 }) continue;
-				Remember(e);
-			} catch(JsonException) when(latest) { }
+	void IndexLine(ReadOnlySpan<byte> line, long offset, int segment, bool terminated = true) {
+		if(offset == 0 && line.StartsWith("\uFEFF"u8)) { line = line[3..]; offset = 3; }
+		if(line.IndexOfAnyExcept((byte) ' ', (byte) '\t', (byte) '\r') < 0) return;
+		try {
+			if(line.EndsWith(" !incomplete-artifact"u8)) { damagedTail = true; return; }
+			if(JsonSerializer.Deserialize<Entry>(line, JsonIO.Options) is { } e) {
+				if(!terminated && e.Artifacts is { Count: > 0 }) { damagedTail = rejectUnterminatedArtifact = true; return; }
+				rows.Add(new(e.Seq, offset, line.Length, segment, Tag(e.Kind)));
+				IndexArtifacts(e);
+			}
+		} catch(JsonException) when(IsUnicodeWhitespace(line)) {
+			// StreamReader-based transcripts also ignored Unicode-only blank lines.
+		} catch(JsonException) when(segment == segments.Count - 1) {
+			// Keep the damaged segment newest, so even the old reader can recover it.
+			// Rolling it into the archive would make the next startup reject the log.
+			damagedTail = true;
 		}
 	}
 
-	static string Terminator(Stream source) {
-		if(source.Length == 0 || source.Seek(-1, SeekOrigin.End) < 0 || source.ReadByte() == '\n') return "";
-		// Runtime-generated artifact result records are small; never normalize a valid artifact tail into a commit.
-		var count = (int) Math.Min(source.Length, 64 * 1024);
-		source.Seek(-count, SeekOrigin.End);
-		var bytes = new byte[count];
-		source.ReadExactly(bytes);
-		int offset = bytes.AsSpan().LastIndexOf((byte) '\n') + 1;
-		if(offset == 0 && count < source.Length) return RejectedTail + "\n";
-		try {
-			if(JsonIO.Deserialize<Entry>(Encoding.UTF8.GetString(bytes.AsSpan(offset)))?.Artifacts is { Count: > 0 })
-				return RejectedTail + "\n";
-		} catch(JsonException) { }
-		return "\n";
+	static bool IsUnicodeWhitespace(ReadOnlySpan<byte> line) {
+		while(!line.IsEmpty) {
+			if(Rune.DecodeFromUtf8(line, out var rune, out var consumed) != OperationStatus.Done || !Rune.IsWhiteSpace(rune)) return false;
+			line = line[consumed..];
+		}
+		return true;
 	}
 
-	void Remember(Entry entry) {
-		entries.Add(entry);
+	// Rows are immutable once published. Each reader captures the current end, so an append
+	// cannot leak into an already captured page/model request. Never hold gate across disk I/O.
+	internal Snapshot Capture() { lock(gate) return new(this, rows.Count); }
+
+	internal sealed class Snapshot(Transcript log, int count) {
+		int Bound(long? seq, bool inclusive, int fallback) {
+			if(seq == null) return fallback;
+			lock(log.gate) {
+				var lo = 0;
+				var hi = count;
+				while(lo < hi) {
+					var mid = lo + (hi - lo) / 2;
+					var value = log.rows[mid].Seq;
+					if(value < seq.Value || inclusive && value == seq.Value) lo = mid + 1;
+					else hi = mid;
+				}
+				return lo;
+			}
+		}
+
+		Row GetRow(int index) { lock(log.gate) return log.rows[index]; }
+		internal RowKind? LastKind => count == 0 ? null : GetRow(count - 1).Kind;
+
+		IEnumerable<Row> Select(RowKind kinds, long? after, long? before = null, bool reverse = false) {
+			var start = Bound(after, inclusive: true, 0);
+			var end = Bound(before, inclusive: false, count);
+			for(var i = reverse ? end - 1 : start; reverse ? i >= start : i < end; i += reverse ? -1 : 1) {
+				var row = GetRow(i);
+				if((row.Kind & kinds) != 0) yield return row;
+			}
+		}
+
+		internal long? LastSeq(RowKind kinds, long? after = null) => Select(kinds, after, reverse: true).Select(r => (long?) r.Seq).FirstOrDefault();
+		internal Entry? ReadLast(RowKind kinds, long? after = null) => ReadRows<Entry>(Select(kinds, after, reverse: true).Take(1)).FirstOrDefault();
+		internal IEnumerable<Entry> Read(RowKind kinds = RowKind.All, long? after = null) => ReadRows<Entry>(Select(kinds, after));
+		internal IEnumerable<CallRecord> ReadCalls(RowKind kinds, long? after) => ReadRows<CallRecord>(Select(kinds, after));
+		internal TranscriptPage Tail(int limit, RowKind kinds = RowKind.All, long? after = null, long? before = null) {
+			var (entries, older) = Tail(limit, static e => e, kinds, after, before);
+			return new(entries, older);
+		}
+
+		internal (IReadOnlyList<T> Entries, bool HasOlder) Tail<T>(int limit, Func<Entry, T> project, RowKind kinds = RowKind.All,
+			long? after = null, long? before = null) {
+			var tail = Select(kinds, after, before, reverse: true).Take(limit + 1).ToList();
+			return (ReadRows<Entry>(tail.Take(limit).Reverse()).Select(project).ToList(), tail.Count > limit);
+		}
+
+		IEnumerable<T> ReadRows<T>(IEnumerable<Row> selected) {
+			FileStream? fs = null;
+			var segment = -1;
+			try {
+				foreach(var row in selected) {
+					if(segment != row.Segment) {
+						fs?.Dispose();
+						string path;
+						lock(log.gate) path = log.segments[row.Segment];
+						fs = OpenRead(path);
+						segment = row.Segment;
+					}
+					yield return ReadRow<T>(fs!, row);
+				}
+			} finally { fs?.Dispose(); }
+		}
+
+		static T ReadRow<T>(FileStream fs, Row row) {
+			// Do not pool exceptionally large rows: those buffers could outlive the request.
+			var pooled = row.Length <= 1 << 20;
+			var bytes = pooled ? ArrayPool<byte>.Shared.Rent(row.Length) : new byte[row.Length];
+			try {
+				if(fs.Position != row.Offset) fs.Position = row.Offset;
+				var line = bytes.AsSpan(0, row.Length);
+				fs.ReadExactly(line);
+				return JsonSerializer.Deserialize<T>(line, JsonIO.Options)!;
+			} finally { if(pooled) ArrayPool<byte>.Shared.Return(bytes); }
+		}
+	}
+
+	public IReadOnlyList<Entry> Entries => Capture().Read().ToList();
+	public TranscriptPage ReadPage(int limit, long? before = null) => Capture().Tail(Math.Clamp(limit, 1, 100), before: before);
+	public Entry? Last => Capture().ReadLast(RowKind.All);
+
+	void IndexArtifacts(Entry entry) {
+		if(entry.Kind == EntryKind.ToolCall && entry.CallId != null && Web.ArtifactTranscriptProjection.PrivateCall(entry)) artifactCalls.Add(entry.CallId);
 		if(entry.Kind == EntryKind.ToolResult && entry.Artifacts != null)
 			foreach(var item in entry.Artifacts) artifacts.TryAdd(item.Id, item);
 	}
 
-	internal ArtifactRef? Artifact(string id) { lock(gate) return artifacts.GetValueOrDefault(id); }
-
-	string SegmentName(int n) => Path.Combine(Dir, $"{n:D6}.jsonl");
-
-	public IReadOnlyList<Entry> Entries {
-		get { lock(gate) return entries.ToList(); }
-	}
-
-	public TranscriptPage ReadPage(int limit, long? before = null) {
-		lock(gate) {
-			var end = entries.Count;
-			if(before is long cursor) {
-				// Find the first entry at or beyond the exclusive cursor.
-				var lo = 0;
-				while(lo < end) {
-					var mid = lo + (end - lo) / 2;
-					if(entries[mid].Seq < cursor) lo = mid + 1;
-					else end = mid;
-				}
-			}
-			var count = Math.Min(end, Math.Clamp(limit, 1, 100));
-			return new TranscriptPage(entries.GetRange(end - count, count), end > count);
-		}
-	}
-
-	public Entry? Last {
-		get { lock(gate) return entries.Count > 0 ? entries[^1] : null; }
-	}
-
-	public Entry Append(Entry entry) => AppendCore(entry, null, null, null);
-
 	internal Entry AppendArtifact(Entry entry, Func<string, FileStream> open, Action syncDirectory, Action afterFlush) =>
-		AppendCore(entry, open, syncDirectory, afterFlush);
+		Append(entry, static (fs, bytes) => { fs.Write(bytes); fs.WriteByte((byte) '\n'); }, open, syncDirectory, afterFlush);
 
-	Entry AppendCore(Entry entry, Func<string, FileStream>? open, Action? syncDirectory, Action? afterFlush) {
+	public Entry Append(Entry entry) => Append(entry, static (fs, bytes) => { fs.Write(bytes); fs.WriteByte((byte) '\n'); });
+
+	internal Entry Append(Entry entry, Action<FileStream, byte[]> write, Func<string, FileStream>? open = null, Action? syncDirectory = null, Action? afterFlush = null) {
 		lock(gate) {
+			if(appendFailed) throw new IOException("A previous transcript append failed; restart to re-index before appending again.");
 			entry = entry with {
-				Seq = Math.Max(lastReservedSequence, entries.Count > 0 ? entries[^1].Seq : 0) + 1,
+				Seq = rows.Count > 0 ? rows[^1].Seq + 1 : 1,
 				Ts = entry.Ts == default ? DateTimeOffset.UtcNow : entry.Ts,
 			};
-			if(File.Exists(segmentPath) && new FileInfo(segmentPath).Length > SegmentBytes)
-				segmentPath = SegmentName(int.Parse(Path.GetFileNameWithoutExtension(segmentPath)) + 1);
-			if(open == null) {
-				using var fs = new FileStream(segmentPath, FileMode.Append, FileAccess.Write, FileShare.Read);
-				if(fs.Length > 0) {
-					using var check = new FileStream(segmentPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-					fs.Write(Encoding.UTF8.GetBytes(Terminator(check)));
-				}
-				fs.Write(Encoding.UTF8.GetBytes(JsonIO.Serialize(entry) + "\n"));
-				fs.Flush(flushToDisk: true);
-			} else {
-				using var fs = open(Path.GetFileName(segmentPath));
-				var terminator = Terminator(fs);
+			var path = segments[^1];
+			if(!damagedTail && File.Exists(path) && new FileInfo(path).Length > SegmentBytes) {
+				path = Path.Combine(Path.GetDirectoryName(path)!, $"{int.Parse(Path.GetFileNameWithoutExtension(path)) + 1:D6}.jsonl");
+				segments.Add(path);
+			}
+			var bytes = JsonSerializer.SerializeToUtf8Bytes(entry, JsonIO.Options);
+			long offset;
+			try {
+				using var fs = open == null ? new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read) : open(Path.GetFileName(path));
 				fs.Seek(0, SeekOrigin.End);
-				// Sync the segment name before publishing any record that authorizes a blob.
-				syncDirectory!();
-				// Even a failed write/flush can have left a complete record on disk. Do not reuse its sequence.
-				lastReservedSequence = entry.Seq;
-				fs.Write(Encoding.UTF8.GetBytes(terminator + JsonIO.Serialize(entry) + "\n"));
+				syncDirectory?.Invoke();
+				if(fs.Length > 0) {
+					using var check = OpenRead(path);
+					check.Seek(-1, SeekOrigin.End);
+					if(check.ReadByte() != '\n') {
+						if(rejectUnterminatedArtifact) fs.Write(" !incomplete-artifact"u8);
+						fs.WriteByte((byte) '\n');
+					}
+				}
+				offset = fs.Position;
+				write(fs, bytes);
 				fs.Flush(flushToDisk: true);
 				afterFlush?.Invoke();
+			} catch(Exception e) when(e is IOException or UnauthorizedAccessException) {
+				// A failed write/flush may have left a partial or even complete line. Do not
+				// append a separator or reuse its sequence until startup has inspected it.
+				appendFailed = true;
+				throw;
 			}
-			Remember(entry);
+			rejectUnterminatedArtifact = false;
+			rows.Add(new(entry.Seq, offset, bytes.Length, segments.Count - 1, Tag(entry.Kind)));
+			IndexArtifacts(entry);
 			return entry;
 		}
 	}
