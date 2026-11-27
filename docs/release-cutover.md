@@ -29,18 +29,23 @@ instance or run another deploy/start command alongside it.
    cat "$job/generation.json"
    ```
 
-3. Give advance notice: write a note to `~/marten-mailbox/to-openthedas/`
-   following its README and message `client:openthedas`. Set `not_before` to
-   at least 180 seconds after the notice (`not_before=$(($(date +%s) + 180))`).
-   Submit the following command with **detached `process_start`** (substitute
-   the actual paths, tested `sha`, and timestamp into its command string;
-   shell variables from the staging step do not carry over). Do not execute it
+3. Give a heads-up before launching the job: write a note to
+   `~/marten-mailbox/to-openthedas/` following its README and message
+   `client:openthedas`. No fixed waiting window is required. Submit the
+   following command with **detached `process_start`** (substitute the actual
+   paths and tested `sha`; shell variables from staging do not carry over).
+   Do not execute it
    as an in-process PowerShell tool or wait for the result in a foreground task.
 
    ```sh
    python3 -u "$job/cutover.py" release --job "$job" --checkout "$checkout" \
-     --expected-home "$mounted_home" --sha "$sha" --not-before "$not_before"
+     --expected-home "$mounted_home" --sha "$sha"
    ```
+
+   To schedule the earliest TERM time explicitly, add `--not-before` with a
+   Unix timestamp (seconds). The helper accepts timestamps up to one hour
+   ahead or three minutes in the past. If prebuild finishes after the scheduled
+   time, the helper proceeds without waiting. Omit the flag for no time gate.
 
    The helper verifies the mounted `~/.marten` symlink, the old generation,
    and tracked-clean `main`; fetches `origin/main`, checks the expected SHA
@@ -50,9 +55,8 @@ instance or run another deploy/start command alongside it.
    It records SHA-256 fingerprints of the built server and UI trees (paths,
    file modes and bytes) and checks them before TERM and startup. A
    `MARTEN_WEB_ROOT` override must point to this checkout's `web/dist`.
-   The helper won't signal before the supplied time or within three minutes of
-   its own launch. Do not edit the checkout/build outputs, config, or generation
-   snapshot midway through the job.
+   Do not edit the checkout/build outputs, config, or generation snapshot
+   midway through the job.
 4. The helper re-verifies the generation before TERM. It waits 60 seconds by
    default, then keeps watching for another 60 seconds so an exit just past
    grace still proceeds through the same startup checks. Both waits can be

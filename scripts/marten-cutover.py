@@ -427,10 +427,11 @@ def deploy(args, host, root):
                 base['artifacts'] = launch_artifacts(root)
             stage = 'drain'
             if args.mode == 'release':
-                wait = max(0, args.notice_deadline - time.monotonic())
-                if wait:
-                    print(f'Waiting {wait:.0f}s for advance notice', flush=True)
-                    time.sleep(wait)
+                if args.notice_deadline is not None:
+                    wait = args.notice_deadline - time.monotonic()
+                    if wait > 0:
+                        print(f'Waiting {wait:.0f}s for scheduled cutover', flush=True)
+                        time.sleep(wait)
                 check_tree(root, args.sha)
                 verify_artifacts(root, base['artifacts'])
                 stop(host, root, PORT, old, args.grace, args.late_wait, args.kill_after_grace)
@@ -460,18 +461,21 @@ def main():
     p.add_argument('--job', required=True, type=Path)
     p.add_argument('--expected-home', type=Path)
     p.add_argument('--sha')
-    p.add_argument('--not-before', type=int, help='earliest TERM time (Unix seconds)')
+    p.add_argument('--not-before', type=int, help='optional earliest TERM time for release (Unix seconds)')
     p.add_argument('--grace', type=int, choices=range(1, 601), default=60, metavar='1..600')
     p.add_argument('--late-wait', type=int, choices=range(1, 601), default=60, metavar='1..600')
     p.add_argument('--kill-after-grace', action='store_true', help='allow same-generation KILL after both waits')
     args = p.parse_args()
     if args.mode != 'inspect' and (not args.expected_home or not re.fullmatch(r'[0-9a-f]{40}', args.sha or '')):
         p.error('release/resume requires --expected-home and the full tested --sha')
-    if args.mode == 'release':
+    args.notice_deadline = None
+    if args.not_before is not None:
+        if args.mode != 'release':
+            p.error('--not-before is only valid for release')
         now = time.time()
-        if not now - 180 <= (args.not_before or 0) <= now + 3600:
-            p.error('release requires a current --not-before notice deadline')
-        args.notice_deadline = time.monotonic() + max(180, args.not_before - now)
+        if not now - 180 <= args.not_before <= now + 3600:
+            p.error('--not-before must be within 180 seconds in the past or one hour in the future')
+        args.notice_deadline = time.monotonic() + (args.not_before - now)
     if args.mode != 'release' and args.kill_after_grace:
         p.error('only release may escalate')
     os.environ['PATH'] = PATH_PREFIX + os.environ.get('PATH', '')

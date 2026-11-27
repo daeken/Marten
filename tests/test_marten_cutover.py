@@ -144,6 +144,34 @@ class DrainTests(unittest.TestCase):
         cutover.check_port(h, port)
 
 
+class NoticeCliTests(unittest.TestCase):
+    def invoke(self, mode, *extra):
+        argv = ['cutover', mode, '--checkout', os.getcwd(), '--job', os.getcwd(),
+                '--expected-home', os.getcwd(), '--sha', 'a' * 40, *extra]
+        args_out = []
+        with (
+            patch.object(sys, 'argv', argv),
+            patch.dict(os.environ),
+            patch.object(time, 'time', return_value=10_000),
+            patch.object(time, 'monotonic', return_value=400),
+            patch.dict(cutover.main.__globals__, Darwin=lambda: None, deploy=lambda args, *_: args_out.append(args)),
+        ):
+            cutover.main()
+        return args_out[0].notice_deadline
+
+    def test_optional_or_explicit_deadline(self):
+        self.assertIsNone(self.invoke('release'))
+        self.assertEqual(self.invoke('release', '--not-before', '10015'), 415)
+        self.assertEqual(self.invoke('release', '--not-before', '9995'), 395)
+
+    def test_invalid_deadline_rejected_before_deploy(self):
+        for mode, timestamp in (('release', '9819'), ('release', '13601'), ('resume', '10015')):
+            with self.subTest(mode=mode, timestamp=timestamp), \
+                 patch.object(sys, 'stderr'), self.assertRaises(SystemExit) as raised:
+                self.invoke(mode, '--not-before', timestamp)
+            self.assertEqual(raised.exception.code, 2)
+
+
 class ReleaseTests(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
@@ -172,7 +200,7 @@ class ReleaseTests(unittest.TestCase):
         self.old = replace(OLD, cwd=str(self.root))
         cutover.atomic_json(self.job / 'generation.json', asdict(self.old))
         self.args = SimpleNamespace(mode='release', job=self.job, expected_home=self.mounted,
-                                    sha='a' * 40, notice_deadline=0, grace=60, late_wait=60,
+                                    sha='a' * 40, notice_deadline=None, grace=60, late_wait=60,
                                     kill_after_grace=False)
         self.h = Fake()
         self.h.generation = self.old
@@ -241,14 +269,34 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(list(self.job.glob('.result.json-*')), [])
         return json.loads(path.read_text())
 
-    def test_release_and_no_duplicate_job(self):
-        self.deploy()
+    def test_release_without_deadline_and_no_duplicate_job(self):
+        with patch.object(time, 'sleep') as sleep:
+            self.deploy()
+        sleep.assert_not_called()
         self.assertEqual(self.events, ['prebuild', 'stop', 'check_port', 'launch', 'healthy'])
         self.assertEqual(self.result()['new_pid'], self.child.pid)
         self.assertEqual(self.result()['state'], 'ok')
         with self.assertRaisesRegex(cutover.CutoverError, 'already used'):
             self.deploy()
         self.assertEqual(self.events.count('launch'), 1)
+
+    def test_scheduled_release_waits_only_remaining_time_after_prebuild(self):
+        self.args.notice_deadline = 415
+
+        def wait(seconds):
+            self.assertEqual(seconds, 5)
+            self.events.append('wait')
+
+        with patch.object(time, 'monotonic', return_value=410), patch.object(time, 'sleep', side_effect=wait):
+            self.deploy()
+        self.assertEqual(self.events, ['prebuild', 'wait', 'stop', 'check_port', 'launch', 'healthy'])
+
+    def test_no_wait_after_schedule_has_elapsed(self):
+        self.args.notice_deadline = 415
+        with patch.object(time, 'monotonic', return_value=420), patch.object(time, 'sleep') as sleep:
+            self.deploy()
+        sleep.assert_not_called()
+        self.assertEqual(self.result()['state'], 'ok')
 
     def test_prebuild_failure_no_term(self):
         self.prebuild_error = cutover.CutoverError('build failed')
@@ -475,7 +523,7 @@ class DarwinTests(unittest.TestCase):
                 )
                 os.environ['SCRATCH_PORT'] = str(port)
                 args = SimpleNamespace(mode='release', job=job, expected_home=root / 'scratch-mounted',
-                                       sha='a' * 40, notice_deadline=0, grace=1, late_wait=3,
+                                       sha='a' * 40, notice_deadline=None, grace=1, late_wait=3,
                                        kill_after_grace=False)
                 m['deploy'](args, host, root)
                 ''')
