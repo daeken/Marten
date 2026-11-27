@@ -91,7 +91,7 @@ struct MacFilesView: View {
         .task(id: ReadKey(identity: identity, active: active, refresh: refresh)) {
             // UIKit can make the scene temporarily inactive as the share activity
             // takes focus. Cancel network work and clear previews, not the handoff.
-            reset(keepShare: !active && phase != .background && staged != nil)
+            reset(keepShare: phase != .background && staged != nil)
             if active && isCurrent(), staged == nil { await load() }
         }
         .task(id: work.job(more)) {
