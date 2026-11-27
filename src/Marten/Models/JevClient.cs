@@ -187,8 +187,6 @@ internal sealed class JevClient {
 			throw new JevException(JevErrorKind.Cancelled);
 		} catch(OperationCanceledException) when(token.IsCancellationRequested) {
 			throw new JevException(JevErrorKind.Deadline);
-		} catch(JsonException) {
-			throw Protocol();
 		} catch(Exception e) when(e is IOException or HttpRequestException or OperationCanceledException) {
 			throw new JevException(ct.IsCancellationRequested ? JevErrorKind.Cancelled : token.IsCancellationRequested ? JevErrorKind.Deadline : JevErrorKind.Transport);
 		}
@@ -223,7 +221,7 @@ internal sealed class JevClient {
 	}
 
 	static JevResult Parse(ReadOnlyMemory<byte> body, IReadOnlyList<string>? labels) {
-		using var doc = JsonDocument.Parse(body, new() { MaxDepth = 12, AllowDuplicateProperties = false });
+		using var doc = ParseDocument(body);
 		var root = doc.RootElement;
 		if(Text(Field(root, "model")) != Model) throw Protocol();
 		var answers = Field(root, "answers");
@@ -243,6 +241,14 @@ internal sealed class JevClient {
 		} else throw Protocol();
 		var usage = Field(root, "usage");
 		return new(Model, parsed, Tokens(Field(usage, "input_tokens")), Tokens(Field(usage, "output_tokens")));
+	}
+
+	static JsonDocument ParseDocument(ReadOnlyMemory<byte> body) {
+		try { return JsonDocument.Parse(body, new() { MaxDepth = 12, AllowDuplicateProperties = false }); }
+		catch(Exception e) when(e is JsonException or InvalidOperationException) {
+			// Duplicate-name validation also decodes names; invalid Unicode escapes can throw InvalidOperationException.
+			throw Protocol();
+		}
 	}
 
 	static JsonElement Field(JsonElement obj, string key) => obj.ValueKind == JsonValueKind.Object && obj.TryGetProperty(key, out var value) ? value : throw Protocol();

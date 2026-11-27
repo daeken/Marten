@@ -158,6 +158,16 @@ public class JevClientTests {
 	}
 
 	[Fact]
+	public async Task MalformedEscapedPropertyNameIsSanitizedProtocolError() {
+		const string marker = "provider-supplied-marker";
+		var json = NoulJson.Insert(1, $"\"{marker}\\uD800\":true,");
+		var error = await Assert.ThrowsAsync<JevException>(() => Client(Reply(json)).EvaluateAsync(Noul(), FixtureKey));
+		AssertError(error, JevErrorKind.Protocol);
+		Assert.Equal("Jev request failed (Protocol).", error.Message);
+		Assert.DoesNotContain(marker, error.ToString());
+	}
+
+	[Fact]
 	public async Task ResponseBoundAppliesWithoutContentLength() {
 		var body = new SizedStream(JevClient.MaxResponseBytes + 20_000);
 		var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(body) };
