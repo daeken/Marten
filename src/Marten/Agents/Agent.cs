@@ -48,6 +48,7 @@ public sealed partial class Agent : IPowerShellOwner {
 		this.info = info;
 		Instructions = instructions;
 		Transcript = new Transcript(Path.Combine(directory, "transcript"));
+		manager.ArtifactStore.Recover(directory, Transcript);
 		var entries = Transcript.Entries;
 		lastWakeSeq = entries.LastOrDefault(e => e.Kind == EntryKind.Wake)?.Seq ?? 0;
 		if(entries.LastOrDefault(e => e.Kind is EntryKind.Compaction or EntryKind.Reload or EntryKind.ContextReset)?.Instructions is { } rebuilt)
@@ -530,14 +531,21 @@ public sealed partial class Agent : IPowerShellOwner {
 		} finally {
 			toolTurn.Value = default;
 		}
-		lock(gate) {
-			slots.ThrowIfStopped(ct);
-			var (text, full) = Truncate(call.CallId ?? Guid.NewGuid().ToString("N"), output.Text);
-			List<ImageRef> images = [.. output.Images ?? [], .. TakeViewedImages()];
-			Append(new Entry {
-				Kind = EntryKind.ToolResult, CallId = call.CallId, Name = call.Name, Text = text,
-				IsError = output.IsError ? true : null, FullOutput = full, Images = images.Count > 0 ? images : null,
-			});
+		try {
+			lock(gate) {
+				slots.ThrowIfStopped(ct);
+				var (text, full) = Truncate(call.CallId ?? Guid.NewGuid().ToString("N"), output.Text);
+				List<ImageRef> images = [.. output.Images ?? [], .. TakeViewedImages()];
+				Append(new Entry {
+					Kind = EntryKind.ToolResult, CallId = call.CallId, Name = call.Name, Text = text,
+					IsError = output.IsError ? true : null, FullOutput = full, Images = images.Count > 0 ? images : null,
+					Artifacts = output.Artifacts,
+				});
+			}
+		} finally {
+			if(output.Artifacts != null)
+				foreach(var item in output.Artifacts)
+					if(Transcript.Artifact(item.Id) == null) manager.ArtifactStore.Discard(Directory, item);
 		}
 	}
 

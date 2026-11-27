@@ -113,6 +113,7 @@ PowerShell is embedded in-process and is the default way agents act on the world
 - **Built-in tools.** Tools written in C# are built into the runtime.
 - **MCP tools** are callable from PowerShell like any other command.
 - **Images.** When an agent calls an MCP tool directly and it returns an image, the image is fed back to the model. From PowerShell, a `View-Image` cmdlet (name not final) shows an image to the model.
+- **Operator artifacts.** An agent may explicitly publish a staged file with `publish_artifact`. Only flat regular files in that agent's private staging directory are eligible; project bindings and working directories do not grant access. A private immutable snapshot is linked from the durable tool result, not sent to the model. Operators can request a bounded plain-text or static PNG preview or download the original. No public link or outside-client access. Routine backups retain the transcript reference but exclude artifact bytes. See [the artifact API contract](docs/artifact-api.md).
 - **File reader.** A base tool reads a whole file or a range of lines from it.
 - **Atomic file editor.** A base tool takes a list of insertions, replacements and deletions for one file. It applies them only if every edit matches. Matches are exact and each anchor must match once. All edits are checked against the file as it stood. The edit fails if the file changed since the agent last read it. A failure names the edit that missed.
 

@@ -93,6 +93,7 @@ var scriptTools = new ScriptToolSource(getManager);
 var mcp = new Marten.Mcp.McpHub(getManager);
 var tools = new ToolRegistry()
 	.Add(new ReadFileTool())
+	.Add(new PublishArtifactTool(getManager))
 	.Add(new EditFileTool(new MemoryGuard(getManager)))
 	.Add(new PowerShellTool(() => managerRef!.Config.CommandTimeoutSeconds, () => managerRef!.Config.StopGraceSeconds, childWatcher, restart.Stopping))
 	.Add(new SendMessageTool(getManager))
@@ -326,15 +327,17 @@ api.MapPut("/config", (ConfigUpdate update) => {
 }).AllowPaired();
 api.MapGet("/agents", () => manager.Agents.Select(AgentSummary)).AllowPaired();
 api.MapPost("/agents", (CreateAgent req) => AgentSummary(manager.CreateChat(req.Name, Blank(req.WorkingDirectory)))).AllowPaired();
-api.MapGet("/agents/{id}/transcript", (string id, int? limit, long? before) => {
+api.MapGet("/agents/{id}/transcript", (HttpContext ctx, string id, int? limit, long? before) => {
 	if(manager.Get(id) is not { } a) return Results.NotFound();
+	var outside = ctx.Items.ContainsKey("client");
 	if(limit is int size) {
 		var page = a.Transcript.ReadPage(size, before);
 		// Replay payloads (notably encrypted reasoning) can dwarf the text the UI displays.
-		return Results.Ok(new { Entries = page.Entries.Select(e => e with { Raw = null, Instructions = null }), page.HasOlder });
+		return Results.Ok(new { Entries = page.Entries.Select(e => e with { Raw = null, Instructions = null, Artifacts = outside ? null : e.Artifacts }), page.HasOlder });
 	}
-	return Results.Ok(a.Transcript.Entries);
+	return outside ? Results.Ok(a.Transcript.Entries.Select(e => e with { Artifacts = null })) : Results.Ok(a.Transcript.Entries);
 }).AllowPaired();
+api.MapArtifacts(manager);
 api.MapPost("/agents/{id}/messages", (string id, SendMessage req) => {
 	if(manager.Get(id) is not { } a) return Results.NotFound();
 	if(string.IsNullOrWhiteSpace(req.Text)) return Results.BadRequest();

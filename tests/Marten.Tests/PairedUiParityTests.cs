@@ -4,6 +4,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
 using System.Text.Json;
+using Marten.Agents;
 using Marten.Storage;
 using Marten.Web;
 
@@ -38,6 +39,20 @@ public class PairedUiParityTests {
 			var helper = Path.Combine(bin, "marten-tsnet");
 			await File.WriteAllTextAsync(helper, "#!/bin/sh\nprintf 'READY\\n'\nread unused\n");
 			if(!OperatingSystem.IsWindows()) File.SetUnixFileMode(helper, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+		}
+		const string fixtureId = "artifact-fixture";
+		ArtifactRef? artifact = null;
+		if(ArtifactFiles.Supported) {
+			var fixture = home.AgentDir(fixtureId);
+			var log = new Transcript(Path.Combine(fixture, "transcript"));
+			var store = new Artifacts();
+			store.Recover(fixture, log);
+			await File.WriteAllTextAsync(Path.Combine(fixture, Artifacts.Staging, "example.txt"), new string('a', Artifacts.MaxText + 1));
+			artifact = await store.Publish(fixture, "example.txt", null, default);
+			log.Append(new Entry { Kind = EntryKind.ToolResult, Artifacts = [artifact] });
+			await File.WriteAllTextAsync(Path.Combine(fixture, "system.md"), "Offline test fixture");
+			JsonIO.Save(Path.Combine(fixture, "agent.json"), new AgentInfo { Id = fixtureId, Kind = AgentKind.Chat,
+				Name = "Offline fixture", WorkingDirectory = fixture, Created = DateTimeOffset.UtcNow, Closed = true });
 		}
 		var pairing = new DevicePairing(home);
 		var token = pairing.Redeem(pairing.Create()!.Code, "Parity test")!;
@@ -184,6 +199,40 @@ public class PairedUiParityTests {
 			await Check(HttpMethod.Post, "/api/backups", [HttpStatusCode.OK]);
 			await Check(HttpMethod.Post, "/api/mcp/refresh", [HttpStatusCode.OK]);
 			await Check(HttpMethod.Post, "/api/clients", [HttpStatusCode.OK], new { name = "parity" });
+			if(artifact != null) {
+				var fixture = $"/api/agents/{fixtureId}";
+				var download = $"{fixture}/artifacts/{artifact.Id}";
+				using var full = await http.GetAsync(download, timeout.Token);
+				Assert.Equal(HttpStatusCode.OK, full.StatusCode);
+				Assert.True(full.Headers.CacheControl?.NoStore);
+				Assert.Equal("nosniff", Assert.Single(full.Headers.GetValues("X-Content-Type-Options")));
+				Assert.Equal("application/octet-stream", full.Content.Headers.ContentType?.MediaType);
+				Assert.Equal("attachment", full.Content.Headers.ContentDisposition?.DispositionType);
+				Assert.Equal(artifact.Bytes, (await full.Content.ReadAsByteArrayAsync(timeout.Token)).Length);
+				using var preview = await http.GetAsync(download + "/preview", timeout.Token);
+				Assert.Equal(HttpStatusCode.OK, preview.StatusCode);
+				Assert.Equal("text/plain", preview.Content.Headers.ContentType?.MediaType);
+				Assert.Equal("1", Assert.Single(preview.Headers.GetValues("X-Marten-Preview-Truncated")));
+				Assert.Equal(Artifacts.MaxText, (await preview.Content.ReadAsByteArrayAsync(timeout.Token)).Length);
+				await Check(HttpMethod.Get, download, [HttpStatusCode.OK], authority: local, bearer: op);
+				await Check(HttpMethod.Get, download + "?ignored=1", [HttpStatusCode.Forbidden]);
+				await Check(HttpMethod.Get, $"{ad}/artifacts/{artifact.Id}", [HttpStatusCode.NotFound]);
+				using var isolated = new HttpClient { BaseAddress = http.BaseAddress };
+				using var queryOnly = await isolated.GetAsync(download + "?token=" + op, timeout.Token);
+				Assert.Equal(HttpStatusCode.Forbidden, queryOnly.StatusCode);
+				using var cross = new HttpRequestMessage(HttpMethod.Get, download);
+				cross.Headers.TryAddWithoutValidation("Origin", "https://other.example");
+				using var blocked = await http.SendAsync(cross, timeout.Token);
+				Assert.Equal(HttpStatusCode.Forbidden, blocked.StatusCode);
+				var outsider = await File.ReadAllTextAsync(Path.Combine(home.Secrets, "clients", "parity.token"), timeout.Token);
+				await Check(HttpMethod.Get, download, [HttpStatusCode.Forbidden], authority: local, bearer: outsider);
+				isolated.DefaultRequestHeaders.Authorization = new("Bearer", outsider);
+				foreach(var suffix in new[] { "/transcript", "/transcript?limit=80", "/transcript?before=2&limit=80" }) {
+					using var history = await isolated.GetAsync(fixture + suffix, timeout.Token);
+					Assert.Equal(HttpStatusCode.OK, history.StatusCode);
+					Assert.DoesNotContain(artifact.Id, await history.Content.ReadAsStringAsync(timeout.Token));
+				}
+			}
 			await Check(HttpMethod.Delete, "/api/clients/parity", [HttpStatusCode.OK]);
 			await Check(HttpMethod.Post, "/api/pause", [HttpStatusCode.OK], new { paused = true });
 			// Validate authorization without starting a project orchestrator and its PowerShell runspace.

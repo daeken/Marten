@@ -45,6 +45,7 @@ public sealed partial class AgentManager {
 	public Guard Guard { get; }
 	public Outside Outside { get; }
 	internal ResourceSlots Resources { get; }
+	internal Artifacts ArtifactStore { get; } = new();
 	readonly ConcurrentDictionary<string, Agent> agents = new();
 	readonly ConcurrentDictionary<string, Project> projects = new();
 	readonly SemaphoreSlim modelGate = new(1, 1);

@@ -56,6 +56,8 @@ public sealed record Entry {
 	public string? Instructions { get; init; }
 	/// <summary>Images a tool result shows the model (MCP tools, View-Image): absolute paths of saved files.</summary>
 	public List<ImageRef>? Images { get; init; }
+	/// <summary>Published operator artifacts; never model attachments.</summary>
+	public IReadOnlyList<ArtifactRef>? Artifacts { get; init; }
 }
 
 public sealed record ImageRef(string Path, string MimeType);
@@ -70,6 +72,7 @@ public sealed class Transcript {
 	const long SegmentBytes = 4 << 20;
 	readonly string Dir;
 	readonly List<Entry> entries = new();
+	readonly Dictionary<string, ArtifactRef> artifacts = new(StringComparer.Ordinal);
 	readonly object gate = new();
 	string segmentPath;
 
@@ -81,13 +84,21 @@ public sealed class Transcript {
 			foreach(var line in File.ReadLines(seg)) {
 				if(string.IsNullOrWhiteSpace(line)) continue;
 				try {
-					if(JsonIO.Deserialize<Entry>(line) is { } e) entries.Add(e);
+					if(JsonIO.Deserialize<Entry>(line) is { } e) Remember(e);
 				} catch(JsonException) when(seg == segments[^1]) {
 					// A crash mid-append leaves a torn final line; everything before it is intact.
 				}
 			}
 		segmentPath = segments.Count > 0 ? segments[^1] : SegmentName(1);
 	}
+
+	void Remember(Entry entry) {
+		entries.Add(entry);
+		if(entry.Kind == EntryKind.ToolResult && entry.Artifacts != null)
+			foreach(var item in entry.Artifacts) artifacts.TryAdd(item.Id, item);
+	}
+
+	internal ArtifactRef? Artifact(string id) { lock(gate) return artifacts.GetValueOrDefault(id); }
 
 	string SegmentName(int n) => Path.Combine(Dir, $"{n:D6}.jsonl");
 
@@ -134,7 +145,7 @@ public sealed class Transcript {
 				fs.Write(Encoding.UTF8.GetBytes(JsonIO.Serialize(entry) + "\n"));
 				fs.Flush(flushToDisk: true);
 			}
-			entries.Add(entry);
+			Remember(entry);
 			return entry;
 		}
 	}

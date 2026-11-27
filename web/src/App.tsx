@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { DevicePairing } from './DevicePairing';
 import { AgentMessage, AgentSummary, Api, Backend, BackupStatus, Entry, NotebookCell, OutsideClient, McpServer, Project, ProjectMemory, Schedule, ScriptToolInfo, SeraMessage, ServerEvent, Status_, TaskItem, takeToken, TranscriptPage, transcriptPageSize } from './api';
 import { ProcessPanels } from './ProcessPanels';
+import { ArtifactCards } from './ArtifactCards';
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh'];
 
@@ -604,7 +605,7 @@ function AgentView({ api, agent, project, agents, models, tick, defaultModel, de
           while (nextCard < answeredCards.length && Date.parse(answeredCards[nextCard].answeredAt ?? answeredCards[nextCard].at) <= Date.parse(e.ts))
             before.push(card(answeredCards[nextCard++]));
           if (e.kind === 'tool_result' && callIds.has(e.callId)) return before;
-          return [...before, <EntryView key={e.seq} entry={e} result={e.kind === 'tool_call' ? results.get(e.callId) : undefined} running={!archive && !!runningCall && e.callId === runningCall} imageUrl={imageUrl} />];
+          return [...before, <EntryView key={e.seq} entry={e} result={e.kind === 'tool_call' ? results.get(e.callId) : undefined} running={!archive && !!runningCall && e.callId === runningCall} imageUrl={imageUrl} api={api} agentId={agent.id} />];
         })}
         {answeredCards.slice(nextCard).map(card)}
         {!archive && streaming && <div className="assistant streaming"><Md text={streaming} /></div>}
@@ -718,7 +719,7 @@ function usageTitle(e: Entry) {
   return parts.filter(Boolean).join(' · ') || undefined;
 }
 
-const EntryView = memo(function EntryView({ entry: e, result, running, imageUrl }: { entry: Entry; result?: Entry; running: boolean; imageUrl: (path: string) => string }) {
+const EntryView = memo(function EntryView({ entry: e, result, running, imageUrl, api, agentId }: { entry: Entry; result?: Entry; running: boolean; imageUrl: (path: string) => string; api: Api; agentId: string }) {
   switch (e.kind) {
     case 'message':
       return e.from === 'Sera'
@@ -731,12 +732,13 @@ const EntryView = memo(function EntryView({ entry: e, result, running, imageUrl 
     case 'reasoning':
       return e.text ? <details className="reasoning"><summary>Reasoning</summary><div><Md text={e.text} /></div></details> : null;
     case 'tool_call':
-      return <ToolCall call={e} result={result} running={running} imageUrl={imageUrl} />;
+      return <><ToolCall call={e} result={result} running={running} imageUrl={imageUrl} />
+        <ArtifactCards items={result?.artifacts} api={api} agentId={agentId} /></>;
     case 'tool_result':
-      return <details className={`tool ${e.isError ? 'failed' : 'done'}`}>
+      return <><details className={`tool ${e.isError ? 'failed' : 'done'}`}>
         <summary>Tool result{e.isError ? ' (error)' : ''} · call on another page</summary>
         <ToolOutput result={e} imageUrl={imageUrl} />
-      </details>;
+      </details><ArtifactCards items={e.artifacts} api={api} agentId={agentId} /></>;
     case 'error':
       return <div className="error-entry">{e.text}</div>;
     case 'idle':
