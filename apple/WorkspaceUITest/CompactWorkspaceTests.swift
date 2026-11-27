@@ -26,6 +26,20 @@ final class CompactWorkspaceTests: XCTestCase {
             ((try? String(contentsOf: trace, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init).filter { $0.hasPrefix("send ") }
         }
         XCTAssertTrue(sends().isEmpty)
+        let keyboard = app.keyboards.firstMatch
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+        // Hit the transcript's leading gutter, not a selectable text run or a control.
+        app.scrollViews.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.015, dy: 0.45)).tap()
+        XCTAssertTrue(keyboard.waitForNonExistence(timeout: 5))
+        XCTAssertEqual(draft.value as? String, "First\nSecond")
+        XCTAssertTrue(sends().isEmpty)
+
+        // A control hit still works while the keyboard is up.
+        draft.tap()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+        app.buttons["Older transcript page"].tap()
+        XCTAssertTrue(app.buttons["Newer transcript page"].waitForExistence(timeout: 8))
+        XCTAssertEqual(draft.value as? String, "First\nSecond")
         app.buttons["Send Message"].firstMatch.tap()
         let sent = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in !sends().isEmpty }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [sent], timeout: 8), .completed, "Draft: \(draft.value ?? "nil")")
