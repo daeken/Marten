@@ -2,6 +2,8 @@ namespace Marten.Agents;
 
 public sealed partial class AgentManager {
 	internal void CheckIdleProjects() {
+		using var operation = Restart.Enter();
+		if(operation == null) return;
 		var members = agents.Values; // snapshot, including closed workers
 		var workers = members.Where(a => a.Info.Kind == AgentKind.Task).ToLookup(a => a.Info.ParentId);
 		foreach(var project in projects.Values) {
@@ -64,7 +66,7 @@ public sealed partial class Agent {
 				(string.IsNullOrWhiteSpace(t.Reason) ? "" : $": {t.Reason}") +
 				(t.WaitingOn is { } edge ? $" (waiting on {edge.AgentId} #{edge.TaskId})" : "")));
 			var status = openWorkers == 0 ? "There are no non-closed task agents." : "All non-closed task agents are idle.";
-			inbox.Add(new Inbound(NudgeSender, $"{status} Review your waiting tasks:\n{list}\nIf nothing can proceed, leave them waiting.", SendMode.Queued, ProjectIdleWake));
+			Enqueue(new Inbound(NudgeSender, $"{status} Review your waiting tasks:\n{list}\nIf nothing can proceed, leave them waiting.", SendMode.Queued, ProjectIdleWake));
 			pendingProjectIdleWork = work;
 		} finally {
 			while(held.TryPop(out var sync)) Monitor.Exit(sync);

@@ -38,9 +38,9 @@ public sealed partial class Agent {
 	}
 
 	/// <summary>Append a model-context boundary without waking the agent or consuming queued input.</summary>
-	internal string? StartFreshContext() {
-		using var operation = manager.Restart.Enter();
-		if(operation == null) return "Marten is stopping.";
+	internal string? StartFreshContext(bool alreadyAdmitted = false) {
+		using var operation = alreadyAdmitted ? null : manager.Restart.Enter();
+		if(!alreadyAdmitted && operation == null) return "Marten is stopping or draining for restart.";
 		lock(gate) {
 			if(manager.Restart.IsStopping) return "Marten is stopping.";
 			if(activeTurn != null) return "An agent turn is still active. Wait for it to finish or stop it first.";

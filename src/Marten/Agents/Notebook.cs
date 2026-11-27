@@ -32,8 +32,11 @@ public sealed partial class Agent {
 	}
 
 	/// <summary>Run a recorded cell again: same command, directory and $State going in, in a fresh runspace. The agent's own $State is untouched.</summary>
-	public async Task<(NotebookCell Run, bool SameOutput, bool SameState)> RerunCell(int id, CancellationToken ct) {
-		using var operation = manager.Restart.Enter() ?? throw new OperationCanceledException("Marten is stopping.");
+	public Task<(NotebookCell Run, bool SameOutput, bool SameState)> RerunCell(int id, CancellationToken ct) => RerunCell(id, ct, alreadyAdmitted: false);
+
+	internal async Task<(NotebookCell Run, bool SameOutput, bool SameState)> RerunCell(int id, CancellationToken ct, bool alreadyAdmitted) {
+		using var operation = alreadyAdmitted ? null : manager.Restart.Enter() ?? throw new OperationCanceledException("Marten cannot admit this replay.");
+		manager.Restart.ThrowIfStopping();
 		using var command = TrackStandaloneCommand();
 		using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, manager.Restart.CancelTools);
 		var cell = Notebook().FirstOrDefault(c => c.Id == id) ?? throw new KeyNotFoundException($"No cell {id}.");

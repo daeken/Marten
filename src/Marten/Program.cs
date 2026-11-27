@@ -156,6 +156,7 @@ builder.Services.ConfigureHttpJsonOptions(o => {
 var app = builder.Build();
 app.UseRouting();
 app.Use(security.Middleware);
+app.Use(next => ReleaseDrainEndpoints.GateWrites(restart, next));
 app.UseWebSockets();
 
 var webRoot = FindWebRoot();
@@ -193,6 +194,7 @@ object ProjectSummary(Project p) => new { p.Info.Id, p.Info.Name, p.Info.Created
 var api = app.MapGroup("/api");
 api.MapPairing(pairing, security);
 api.MapJevSettings(jevSettings);
+api.MapReleaseDrain(restart);
 var macFiles = new MacFiles(config.MacFilesEnabled, tailnet.HasNativeProof, pairing, restart.Stopping, ingressReady: () => tailnet.IsReady);
 macFiles.Map(api);
 api.MapGet("/status", (HttpContext ctx) => new {
@@ -220,7 +222,7 @@ api.MapPost("/agents/{id}/close", (string id, CloseRequest req) => {
 // This mutation is under UI-token auth, not /api/ext or the outside read allowlist.
 api.MapPost("/agents/{id}/start-fresh-context", (string id) => {
 	if(manager.Get(id) is not { } a) return Results.NotFound();
-	return a.StartFreshContext() is { } conflict ? Results.Problem(conflict, statusCode: 409) : Results.NoContent();
+	return a.StartFreshContext(alreadyAdmitted: true) is { } conflict ? Results.Problem(conflict, statusCode: 409) : Results.NoContent();
 }).AllowPaired();
 api.MapPost("/agents/{id}/pause", (string id, PauseRequest req) => {
 	if(manager.Get(id) is not { } a) return Results.NotFound();
@@ -290,7 +292,7 @@ ext.MapPost("/projects", (HttpContext ctx, CreateProject req) => {
 	} catch(ArgumentException e) {
 		return Results.Problem(e.Message, statusCode: 400);
 	}
-});
+}).WithMetadata(new ReleaseDrainEndpoints.OutsideWrite());
 ext.MapPost("/messages", (HttpContext ctx, ExtMessage req) => {
 	if(ClientOf(ctx) is not { } c) return NeedsClient();
 	try {
@@ -299,7 +301,7 @@ ext.MapPost("/messages", (HttpContext ctx, ExtMessage req) => {
 	} catch(ToolException e) {
 		return Results.Problem(e.Message, statusCode: 400);
 	}
-});
+}).WithMetadata(new ReleaseDrainEndpoints.OutsideWrite());
 ext.MapGet("/inbox", async (HttpContext ctx, bool? ack, int? wait) => {
 	if(ClientOf(ctx) is not { } c) return NeedsClient();
 	var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(Math.Clamp(wait ?? 0, 0, 120));
@@ -308,7 +310,13 @@ ext.MapGet("/inbox", async (HttpContext ctx, bool? ack, int? wait) => {
 		try { await Task.Delay(500, ctx.RequestAborted); } catch(OperationCanceledException) { break; }
 		list = manager.Outside.Inbox(c, false);
 	}
-	if(ack ?? true) manager.Outside.Inbox(c, true);
+	// This GET can delete durable outside replies. Gate the acknowledgement, not the
+	// read/long poll; ack=false remains available throughout a release drain.
+	if(ack ?? true) {
+		using var operation = restart.Enter();
+		if(operation == null) return ReleaseDrainEndpoints.Retry(ctx);
+		manager.Outside.Inbox(c, true);
+	}
 	return Results.Ok(list.Select(m => new { file = Path.GetFileName(m.File), headers = m.Headers, m.Text }));
 });
 ext.MapGet("/agents/{id}/transcript", (HttpContext ctx, string id, long? since, int? limit) => {
@@ -389,7 +397,7 @@ api.MapGet("/agents/{id}/notebook", (string id, int? limit) =>
 api.MapPost("/agents/{id}/notebook/{n:int}/rerun", async (string id, int n, CancellationToken ct) => {
 	if(manager.Get(id) is not { } a) return Results.NotFound();
 	try {
-		var (run, sameOutput, sameState) = await a.RerunCell(n, ct);
+		var (run, sameOutput, sameState) = await a.RerunCell(n, ct, alreadyAdmitted: true);
 		return Results.Ok(new { run, sameOutput, sameState });
 	} catch(KeyNotFoundException) {
 		return Results.NotFound();
@@ -503,8 +511,6 @@ api.MapGet("/events", (RequestDelegate)(async ctx => {
 })).AllowPaired();
 
 async Task RefreshMcp(bool force) {
-	using var operation = restart.Enter();
-	if(operation == null) return;
 	try { await mcp.RefreshAsync(force, restart.CancelTools); }
 	catch(OperationCanceledException) when(restart.IsStopping) { }
 }
@@ -512,7 +518,10 @@ async Task RefreshMcp(bool force) {
 manager.LoadAll();
 new Scheduler(manager).Start(app.Lifetime.ApplicationStopping);
 backups.Start(app.Lifetime.ApplicationStopping, Console.Error.WriteLine);
-_ = Task.Run(() => RefreshMcp(false));
+if(restart.Enter() is { } startupRefresh) _ = Task.Run(async () => {
+	using var operation = startupRefresh;
+	await RefreshMcp(false);
+});
 Console.WriteLine($"Marten home: {home.Root}");
 Console.WriteLine($"Backups: {backups.Directory}{(backups.Encrypting ? " (encrypted)" : "")}");
 Console.WriteLine(webRoot == null
