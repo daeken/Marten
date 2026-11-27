@@ -226,6 +226,52 @@ final class MacFilesClientTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(FileManager.default.fileExists(atPath: partial.path))
     }
 
+    /// The real URLSession AsyncBytes reader, with a private in-process URLProtocol
+    /// instead of a socket. No DNS, live service, Tailscale node, or real credential.
+    func testURLSessionMidBodyCancellation() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [ParkedURLProtocol.self]
+        let transport = URLSessionTransport(configuration: config)
+        defer { transport.invalidate() }
+        let route = try TailnetTransport(endpoint: endpoint, transport: transport)
+        let copy = try MacFilesStagedCopy.create(leaf: "url-protocol.txt")
+        defer { copy.discardUnpublished() }
+        var request = URLRequest(url: endpoint.url.appending(path: "api/mac-files/bytes/fixture/share"))
+        request.setValue("Bearer fake-paired-fixture", forHTTPHeaderField: "Authorization")
+        let transfer = Task { [request] in
+            try await route.readMacFiles(request, policy: .init(limit: ParkedURLProtocol.exact, exact: ParkedURLProtocol.exact), staging: copy.url)
+        }
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(5))
+        var stagedSize = 0
+        while clock.now < deadline {
+            stagedSize = (try? copy.url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            if stagedSize > 64 * 1024 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        transfer.cancel()
+        XCTAssertGreaterThan(stagedSize, 64 * 1024, "URLSession never staged two chunks")
+        do { _ = try await transfer.value; XCTFail("cancelled URLSession body returned successfully") }
+        catch let error as URLError { XCTAssertEqual(error.code, .cancelled) }
+        catch { XCTAssertTrue(error is CancellationError, "unexpected error \(error)") }
+    }
+
+    private final class ParkedURLProtocol: URLProtocol, @unchecked Sendable {
+        static let exact = 256 * 1024
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+        override func startLoading() {
+            guard let url = request.url, let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: [
+                "Content-Type": "application/octet-stream", "Content-Length": String(Self.exact), "Content-Disposition": "attachment"
+            ]) else { client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse)); return }
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(repeating: 1, count: 160 * 1024))
+            // Deliberately omit finish: waiter cancels during body transfer.
+        }
+        override func stopLoading() {}
+    }
+
     func testListingCapsRowsAndEmptyFreshCursorsIndependently() throws {
         var empty = MacFilesListing()
         for i in 0..<MacFilesListing.pageLimit {
