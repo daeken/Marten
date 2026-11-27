@@ -39,14 +39,37 @@ var hostname = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.[a-z0-9]
 var enrollmentKey = regexp.MustCompile(`^tskey-auth-[a-zA-Z0-9_-]+$`)
 
 func main() {
-	// The parent holds the only writer. Exit even during a stuck enrollment or
-	// if Marten is killed before running its shutdown hooks.
-	go func() { _, _ = io.Copy(io.Discard, os.Stdin); os.Exit(0) }()
 	log.SetOutput(io.Discard)
-	os.Exit(run(os.Args[1:]))
+	args, proof, ok := readBootstrap(os.Args[1:], os.Stdin)
+	if !ok {
+		os.Exit(badConfig)
+	}
+	// The parent holds the only writer; EOF remains the lifetime lease.
+	go func() { awaitLeaseEOF(os.Stdin); os.Exit(0) }()
+	os.Exit(run(args, proof))
 }
 
-func run(args []string) int {
+var proofFormat = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+func readBootstrap(args []string, stdin io.Reader) ([]string, string, bool) {
+	if len(args) == 4 {
+		return args, "", true // legacy disabled mode reads no bootstrap bytes
+	}
+	if len(args) != 5 || args[4] != "mac-files-v1" {
+		return nil, "", false
+	}
+	var payload [64]byte
+	if _, err := io.ReadFull(stdin, payload[:]); err != nil || !proofFormat.Match(payload[:]) {
+		return nil, "", false
+	}
+	return args[:4], string(payload[:]), true
+}
+
+func awaitLeaseEOF(stdin io.Reader) {
+	_, _ = io.Copy(io.Discard, stdin)
+}
+
+func run(args []string, proof string) int {
 	// Reject builds with SDK log upload or the unused PeerAPI host TCP
 	// listener. Neither is needed to serve the native HTTPS listener.
 	if len(args) != 4 || buildfeatures.HasLogTail || buildfeatures.HasPeerAPIServer || !hostname.MatchString(args[0]) ||
@@ -125,7 +148,7 @@ func run(args []string) int {
 		TLSConfig:         exactTLS(host, loadCert),
 		ReadHeaderTimeout: 15 * time.Second,
 		IdleTimeout:       90 * time.Second,
-		Handler:           tailnetProxy(host, &url.URL{Scheme: "http", Host: "127.0.0.1:" + strconv.Itoa(port)}),
+		Handler:           tailnetProxyWithProof(host, &url.URL{Scheme: "http", Host: "127.0.0.1:" + strconv.Itoa(port)}, proof),
 		ErrorLog:          log.New(io.Discard, "", 0),
 	}
 	_, _ = io.WriteString(os.Stdout, "READY\n")
@@ -152,7 +175,24 @@ func exactTLS(host string, getCert func(context.Context) (*tls.Certificate, erro
 	}}
 }
 
+const nativeProofHeader = "X-Marten-Native-Proof"
+
+var macFilesNativePath = regexp.MustCompile(`^/api/(status|mac-files/(roots|entries/[0-9a-f]{32}|bytes/[0-9a-f]{32}/(text|raster|share)))$`)
+
+func macFilesProofRequest(r *http.Request, host string) bool {
+	return r.Method == http.MethodGet && r.TLS != nil && r.TLS.ServerName == host && r.Host == host &&
+		len(r.Header.Values("Origin")) == 0 && r.RequestURI == r.URL.Path && macFilesNativePath.MatchString(r.URL.Path)
+}
+
 func tailnetProxy(host string, upstream *url.URL) http.Handler {
+	return tailnetProxyWithProof(host, upstream, "")
+}
+
+func filesRequest(r *http.Request) bool {
+	return r != nil && strings.HasPrefix(strings.ToLower(r.URL.Path), "/api/mac-files/")
+}
+
+func tailnetProxyWithProof(host string, upstream *url.URL, proof string) http.Handler {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil // never send Marten credentials through an environment proxy
 	proxy := &httputil.ReverseProxy{
@@ -162,16 +202,41 @@ func tailnetProxy(host string, upstream *url.URL) http.Handler {
 			r.Out.Host = host
 			for h := range r.Out.Header {
 				name := strings.ToLower(h)
-				if strings.HasPrefix(name, "x-forwarded-") || strings.HasPrefix(name, "tailscale-") || name == "via" {
-					r.Out.Header.Del(h)
+				if strings.HasPrefix(name, "x-forwarded-") || strings.HasPrefix(name, "tailscale-") || name == "via" || strings.EqualFold(h, nativeProofHeader) {
+					delete(r.Out.Header, h)
 				}
+			}
+			if proof != "" && macFilesProofRequest(r.In, host) {
+				r.Out.Header.Set(nativeProofHeader, proof)
 			}
 			// ReverseProxy removes Forwarded and handles HTTP Upgrade. No tailnet
 			// peer identity substitutes for Marten's existing authentication.
 		},
 		ErrorLog: log.New(io.Discard, "", 0),
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, _ error) {
+			if filesRequest(r) {
+				w.Header().Set("Cache-Control", "no-store")
+			}
+			w.WriteHeader(http.StatusBadGateway)
+		},
+		ModifyResponse: func(r *http.Response) error {
+			if filesRequest(r.Request) {
+				r.Header.Set("Cache-Control", "no-store")
+			}
+			return nil
+		},
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		files := filesRequest(r)
+		if files {
+			w.Header().Set("Cache-Control", "no-store")
+		}
+		// No request body/Trailers on any proof-bearing request. Don't proxy a
+		// nominated or delayed caller proof as a trailer on Files or status.
+		if (files || r.URL.Path == "/api/status") && (len(r.Trailer) != 0 || r.ContentLength != 0 || len(r.TransferEncoding) != 0) {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
 		if r.Host != host || r.Method == http.MethodConnect || r.URL.IsAbs() {
 			w.WriteHeader(http.StatusForbidden)
 			return
@@ -185,6 +250,17 @@ func tailnetProxy(host string, upstream *url.URL) http.Handler {
 		if !strings.HasPrefix(r.URL.Path, "/api/") {
 			w.WriteHeader(http.StatusNotFound)
 			return
+		}
+		if files {
+			// A stalled downstream must not retain a Files delivery indefinitely.
+			controller := http.NewResponseController(w)
+			if controller.SetWriteDeadline(time.Now().Add(20*time.Second)) != nil {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			defer controller.SetWriteDeadline(time.Time{})
+			// Upstream owns the final policy and can send more specific errors.
+			w.Header().Del("Cache-Control")
 		}
 		proxy.ServeHTTP(w, r)
 	})

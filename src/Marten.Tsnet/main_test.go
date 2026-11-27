@@ -3,12 +3,16 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +24,118 @@ import (
 
 const testHost = "marten.example.ts.net"
 
+const launcherFixtureHost = "files-launch-fixture.scratch.ts.net"
+
+func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == launcherFixtureHost {
+		os.Exit(runLauncherFixture(os.Args[1:]))
+	}
+	os.Exit(m.Run())
+}
+
+// Test binary only: substitute scratch loopback for tsnet enrollment/cert
+// issuance, but use the same wire parser, READY marker and stdin lease.
+func runLauncherFixture(args []string) int {
+	args, proof, ok := readBootstrap(args, os.Stdin)
+	if !ok {
+		return badConfig
+	}
+	port, err := strconv.Atoi(args[1])
+	if err != nil || port < 1 || port > 65535 {
+		return badConfig
+	}
+	if _, err := io.WriteString(os.Stdout, "READY\n"); err != nil {
+		return 1
+	}
+	client := &http.Client{Transport: &http.Transport{}, Timeout: time.Second}
+	deadline := time.Now().Add(5 * time.Second)
+	verified := false
+	for !time.Now().After(deadline) {
+		r, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:"+strconv.Itoa(port)+"/fixture/launcher", nil)
+		if err != nil {
+			return 1
+		}
+		if proof != "" {
+			r.Header.Set(nativeProofHeader, proof)
+		}
+		response, err := client.Do(r)
+		if err == nil {
+			response.Body.Close()
+			if response.StatusCode == http.StatusNoContent {
+				verified = true
+				break
+			}
+			if response.StatusCode != http.StatusTooEarly {
+				return 1
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !verified {
+		return 1
+	}
+	awaitLeaseEOF(os.Stdin)
+	if err := os.WriteFile("fixture-eof", []byte("observed\n"), 0600); err != nil {
+		return 1
+	}
+	return 0
+}
+
+func TestBootstrapProofAndLease(t *testing.T) {
+	legacy := []string{testHost, "7450", "/scratch-state", "/scratch-key"}
+	proof := strings.Repeat("a1", 32)
+	if _, got, ok := readBootstrap(legacy, nil); !ok || got != "" {
+		t.Fatal("disabled handshake tried to read a proof")
+	}
+	for _, input := range []string{"", proof[:63], strings.Repeat("G", 64)} {
+		if _, _, ok := readBootstrap(append(legacy, "mac-files-v1"), strings.NewReader(input)); ok {
+			t.Fatal("accepted truncated or malformed bootstrap")
+		}
+	}
+	if _, _, ok := readBootstrap(append(legacy, "mac-files-v2"), nil); ok {
+		t.Fatal("accepted incompatible bootstrap")
+	}
+	reader, writer := net.Pipe()
+	if err := writer.SetWriteDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal("could not arm bootstrap watchdog")
+	}
+	defer reader.Close()
+	defer writer.Close()
+	booted, exited := make(chan bool, 1), make(chan struct{})
+	go func() {
+		args, got, ok := readBootstrap(append(legacy, "mac-files-v1"), reader)
+		booted <- ok && got == proof && len(args) == 4
+		if ok {
+			awaitLeaseEOF(reader)
+		}
+		close(exited)
+	}()
+	for _, part := range []string{proof[:7], proof[7:]} {
+		if _, err := io.WriteString(writer, part); err != nil {
+			t.Fatal("bootstrap fixture pipe failed")
+		}
+	}
+	select {
+	case ok := <-booted:
+		if !ok {
+			t.Fatal("valid fixed-size bootstrap not admitted")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("bootstrap did not finish")
+	}
+	select {
+	case <-exited:
+		t.Fatal("helper lease ended before EOF")
+	default:
+	}
+	writer.Close()
+	select {
+	case <-exited:
+	case <-time.After(time.Second):
+		t.Fatal("helper lease did not end at EOF")
+	}
+}
+
 func TestRunRequiresPeerAPIServerAndLogUploadOmitted(t *testing.T) {
 	dir := t.TempDir()
 	state := filepath.Join(dir, "state")
@@ -27,7 +143,7 @@ func TestRunRequiresPeerAPIServerAndLogUploadOmitted(t *testing.T) {
 	if buildfeatures.HasLogTail || buildfeatures.HasPeerAPIServer {
 		want = badConfig
 	}
-	if code := run([]string{testHost, "7450", state, filepath.Join(dir, "missing-key")}); code != want {
+	if code := run([]string{testHost, "7450", state, filepath.Join(dir, "missing-key")}, ""); code != want {
 		t.Fatalf("startup returned %d; want %d", code, want)
 	}
 	if _, err := os.Stat(state); want == badConfig && !os.IsNotExist(err) {
@@ -164,6 +280,182 @@ func TestProxyKeepsRequestAuthAndDropsSpoofedIdentity(t *testing.T) {
 			t.Fatal("download metadata or bytes not forwarded")
 		}
 	}
+}
+
+// Opt-in cross-language fixture: the .NET test starts an isolated real Kestrel
+// server and passes synthetic credentials over a private child stdin pipe.
+func TestMacFilesProxyToKestrel(t *testing.T) {
+	if os.Getenv("MARTEN_TEST_MAC_FILES_KESTREL") != "1" {
+		t.Skip("requires scratch Kestrel launcher")
+	}
+	var fixture struct{ URL, Bearer, Ingress string }
+	if err := json.NewDecoder(os.Stdin).Decode(&fixture); err != nil {
+		t.Fatal("invalid fixture input")
+	}
+	up, err := url.Parse(fixture.URL)
+	if err != nil || up.Scheme != "http" || up.Hostname() != "127.0.0.1" || len(fixture.Ingress) != 64 {
+		t.Fatal("invalid fixture backend")
+	}
+	const host = "example.com" // covered by httptest's synthetic certificate
+	certFixture := httptest.NewTLSServer(http.NotFoundHandler())
+	defer certFixture.Close()
+	cert := &certFixture.TLS.Certificates[0]
+	start := func(proof string) *httptest.Server {
+		srv := httptest.NewUnstartedServer(tailnetProxyWithProof(host, up, proof))
+		srv.TLS = exactTLS(host, func(context.Context) (*tls.Certificate, error) { return cert, nil })
+		// StartTLS supplies its own certificate when Certificates is empty. Keep
+		// strict SNI via GetConfigForClient; the returned config uses exactTLS.
+		strict := srv.TLS
+		srv.TLS = &tls.Config{GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) { return strict, nil }}
+		srv.StartTLS()
+		t.Cleanup(srv.Close)
+		return srv
+	}
+	front := start(fixture.Ingress)
+	disabledProof := start("")
+	client := func(sni string) *http.Client {
+		tr := certFixture.Client().Transport.(*http.Transport).Clone()
+		tr.TLSClientConfig.ServerName = sni
+		tr.Proxy = nil
+		t.Cleanup(tr.CloseIdleConnections)
+		return &http.Client{Transport: tr, Timeout: 4 * time.Second}
+	}
+	native := client(host)
+	get := func(c *http.Client, address, path, authority, token, proof string, want int) (http.Header, []byte) {
+		t.Helper()
+		r, err := http.NewRequest(http.MethodGet, address+"/api/"+path, nil)
+		if err != nil {
+			t.Fatal("invalid fixture request")
+		}
+		r.Host = authority
+		if token != "" {
+			r.Header.Set("Authorization", "Bearer "+token)
+		}
+		if proof != "" {
+			r.Header.Set(nativeProofHeader, proof)
+		}
+		r.Header.Set("X-Forwarded-Proto", "https")
+		r.Header.Set("Forwarded", "proto=https;host="+host)
+		res, err := c.Do(r)
+		if want == 0 && err != nil {
+			return nil, nil
+		}
+		if err != nil || res.StatusCode != want {
+			if res != nil {
+				res.Body.Close()
+				t.Fatalf("fixture returned %d; want %d", res.StatusCode, want)
+			}
+			t.Fatal("fixture request failed")
+		}
+		defer res.Body.Close()
+		body, err := io.ReadAll(res.Body)
+		if err != nil {
+			t.Fatal("failed reading fixture response")
+		}
+		return res.Header, body
+	}
+	for _, c := range []struct{ address, path, proof string }{
+		{fixture.URL, "status", ""}, {disabledProof.URL, "status", fixture.Ingress},
+		{front.URL, "status?", ""}, {front.URL, "%73tatus", ""},
+	} {
+		_, body := get(native, c.address, c.path, host, fixture.Bearer, c.proof, 200)
+		if strings.Contains(string(body), "macFiles") {
+			t.Fatal("status advertised Files outside canonical proved ingress")
+		}
+	}
+	get(native, front.URL, "status", host, "", "", 401)
+	_, statusBody := get(native, front.URL, "status", host, fixture.Bearer, "", 200)
+	var status struct{ MacFiles bool }
+	if json.Unmarshal(statusBody, &status) != nil || !status.MacFiles {
+		t.Fatal("paired canonical status did not advertise Files")
+	}
+	control := func(method, path string, proof, trailer bool, want int, advertises bool) {
+		t.Helper()
+		var payload io.Reader
+		if trailer {
+			payload = strings.NewReader("fixture")
+		}
+		r, err := http.NewRequest(method, front.URL+"/api/"+path, payload)
+		if err != nil {
+			t.Fatal("invalid control request")
+		}
+		r.Host = host
+		r.Header.Set("Authorization", "Bearer "+fixture.Bearer)
+		if proof {
+			r.Header[nativeProofHeader] = []string{fixture.Ingress, strings.Repeat("c", 64)}
+			r.Header.Set("Connection", nativeProofHeader)
+		}
+		if trailer {
+			r.ContentLength = -1
+			r.Trailer = http.Header{nativeProofHeader: {fixture.Ingress}}
+		}
+		res, err := native.Do(r)
+		if err != nil {
+			t.Fatal("control request did not complete")
+		}
+		defer res.Body.Close()
+		body, err := io.ReadAll(res.Body)
+		if err != nil || res.StatusCode != want || strings.Contains(string(body), "macFiles") != advertises ||
+			res.Header.Get(nativeProofHeader) != "" || res.Trailer.Get(nativeProofHeader) != "" {
+			t.Fatalf("unexpected proof control response status: %d; want %d", res.StatusCode, want)
+		}
+	}
+	control(http.MethodGet, "status", true, false, 200, true)
+	control(http.MethodGet, "STATUS", true, false, 200, false)
+	control(http.MethodGet, "status", false, true, 400, false)
+	control(http.MethodGet, "mac-files/roots/", true, false, 404, false)
+	control(http.MethodPost, "mac-files/roots", true, false, 403, false)
+	const roots = "mac-files/roots"
+	get(native, fixture.URL, roots, host, fixture.Bearer, "", 403)
+	get(native, fixture.URL, roots, host, fixture.Bearer, strings.Repeat("0", 64), 403)
+	get(native, disabledProof.URL, roots, host, fixture.Bearer, fixture.Ingress, 403)
+	get(native, front.URL, "proof-control", host, fixture.Bearer, fixture.Ingress, 204)
+	get(native, front.URL, roots, "wrong.example", fixture.Bearer, "", 403)
+	get(client("wrong.example"), front.URL, roots, host, fixture.Bearer, "", 0)
+	get(native, front.URL, roots, host, "", "", 401)
+	_, body := get(native, front.URL, roots, host, fixture.Bearer, strings.Repeat("0", 64), 200)
+	var root []struct{ ID string }
+	if json.Unmarshal(body, &root) != nil || len(root) != 1 || root[0].ID == "" {
+		t.Fatal("unexpected fixture roots")
+	}
+	_, body = get(native, front.URL, "mac-files/entries/"+root[0].ID, host, fixture.Bearer, "", 200)
+	var page struct{ Entries []struct{ ID, Name string } }
+	if json.Unmarshal(body, &page) != nil || len(page.Entries) != 2 {
+		t.Fatal("unexpected fixture entries")
+	}
+	ids := make(map[string]string)
+	for _, row := range page.Entries {
+		ids[row.Name] = row.ID
+	}
+	if ids[".fixture"] == "" || ids["large"] == "" {
+		t.Fatal("unexpected fixture names")
+	}
+	h, body := get(native, front.URL, "mac-files/bytes/"+ids[".fixture"]+"/share", host, fixture.Bearer, "", 200)
+	if string(body) != "scratch bytes" || h.Get("Content-Length") != strconv.Itoa(len(body)) ||
+		h.Get("Content-Type") != "application/octet-stream" || h.Get("Content-Disposition") != "attachment" || h.Get("Cache-Control") != "no-store" {
+		t.Fatal("unexpected fixture download")
+	}
+	const chunkSize = 64 * 1024
+	r, err := http.NewRequest(http.MethodGet, front.URL+"/api/mac-files/bytes/"+ids["large"]+"/share", nil)
+	if err != nil {
+		t.Fatal("invalid active download request")
+	}
+	r.Host = host
+	r.Header.Set("Authorization", "Bearer "+fixture.Bearer)
+	res, err := native.Do(r)
+	if err != nil || res.StatusCode != 200 || res.ContentLength != 4*1024*1024 {
+		t.Fatal("active byte transfer did not start")
+	}
+	defer res.Body.Close()
+	if _, err := io.ReadFull(res.Body, make([]byte, chunkSize)); err != nil {
+		t.Fatal("failed to receive first chunk through proxy")
+	}
+	fmt.Fprintln(os.Stdout, "FIXTURE-FIRST-CHUNK")
+	if n, err := io.Copy(io.Discard, res.Body); n != 0 || err != io.ErrUnexpectedEOF {
+		t.Fatalf("expected revoked transfer to truncate before second chunk: %d bytes, %v", n, err)
+	}
+	get(native, front.URL, roots, host, fixture.Bearer, "", 401)
+	get(native, front.URL, "status", host, fixture.Bearer, "", 401)
 }
 
 func TestWebSocketUpgradePreservesAuthorization(t *testing.T) {

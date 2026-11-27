@@ -100,6 +100,8 @@ public sealed class Security {
 	}
 
 	public RequestDelegate Middleware(RequestDelegate next) => async ctx => {
+		if(ctx.GetEndpoint()?.Metadata.GetMetadata<MacFiles.Route>() != null)
+			ctx.Response.Headers.CacheControl = "no-store";
 		if(!HostAllowed(ctx) || !OriginAllowed(ctx)) {
 			ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
 			return;

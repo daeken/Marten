@@ -63,6 +63,8 @@ public sealed record Config {
 	public string? PairingOrigin { get; init; }
 	/// <summary>Opt-in embedded native transport, separate from manually configured web proxies.</summary>
 	public TailnetSettings? Tailnet { get; init; }
+	/// <summary>Opt in to whole-Mac, read-only Files for paired native clients; defaults off.</summary>
+	public bool MacFilesEnabled { get; init; }
 	/// <summary>Extra Origin allowed to call the API, e.g. the Vite dev server.</summary>
 	public string? DevOrigin { get; init; }
 

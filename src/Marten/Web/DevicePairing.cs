@@ -94,5 +94,14 @@ public sealed class DevicePairing(Home home, TimeProvider? time = null) {
 		lock(gate) return devices.TryGetValue(Hash(token!), out var device) ? device.Revoked.Token : null;
 	}
 
+	// Publication of prepared Files results and credential removal have a single ordering.
+	internal bool CommitIfActive(CancellationToken credential, Action commit) {
+		lock(gate) {
+			if(!devices.Values.Any(d => d.Revoked.Token == credential)) return false;
+			commit();
+			return true;
+		}
+	}
+
 	void Save(IEnumerable<Stored> entries) => JsonIO.Save(path, entries.ToArray());
 }
