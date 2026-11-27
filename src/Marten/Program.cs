@@ -8,6 +8,21 @@ using Marten.Tools;
 using Marten.Web;
 using Microsoft.Extensions.FileProviders;
 
+// Print a reviewed grant candidate; never read/write the runtime home for this command.
+if(args is ["files-grant", var projectId, var binding, var label]) {
+	try {
+		if(!ProjectFileSystem.Supported || !Path.IsPathFullyQualified(binding) || !ProjectFileSystem.Leaf(label) ||
+			ProjectFileSystem.Physical(binding) is not { } canonical) throw new IOException();
+		using var fd = ProjectFileSystem.Root(canonical);
+		Console.WriteLine(JsonIO.Serialize(new ProjectFileGrant(projectId, binding, canonical, ProjectFileSystem.Stat(fd).Identity, label)));
+		return;
+	} catch(Exception e) when(e is IOException or ArgumentException or UnauthorizedAccessException) {
+		Console.Error.WriteLine("Cannot pin this directory for the project files pilot.");
+		Environment.ExitCode = 1;
+		return;
+	}
+}
+
 var home = new Home();
 var config = Config.Load(home);
 AgentManager? managerRef = null;
@@ -181,6 +196,7 @@ object ProjectSummary(Project p) => new { p.Info.Id, p.Info.Name, p.Info.Created
 
 var api = app.MapGroup("/api");
 api.MapPairing(pairing, security);
+new ProjectFiles(manager.GetProject, () => manager.Config, home.Root, () => backups.Directory, restart.Stopping).Map(api);
 api.MapGet("/status", () => new {
 	auth = new { connected = auth.Connected, email = auth.Email, signingIn = auth.SigningIn, lastError = auth.LastError },
 	backends = messagesBackends.Select(BackendSummary),

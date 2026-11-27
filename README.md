@@ -31,6 +31,8 @@ Model API calls allow up to 30 seconds to connect and 120 seconds to receive res
 
 Agents outside Marten (e.g. Claude Code sessions) can create projects and message agents with a client token: see [docs/outside-agents.md](docs/outside-agents.md) and `scripts/marten-ext`.
 
+The [paired project Files pilot](docs/project-files.md) is off by default. An existing project binding is not a read grant; the host operator must approve the exact directory.
+
 The agent header and status APIs (`/api/status`, `/api/ext/status`, and `$Marten.Agents()`) show the start and end of the latest model attempt, including compaction. If a turn fails outright (for example, its model is unavailable or retries run out), Marten wakes the parent and agent assigners of unfinished tasks with a queued error message. It does not change task states.
 
 ## Resource limits

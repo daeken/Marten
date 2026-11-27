@@ -63,6 +63,8 @@ public sealed record Config {
 	public string? PairingOrigin { get; init; }
 	/// <summary>Opt-in embedded native transport, separate from manually configured web proxies.</summary>
 	public TailnetSettings? Tailnet { get; init; }
+	/// <summary>Explicit, identity-pinned grants for the paired project file pilot. Empty disables the pilot.</summary>
+	public List<ProjectFileGrant> ProjectFiles { get; init; } = [];
 	/// <summary>Extra Origin allowed to call the API, e.g. the Vite dev server.</summary>
 	public string? DevOrigin { get; init; }
 
@@ -74,3 +76,5 @@ public sealed record Config {
 
 	public void Save(Home home) => JsonIO.Save(home.ConfigPath, this);
 }
+
+public sealed record ProjectFileGrant(string ProjectId, string Binding, string PhysicalPath, string Identity, string Label);
