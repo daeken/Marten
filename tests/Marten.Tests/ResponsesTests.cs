@@ -46,12 +46,28 @@ public class ResponsesTests {
 	[Theory]
 	[InlineData("content_filter")]
 	[InlineData("content_policy_violation")]
+	[InlineData("cyber_policy")]
+	[InlineData("harassment_policy")]
+	[InlineData("invalid_prompt")]
 	public void PolicyBlocksAreRefusalsNotFailures(string code) {
 		var s = new ResponsesBackend.ResponseStream();
 		var e = Assert.Throws<Marten.Models.ModelRefusedException>(() => s.Feed(new JsonObject {
 			["type"] = "response.failed", ["response"] = new JsonObject { ["error"] = new JsonObject { ["code"] = code } },
 		}));
 		Assert.Equal(code, e.Code);
+	}
+
+	[Fact]
+	public void APolicyBlockKeepsTheProvidersOwnExplanation() {
+		var s = new ResponsesBackend.ResponseStream();
+		var e = Assert.Throws<Marten.Models.ModelRefusedException>(() => s.Feed(new JsonObject {
+			["type"] = "response.failed",
+			["response"] = new JsonObject { ["error"] = new JsonObject {
+				["code"] = "cyber_policy", ["message"] = "This request was blocked by our cyber safety policy.",
+			} },
+		}));
+		Assert.Equal("cyber_policy", e.Code);
+		Assert.Equal("This request was blocked by our cyber safety policy.", e.Reason);
 	}
 
 	[Fact]

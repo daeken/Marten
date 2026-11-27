@@ -16,7 +16,13 @@ public sealed class ResponsesBackend(ChatGptAuth auth, HttpClient http) : IModel
 	static readonly HashSet<string> ContextCodes = ["context_length_exceeded", "context_window_exceeded", "too_many_tokens"];
 	static readonly HashSet<string> QuotaCodes = ["subscription_sharing_usage_limit_exceeded", "subscription_sharing_usage_unavailable", "rate_limit_exceeded", "usage_limit_reached"];
 	// OpenAI blocks the request itself (a moderation hit) rather than failing: retrying can't help.
+	// Besides the generic codes, each safety domain has its own: cyber_policy, and its siblings.
 	static readonly HashSet<string> RefusalCodes = ["content_policy_violation", "content_filter", "policy_violation", "invalid_prompt"];
+
+	/// <summary>Whether a provider code means the request was blocked on policy grounds.</summary>
+	internal static bool IsRefusal(string? code) => code != null && (RefusalCodes.Contains(code)
+		|| code.EndsWith("_policy", StringComparison.OrdinalIgnoreCase)
+		|| code.Contains("moderation", StringComparison.OrdinalIgnoreCase));
 	const string ModelNotFoundCode = "model_not_found";
 	static InvalidOperationException ModelNotFound() => new("The selected model is unavailable or not accessible (model_not_found). Check the agent's model settings.");
 
@@ -46,16 +52,17 @@ public sealed class ResponsesBackend(ChatGptAuth auth, HttpClient http) : IModel
 
 	static async Task<Exception> ErrorFor(HttpResponseMessage response, CancellationToken ct) {
 		var status = (int) response.StatusCode;
-		string? code = null;
+		string? code = null, message = null;
 		try {
 			var body = JsonNode.Parse(await response.Content.ReadAsStringAsync(ct));
 			code = body?["error"]?["code"]?.GetValue<string>() ?? body?["error"]?["type"]?.GetValue<string>();
+			message = body?["error"]?["message"]?.GetValue<string>();
 		} catch(Exception e) when(e is not OperationCanceledException and not TransientModelException) { }
 		if(code == ModelNotFoundCode) return ModelNotFound();
 		if(status == 413 || (code != null && ContextCodes.Contains(code))) return new ContextFullException();
 		if(status == 429 || (code != null && QuotaCodes.Contains(code)))
 			return new RateLimitedException($"ChatGPT usage limit reached ({code ?? "429"}).", response.Headers.RetryAfter?.Delta);
-		if(code != null && RefusalCodes.Contains(code)) return new ModelRefusedException($"OpenAI blocked the request ({code}).", null, code);
+		if(IsRefusal(code)) return new ModelRefusedException($"OpenAI blocked the request ({code}).", message, code);
 		if(status is 401 or 403) return new NotConnectedException("ChatGPT rejected Marten's access. Sign in again.");
 		if(status >= 500) return new TransientModelException($"OpenAI returned {status}.");
 		// Keep only safe atoms from error bodies: never echo prompts or HTML back into a transcript.
@@ -228,12 +235,13 @@ public sealed class ResponsesBackend(ChatGptAuth auth, HttpClient http) : IModel
 				case "response.failed":
 				case "response.incomplete":
 				case "error":
-					var code = ev["response"]?["error"]?["code"]?.GetValue<string>() ?? ev["error"]?["code"]?.GetValue<string>()
-						?? ev["code"]?.GetValue<string>() ?? ev["response"]?["incomplete_details"]?["reason"]?.GetValue<string>();
+					var error = ev["response"]?["error"] as JsonObject ?? ev["error"] as JsonObject;
+					var code = StringValue(error?["code"]) ?? StringValue(ev["code"])
+						?? StringValue(ev["response"]?["incomplete_details"]?["reason"]);
 					if(code == ModelNotFoundCode) throw ModelNotFound();
 					if(code != null && ContextCodes.Contains(code)) throw new ContextFullException();
 					if(code != null && QuotaCodes.Contains(code)) throw new RateLimitedException($"ChatGPT usage limit reached ({code}).");
-					if(code != null && RefusalCodes.Contains(code)) throw new ModelRefusedException($"OpenAI blocked the request ({code}).", null, code);
+					if(IsRefusal(code)) throw new ModelRefusedException($"OpenAI blocked the request ({code}).", StringValue(error?["message"]), code);
 					throw new TransientModelException($"The model response {(ev["type"]!.GetValue<string>() == "response.incomplete" ? "was incomplete" : "failed")}{(code != null ? $" ({code})" : "")}.");
 			}
 			return null;

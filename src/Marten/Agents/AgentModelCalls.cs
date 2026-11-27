@@ -84,6 +84,9 @@ public sealed partial class Agent {
 	string RefusalNotice(ModelRefusedException refused, string from, string to) {
 		var reason = !string.IsNullOrWhiteSpace(refused.Reason) ? refused.Reason
 			: !string.IsNullOrWhiteSpace(refused.Code) ? refused.Code : "the provider gave no reason";
+		// Keep the provider's code visible: it is what Sera and the orchestrator will search for.
+		if(refused.Code is { Length: > 0 } code && !string.Equals(code, reason, StringComparison.OrdinalIgnoreCase))
+			reason = $"{reason} [{code}]";
 		var options = Info.Kind switch {
 			AgentKind.Orchestrator =>
 				$"- Spawn a fresh agent with more context (spawn_agent) and hand the work over with a fuller brief, so it is less likely to be flagged again.\n" +
