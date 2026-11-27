@@ -90,11 +90,13 @@ instance or run another deploy/start command alongside it.
    This keeps existing server log permissions, with normal umask semantics if
    the log is newly created. The UI and authenticated status endpoint must
    respond and the new PID must be the only listener. If `lsof` reports the
-   new PID alongside another PID (for example, a subprocess that inherited the
-   socket), the helper waits within its startup budget for sole ownership. It
-   does not probe HTTP while ownership is shared. A listener without the new
-   PID, or shared ownership that persists, is a startup failure. Read the
-   detached helper log and the mode-0600, atomically replaced `$job/result.json` (`running`,
+   new PID alongside other PIDs, the helper tolerates only verified same-user
+   direct children, such as a subprocess that inherited the socket. It allows
+   at most two seconds from the first shared observation, within the existing
+   startup budget, and does not probe HTTP while ownership is shared. A
+   listener without the new PID, an unrelated listener, or persistent sharing
+   fails startup. Read the detached helper log and the mode-0600, atomically
+   replaced `$job/result.json` (`running`,
    `ok`, `drain-timeout`, or `failed`). Report the merged changes, observed
    restart result and any follow-up to Sera. An abrupt helper interruption may
    leave `running`; inspect the host before taking any further action.
