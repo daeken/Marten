@@ -238,9 +238,18 @@ final class MacFilesClientTests: XCTestCase, @unchecked Sendable {
         defer { copy.discardUnpublished() }
         var request = URLRequest(url: endpoint.url.appending(path: "api/mac-files/bytes/fixture/share"))
         request.setValue("Bearer fake-paired-fixture", forHTTPHeaderField: "Authorization")
+        let finished = expectation(description: "URLSession byte reader completed")
+        let outcome = CancellationOutcome()
         let transfer = Task { [request] in
-            try await route.readMacFiles(request, policy: .init(limit: ParkedURLProtocol.exact, exact: ParkedURLProtocol.exact), staging: copy.url)
+            do {
+                _ = try await route.readMacFiles(request, policy: .init(limit: ParkedURLProtocol.exact, exact: ParkedURLProtocol.exact), staging: copy.url)
+                outcome.save(.success(()))
+            } catch {
+                outcome.save(.failure(error))
+            }
+            finished.fulfill()
         }
+        defer { transfer.cancel() }
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .seconds(5))
         var stagedSize = 0
@@ -250,10 +259,37 @@ final class MacFilesClientTests: XCTestCase, @unchecked Sendable {
             try await Task.sleep(for: .milliseconds(10))
         }
         transfer.cancel()
+        let watchdog = Task.detached {
+            do { try await Task.sleep(for: .seconds(2)) } catch { return }
+            if outcome.markWatchdogIfUnfinished() { transport.invalidate() }
+        }
+        defer { watchdog.cancel() }
         XCTAssertGreaterThan(stagedSize, 64 * 1024, "URLSession never staged two chunks")
-        do { _ = try await transfer.value; XCTFail("cancelled URLSession body returned successfully") }
-        catch let error as URLError { XCTAssertEqual(error.code, .cancelled) }
-        catch { XCTAssertTrue(error is CancellationError, "unexpected error \(error)") }
+        await fulfillment(of: [finished], timeout: 4)
+        let (result, watchdogFired) = outcome.snapshot()
+        XCTAssertFalse(watchdogFired, "task cancellation did not finish before the isolated URLSession watchdog")
+        guard let result else { XCTFail("URLSession reader never returned"); return }
+        switch result {
+        case .success: XCTFail("cancelled URLSession body returned successfully")
+        case .failure(let error as URLError): XCTAssertEqual(error.code, .cancelled)
+        case .failure(let error): XCTAssertTrue(error is CancellationError, "unexpected error \(error)")
+        }
+    }
+
+    private final class CancellationOutcome: @unchecked Sendable {
+        private let lock = NSLock()
+        private var result: Result<Void, any Error>?
+        private var watchdogFired = false
+
+        func save(_ result: Result<Void, any Error>) { lock.withLock { self.result = result } }
+        func markWatchdogIfUnfinished() -> Bool {
+            lock.withLock {
+                guard result == nil else { return false }
+                watchdogFired = true
+                return true
+            }
+        }
+        func snapshot() -> (Result<Void, any Error>?, Bool) { lock.withLock { (result, watchdogFired) } }
     }
 
     private final class ParkedURLProtocol: URLProtocol, @unchecked Sendable {
