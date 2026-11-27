@@ -210,8 +210,8 @@ struct WorkspaceView: View {
         case .macFiles(let page):
             if let macFiles, let macFilesSession, let endPairedSession {
                 MacFilesView(service: macFiles, page: page, scope: macFilesSession.key,
-                             active: networkActive && path.last == destination, isCurrent: {
-                    macFilesSession.isCurrent() && UIApplication.shared.applicationState == .active && path.last == destination &&
+                             foregroundEpoch: macFilesSession.foregroundEpoch, active: networkActive && path.last == destination, isCurrent: {
+                    macFilesSession.isCurrent() && macFilesSession.canTransfer() && path.last == destination &&
                     controls.loadedRoute == macFilesSession.key.route && controls.statusError == nil &&
                     controls.status?.macFiles == true
                 }, endSession: endPairedSession).id(MacFilesView.Identity(scope: macFilesSession.key, page: page))

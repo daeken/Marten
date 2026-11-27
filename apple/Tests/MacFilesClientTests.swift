@@ -132,10 +132,10 @@ final class MacFilesClientTests: XCTestCase, @unchecked Sendable {
 
         let activity = try XCTUnwrap(key.share(MacFilesStagedCopy.create(leaf: "test"),
                                                current: key, destinationIsCurrent: true))
-        var lease = activity.leaseForActivity()
+        var lease = activity.leaseForActivity(current: key, destinationIsCurrent: true)
         let path = try XCTUnwrap(lease).url.path
         activity.requestCleanup() // expiry, navigation, or revocation only dismisses
-        XCTAssertNil(activity.leaseForActivity())
+        XCTAssertNil(activity.leaseForActivity(current: key, destinationIsCurrent: true))
         withExtendedLifetime(lease) {
             XCTAssertTrue(FileManager.default.fileExists(atPath: path))
         }
@@ -143,21 +143,62 @@ final class MacFilesClientTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(FileManager.default.fileExists(atPath: path))
     }
 
+    @MainActor func testAcquisitionRevalidatesEpochAndDelayedCompletionKeepsNewShare() throws {
+        let scope = MacFilesSession.Key(endpoint: endpoint, pairedSession: UUID(), route: UUID())
+        let original = MacFilesWork(scope: scope, destination: .file(row(bytes: 4)), generation: UUID(), foregroundEpoch: UUID())
+        var changed = original
+        changed.foregroundEpoch = UUID()
+        let old = try XCTUnwrap(original.share(MacFilesStagedCopy.create(leaf: "old"), current: original, destinationIsCurrent: true))
+        XCTAssertNil(old.leaseForActivity(current: changed, destinationIsCurrent: true))
+        XCTAssertNil(old.leaseForActivity(current: original, destinationIsCurrent: false))
+        var oldLease = old.leaseForActivity(current: original, destinationIsCurrent: true)
+        let oldPath = try XCTUnwrap(oldLease).url.path
+        var new = try changed.share(MacFilesStagedCopy.create(leaf: "new"), current: changed, destinationIsCurrent: true)
+        XCTAssertNotNil(new)
+        let newID = new?.id
+        old.finish(current: &new) // late system dismissal from the previous share
+        XCTAssertEqual(new?.id, newID)
+        withExtendedLifetime(oldLease) { XCTAssertTrue(FileManager.default.fileExists(atPath: oldPath)) }
+        oldLease = nil
+        XCTAssertFalse(FileManager.default.fileExists(atPath: oldPath))
+    }
+
     func testCancelledAfterWritingAChunkDeletesPartialShare() async throws {
         let latch = Latch()
         let fixture = Reader(mode: .midBody(latch))
         let client = try client(fixture)
-        let entry = row(bytes: 64 * 1024 + 1)
+        let entry = row(bytes: 128 * 1024 + 1)
         let transfer = Task { try await client.share(entry) }
         await latch.waitUntilParked()
         let staging = await fixture.staging
         let partial = try XCTUnwrap(staging)
         let observed = try Data(contentsOf: partial).count
-        XCTAssertEqual(observed, 64 * 1024)
+        XCTAssertEqual(observed, 128 * 1024)
         transfer.cancel()
         await latch.release()
         do { _ = try await transfer.value; XCTFail("cancelled staged body published") }
         catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: partial.path))
+    }
+
+    @MainActor func testSupersededRouteDiscardsCompletedShareAfterStagingMidBody() async throws {
+        let latch = Latch()
+        let fixture = Reader(mode: .midBody(latch))
+        let client = try client(fixture)
+        let entry = row(bytes: 128 * 1024 + 1)
+        let started = MacFilesWork(scope: .init(endpoint: endpoint, pairedSession: UUID(), route: UUID()),
+                                   destination: .file(entry), generation: UUID(), foregroundEpoch: UUID())
+        let transfer = Task { try await client.share(entry) }
+        await latch.waitUntilParked()
+        let staging = await fixture.staging
+        let partial = try XCTUnwrap(staging)
+        XCTAssertEqual(try Data(contentsOf: partial).count, 128 * 1024)
+        let newRoute = MacFilesWork(scope: .init(endpoint: endpoint, pairedSession: started.scope.pairedSession, route: UUID()),
+                                    destination: started.destination, generation: started.generation,
+                                    foregroundEpoch: started.foregroundEpoch)
+        await latch.release()
+        let finished = try await transfer.value
+        XCTAssertNil(started.share(finished, current: newRoute, destinationIsCurrent: true))
         XCTAssertFalse(FileManager.default.fileExists(atPath: partial.path))
     }
 
@@ -202,8 +243,8 @@ final class MacFilesClientTests: XCTestCase, @unchecked Sendable {
         func release() { parked?.resume(); parked = nil }
         func next() async -> UInt8? {
             emitted += 1
-            if emitted == 64 * 1024 + 1 { await park() }
-            return emitted <= 64 * 1024 + 1 ? 1 : nil
+            if emitted == 128 * 1024 + 1 { await park() }
+            return emitted <= 128 * 1024 + 1 ? 1 : nil
         }
     }
 

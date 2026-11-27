@@ -11,6 +11,7 @@ struct MacFilesView: View {
     let service: MacFilesClient
     let page: MacFilesDestination
     let scope: MacFilesSession.Key
+    let foregroundEpoch: UUID?
     let active: Bool
     let isCurrent: @MainActor () -> Bool
     let endSession: () -> Void
@@ -26,7 +27,7 @@ struct MacFilesView: View {
     @State private var staged: MacFilesShare?
     @State private var valid = UUID()
 
-    private var work: MacFilesWork { .init(scope: scope, destination: page, generation: valid) }
+    private var work: MacFilesWork { .init(scope: scope, destination: page, generation: valid, foregroundEpoch: foregroundEpoch) }
     private var identity: Identity { .init(scope: scope, page: page) }
     private func permits(_ started: MacFilesWork) -> Bool {
         started.permits(work, destinationIsCurrent: isCurrent())
@@ -86,9 +87,15 @@ struct MacFilesView: View {
                 if export != nil { ProgressView("Preparing copy…") }
             }
         }
-        .navigationTitle(title)
+        .privacySensitive()
+        .overlay {
+            if phase != .active {
+                Rectangle().fill(.background).ignoresSafeArea().accessibilityHidden(true)
+            }
+        }
+        .navigationTitle(phase == .active ? title : "Mac Files")
         .toolbar { Button("Refresh files", systemImage: "arrow.clockwise") { refresh = UUID() }.disabled(!active) }
-        .task(id: ReadKey(identity: identity, active: active, refresh: refresh)) {
+        .task(id: ReadKey(identity: identity, foregroundEpoch: foregroundEpoch, active: active, refresh: refresh)) {
             // UIKit can make the scene temporarily inactive as the share activity
             // takes focus. Cancel network work and clear previews, not the handoff.
             reset(keepShare: phase != .background && staged != nil)
@@ -136,13 +143,12 @@ struct MacFilesView: View {
             dismissShare() // Drop app ownership, but let UIKit finish with its lease.
         }
         .sheet(item: $staged) { share in
-            if let lease = share.leaseForActivity() {
-                ActivitySheet(lease: lease) {
-                    share.requestCleanup()
-                    if staged === share { staged = nil }
-                }
-                .onDisappear { share.requestCleanup() }
-            }
+            ActivitySheet(acquire: {
+                share.leaseForActivity(current: work, destinationIsCurrent: staged === share && isCurrent())
+            }, completed: {
+                share.finish(current: &staged)
+            })
+            .onDisappear { share.requestCleanup() }
         }
     }
 
@@ -150,7 +156,7 @@ struct MacFilesView: View {
         MacFilesWork(scope: scope, destination: page, generation: refresh).job(staged?.id)
     }
 
-    private struct ReadKey: Hashable { let identity: Identity; let active: Bool; let refresh: UUID }
+    private struct ReadKey: Hashable { let identity: Identity; let foregroundEpoch: UUID?; let active: Bool; let refresh: UUID }
 
     private var title: String { switch page {
     case .roots: "Mac Files"
@@ -222,7 +228,9 @@ struct MacFilesView: View {
         try Task.checkCancellation()
         let decode = Task.detached(priority: .userInitiated) {
             try Task.checkCancellation()
-            return Self.decodePreview(bytes, sourceSize: row.bytes ?? 0, purpose: purpose)
+            let decoded = Self.decodePreview(bytes, sourceSize: row.bytes ?? 0, purpose: purpose)
+            try Task.checkCancellation()
+            return decoded
         }
         return try await withTaskCancellationHandler { try await decode.value } onCancel: { decode.cancel() }
     }
@@ -255,10 +263,16 @@ struct MacFilesView: View {
 }
 
 private struct ActivitySheet: UIViewControllerRepresentable {
-    let lease: MacFilesShare.Lease
-    let completed: () -> Void
+    let acquire: @MainActor () -> MacFilesShare.Lease?
+    let completed: @MainActor () -> Void
 
-    func makeUIViewController(context: Context) -> UIActivityViewController {
+    func makeUIViewController(context: Context) -> UIViewController {
+        // Check live foreground readiness, route and destination immediately before
+        // giving UIKit a URL. The presentation request may have been queued earlier.
+        guard let lease = acquire() else {
+            Task { @MainActor in completed() }
+            return UIViewController()
+        }
         let item = ActivityFile(lease: lease)
         let controller = UIActivityViewController(activityItems: [item], applicationActivities: nil)
         // The actual controller (not just the SwiftUI sheet) also owns the lease.
@@ -267,7 +281,7 @@ private struct ActivitySheet: UIViewControllerRepresentable {
         }
         return controller
     }
-    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
+    func updateUIViewController(_ controller: UIViewController, context: Context) {}
 
     private final class ActivityFile: NSObject, UIActivityItemSource {
         let lease: MacFilesShare.Lease

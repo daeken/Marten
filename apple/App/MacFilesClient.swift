@@ -8,7 +8,9 @@ struct MacFilesSession {
     }
 
     let key: Key
+    let foregroundEpoch: UUID?
     let isCurrent: @MainActor () -> Bool
+    let canTransfer: @MainActor () -> Bool
 }
 
 struct MacFileRoot: Decodable, Identifiable, Hashable, Sendable {
@@ -39,6 +41,7 @@ struct MacFilesWork: Hashable, Sendable {
     let scope: MacFilesSession.Key
     let destination: MacFilesDestination
     let generation: UUID
+    var foregroundEpoch: UUID? = nil
 
     struct Job<ID: Hashable>: Hashable {
         let work: MacFilesWork
@@ -56,7 +59,7 @@ struct MacFilesWork: Hashable, Sendable {
             copy.discardUnpublished()
             return nil
         }
-        return MacFilesShare(copy)
+        return MacFilesShare(copy, work: self)
     }
 }
 
@@ -92,10 +95,19 @@ struct MacFilesListing {
 @MainActor final class MacFilesShare: Identifiable {
     let id = UUID()
     private var copy: MacFilesStagedCopy?
+    private let work: MacFilesWork
 
-    init(_ copy: MacFilesStagedCopy) { self.copy = copy }
+    init(_ copy: MacFilesStagedCopy, work: MacFilesWork) { self.copy = copy; self.work = work }
 
-    func leaseForActivity() -> Lease? { copy.map(Lease.init) }
+    func leaseForActivity(current: MacFilesWork, destinationIsCurrent: Bool) -> Lease? {
+        guard work.permits(current, destinationIsCurrent: destinationIsCurrent) else { return nil }
+        return copy.map(Lease.init)
+    }
+
+    func finish(current: inout MacFilesShare?) {
+        requestCleanup()
+        if current === self { current = nil }
+    }
 
     /// Marks cleanup pending: the copy survives only if the activity already owns it.
     func requestCleanup() { copy = nil }

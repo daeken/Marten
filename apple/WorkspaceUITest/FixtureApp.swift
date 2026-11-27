@@ -12,7 +12,8 @@ import SwiftUI
         return WorkspaceView(api: API(endpoint: endpoint, token: String(repeating: "a", count: 64), transport: transport),
                       showServers: {}, endPairedSession: files ? {} : nil, routeID: route, networkActive: true,
                       composers: composers, macFilesSession: files ? .init(
-                        key: .init(endpoint: endpoint, pairedSession: route, route: route), isCurrent: { true }) : nil)
+                        key: .init(endpoint: endpoint, pairedSession: route, route: route), foregroundEpoch: route,
+                        isCurrent: { true }, canTransfer: { true }) : nil)
             #if os(macOS)
             .frame(minWidth: 1000, minHeight: 650)
             #endif

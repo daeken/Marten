@@ -25,7 +25,7 @@ struct MartenApp: App {
 struct RootView: View {
     @Bindable var connections: Connections
     @Environment(\.scenePhase) private var phase
-    @State private var foregroundReady = false
+    @State private var foregroundEpoch: UUID?
 
     var body: some View {
         Group {
@@ -34,14 +34,14 @@ struct RootView: View {
                               endPairedSession: connections.pairingEnabled && api.endpoint.url.scheme == "https"
                                   ? { connections.endRejectedPairedSession(api) } : nil,
                               routeID: connections.transportGeneration,
-                              networkActive: phase == .active && foregroundReady && !connections.busy && connections.routeUsable,
+                              networkActive: phase == .active && foregroundEpoch != nil && !connections.busy && connections.routeUsable,
                               composers: connections.composers, macFilesSession: macFilesSession(api))
                     .id(connections.workspaceID)
             } else {
                 ServerScreen(connections: connections)
             }
         }
-        .onChange(of: phase) { if phase != .active { foregroundReady = false } }
+        .onChange(of: phase) { if phase != .active { foregroundEpoch = nil } }
         .task(id: phase) {
             guard phase == .active else { return }
             // A cancelled recovery may still be closing the old node.
@@ -51,7 +51,7 @@ struct RootView: View {
             }
             guard !Task.isCancelled else { return }
             await connections.foreground()
-            if !Task.isCancelled { foregroundReady = true }
+            if !Task.isCancelled { foregroundEpoch = UUID() }
         }
         .sheet(isPresented: $connections.showServers) {
             ServerScreen(connections: connections)
@@ -66,11 +66,14 @@ struct RootView: View {
         guard connections.pairingEnabled, MacFilesClient(api: api) != nil else { return nil }
         let key = MacFilesSession.Key(endpoint: api.endpoint, pairedSession: connections.workspaceID,
                                       route: connections.transportGeneration)
-        return MacFilesSession(key: key) {
+        let epoch = foregroundEpoch
+        return MacFilesSession(key: key, foregroundEpoch: epoch, isCurrent: {
             connections.connected?.endpoint == key.endpoint && connections.connected?.token == api.token &&
             connections.workspaceID == key.pairedSession && connections.transportGeneration == key.route &&
             connections.routeUsable && !connections.busy
-        }
+        }, canTransfer: {
+            epoch != nil && foregroundEpoch == epoch && UIApplication.shared.applicationState == .active
+        })
         #else
         return nil
         #endif
