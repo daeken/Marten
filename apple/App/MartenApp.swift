@@ -5,6 +5,10 @@ import UniformTypeIdentifiers
 struct MartenApp: App {
     @State private var connections = Connections()
 
+    #if os(iOS)
+    init() { MacFilesStagedCopy.sweep() }
+    #endif
+
     var body: some Scene {
         WindowGroup {
             RootView(connections: connections)
@@ -21,35 +25,32 @@ struct MartenApp: App {
 struct RootView: View {
     @Bindable var connections: Connections
     @Environment(\.scenePhase) private var phase
-    @State private var foregroundReady = false
-    @State private var artifactForeground = UUID()
+    @State private var foregroundEpoch: UUID?
 
     var body: some View {
         Group {
             if let api = connections.connected {
                 let generation = connections.transportGeneration
                 let workspace = connections.workspaceID
-                let foreground = artifactForeground
+                let foreground = foregroundEpoch
                 WorkspaceView(api: api, showServers: { connections.showServers = true },
                               endPairedSession: connections.pairingEnabled && api.endpoint.url.scheme == "https"
                                   ? { connections.endRejectedPairedSession(api) } : nil,
                               routeID: connections.transportGeneration,
-                              networkActive: phase == .active && foregroundReady && !connections.busy && connections.routeUsable,
+                              networkActive: phase == .active && foregroundEpoch != nil && !connections.busy && connections.routeUsable,
                               composers: connections.composers,
                               artifactSessionIsCurrent: {
-                    phase == .active && foregroundReady && artifactForeground == foreground
+                    phase == .active && foreground != nil && foregroundEpoch == foreground
                         && !connections.busy && connections.routeUsable && !connections.showServers
                         && connections.workspaceID == workspace && connections.transportGeneration == generation
                         && connections.connected?.endpoint == api.endpoint && connections.connected?.token == api.token
-                })
+                }, macFilesSession: macFilesSession(api))
                     .id(connections.workspaceID)
             } else {
                 ServerScreen(connections: connections)
             }
         }
-        .onChange(of: phase) {
-            if phase != .active { foregroundReady = false; artifactForeground = UUID() }
-        }
+        .onChange(of: phase) { if phase != .active { foregroundEpoch = nil } }
         .task(id: phase) {
             guard phase == .active else { return }
             // A cancelled recovery may still be closing the old node.
@@ -59,7 +60,7 @@ struct RootView: View {
             }
             guard !Task.isCancelled else { return }
             await connections.foreground()
-            if !Task.isCancelled { foregroundReady = true }
+            if !Task.isCancelled { foregroundEpoch = UUID() }
         }
         .sheet(isPresented: $connections.showServers) {
             ServerScreen(connections: connections)
@@ -68,6 +69,25 @@ struct RootView: View {
                 #endif
         }
     }
+
+    private func macFilesSession(_ api: API) -> MacFilesSession? {
+        #if os(iOS)
+        guard connections.pairingEnabled, MacFilesClient(api: api) != nil else { return nil }
+        let key = MacFilesSession.Key(endpoint: api.endpoint, pairedSession: connections.workspaceID,
+                                      route: connections.transportGeneration)
+        let epoch = foregroundEpoch
+        return MacFilesSession(key: key, foregroundEpoch: epoch, isCurrent: {
+            connections.connected?.endpoint == key.endpoint && connections.connected?.token == api.token &&
+            connections.workspaceID == key.pairedSession && connections.transportGeneration == key.route &&
+            connections.routeUsable && !connections.busy && !connections.showServers
+        }, canTransfer: {
+            phase == .active && epoch != nil && foregroundEpoch == epoch && UIApplication.shared.applicationState == .active
+        })
+        #else
+        return nil
+        #endif
+    }
+
 }
 
 struct ServerScreen: View {

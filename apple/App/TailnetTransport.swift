@@ -3,7 +3,7 @@ import Foundation
 
 /// Applies an exact authority check before handing a request to the proxy,
 /// including rejecting loopback names URLSession may bypass the proxy for.
-struct TailnetTransport: EventTransport {
+struct TailnetTransport: EventTransport, ArtifactByteTransport, MacFilesTransport {
     private let endpoint: Endpoint
     private let transport: any Transport
 
@@ -20,6 +20,22 @@ struct TailnetTransport: EventTransport {
     func boundedData(for request: URLRequest, limit: Int) async throws -> (Data, HTTPURLResponse) {
         try check(request, events: false)
         return try await transport.boundedData(for: request, limit: limit)
+    }
+
+    func supportsMacFiles(at endpoint: Endpoint) -> Bool {
+        self.endpoint == endpoint && transport is any MacFilesTransport
+    }
+
+    func readMacFiles(_ request: URLRequest, policy: MacFilesRead, staging: URL?) async throws -> Data {
+        try check(request, events: false)
+        guard let url = request.url, url.path.hasPrefix("/api/mac-files/"), url.query == nil,
+              request.httpMethod == "GET", request.httpBody == nil, request.httpBodyStream == nil else {
+            throw ClientError.origin
+        }
+        guard let header = request.value(forHTTPHeaderField: "Authorization"), header.hasPrefix("Bearer "),
+              API.validToken(String(header.dropFirst(7))) else { throw ClientError.unauthorized }
+        guard let reader = transport as? any MacFilesTransport else { throw ClientError.tailnetNotReady }
+        return try await reader.readMacFiles(request, policy: policy, staging: staging)
     }
 
     func artifactBytes(for request: URLRequest, limit: Int) async throws -> (Data, HTTPURLResponse) {

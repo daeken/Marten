@@ -138,7 +138,7 @@ protocol ArtifactByteTransport: Transport {
     func artifactBytes(for request: URLRequest, limit: Int) async throws -> (Data, HTTPURLResponse)
 }
 
-struct URLSessionTransport: EventTransport, ArtifactByteTransport {
+struct URLSessionTransport: EventTransport, ArtifactByteTransport, MacFilesTransport {
     private let session: URLSession
     private let notebookSession: URLSession
     static let notebookRerunTimeout: TimeInterval = 180
@@ -207,6 +207,14 @@ struct URLSessionTransport: EventTransport, ArtifactByteTransport {
         return (data, http)
     }
 
+    func readMacFiles(_ request: URLRequest, policy: MacFilesRead, staging: URL?) async throws -> Data {
+        let (bytes, response) = try await session.bytes(for: request)
+        defer { bytes.task.cancel() }
+        guard let http = response as? HTTPURLResponse else { throw ClientError.malformed }
+        try policy.check(http, for: request)
+        return try await policy.consume(bytes, staging: staging)
+    }
+
     func artifactBytes(for request: URLRequest, limit: Int) async throws -> (Data, HTTPURLResponse) {
         try await boundedData(for: request, limit: limit)
     }
@@ -241,6 +249,7 @@ struct ServerStatus: Decodable, Sendable {
     let inbox: Int?
     let openQuestions: Int?
     let paused: Bool?
+    let macFiles: Bool?
 }
 
 struct Project: Decodable, Identifiable, Sendable {

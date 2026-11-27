@@ -6,10 +6,14 @@ import SwiftUI
     }
 
     private var content: some View {
-        WorkspaceView(api: API(endpoint: try! Endpoint("https://sidebar-fixture.example.ts.net"),
-                               token: String(repeating: "a", count: 64), transport: fixture),
-                      showServers: {}, endPairedSession: nil, routeID: route, networkActive: true,
-                      composers: composers)
+        let endpoint = try! Endpoint("https://sidebar-fixture.example.ts.net")
+        let files = ProcessInfo.processInfo.environment["MARTEN_FIXTURE_FILES"] != nil
+        let transport: any Transport = files ? try! TailnetTransport(endpoint: endpoint, transport: fixture) : fixture
+        return WorkspaceView(api: API(endpoint: endpoint, token: String(repeating: "a", count: 64), transport: transport),
+                      showServers: {}, endPairedSession: files ? {} : nil, routeID: route, networkActive: true,
+                      composers: composers, macFilesSession: files ? .init(
+                        key: .init(endpoint: endpoint, pairedSession: route, route: route), foregroundEpoch: route,
+                        isCurrent: { true }, canTransfer: { true }) : nil)
             #if os(macOS)
             .frame(minWidth: 1000, minHeight: 650)
             #endif
@@ -19,6 +23,9 @@ import SwiftUI
     @State private var composers = ConversationComposers()
 
     init() {
+        #if os(iOS)
+        MacFilesStagedCopy.sweep()
+        #endif
         // This app has its own bundle and preferences. Reset only on the
         // first launch of a test, not the relaunch that checks persistence.
         if ProcessInfo.processInfo.environment["MARTEN_FIXTURE_RESET"] == "1" {
@@ -32,7 +39,7 @@ private struct FixtureMessage: Decodable {
     let mode: String
 }
 
-actor Fixture: Transport {
+actor Fixture: MacFilesTransport {
     private var latestReads: [String: Int] = [:]
     private var queuedPending = true
     private var stalePending = true
@@ -43,6 +50,37 @@ actor Fixture: Transport {
         defer { try? file.close() }
         try file.seekToEnd()
         try file.write(contentsOf: Data("\(line)\n".utf8))
+    }
+
+    private func fileReply(_ request: URLRequest, _ url: URL) throws -> (Data, HTTPURLResponse) {
+        let tail = url.path.replacingOccurrences(of: "/api/mac-files/", with: "")
+        guard request.httpMethod == "GET", request.value(forHTTPHeaderField: "Authorization") == "Bearer " + String(repeating: "a", count: 64),
+              url.host == "sidebar-fixture.example.ts.net", url.query == nil else { throw ClientError.unauthorized }
+        try record("files \(tail)")
+        let text = "# Fixture readme\nA private local file."
+        let binary = Data([0, 1, 2, 3])
+        var data = Data()
+        var mime = "application/json"
+        var status = 200
+        switch tail {
+        case "roots": data = Data(#"[{"id":"demo-root","label":"Home"},{"id":"volume","label":"External Volume"}]"#.utf8)
+        case "entries/demo-root": data = Data(#"{"entries":[{"id":"docs","name":"docs","directory":true,"modified":"2026-01-01T00:00:00Z"}],"next":"demo-next"}"#.utf8)
+        case "entries/demo-next": data = Data(#"{"entries":[{"id":"binary","name":"sample.bin","directory":false,"bytes":4,"modified":"2026-01-01T00:00:00Z"}]}"#.utf8)
+        case "entries/docs": data = Data(#"{"entries":[{"id":"readme","name":"README.md","directory":false,"bytes":\#(text.utf8.count),"modified":"2026-01-01T00:00:00Z"}]}"#.utf8)
+        case "bytes/readme/text", "bytes/readme/share": data = Data(text.utf8); mime = "application/octet-stream"
+        case "bytes/binary/share": data = binary; mime = "application/octet-stream"
+        default: status = 404
+        }
+        return (data, HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: ["Content-Type": mime, "Content-Length": String(data.count), "Content-Disposition": "attachment"])!)
+    }
+    func readMacFiles(_ request: URLRequest, policy: MacFilesRead, staging: URL?) async throws -> Data {
+        guard let url = request.url else { throw ClientError.origin }
+        let (data, response) = try fileReply(request, url)
+        try policy.check(response, for: request)
+        return try await policy.consume(AsyncStream { continuation in
+            for byte in data { continuation.yield(byte) }
+            continuation.finish()
+        }, staging: staging)
     }
 
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
@@ -60,9 +98,10 @@ actor Fixture: Transport {
             let leadID = ""
             let lead = ""
             #endif
+            let macFiles = ProcessInfo.processInfo.environment["MARTEN_FIXTURE_FILES"] == "1" ? "true" : "false"
             let alphaDirectory = compactChrome ? #", "workingDirectory":"/fixture/alpha""# : ""
             body = #"""
-            {"paused":false,"inbox":5,"openQuestions":2,
+            {"paused":false,"inbox":5,"openQuestions":2,"macFiles":\#(macFiles),
             "projects":[{"id":"p","name":"Fixture Project"\#(leadID)},{"id":"q","name":"Second Project"}],"agents":[
               {"id":"a","name":"Standalone Alpha","kind":"chat","status":"idle","paused":false,"pausedEffective":false\#(alphaDirectory)},
               {"id":"b","name":"Project Beta","kind":"task","projectId":"p","status":"idle","paused":false,"pausedEffective":false},
