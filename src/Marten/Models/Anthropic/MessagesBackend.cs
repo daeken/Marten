@@ -136,7 +136,7 @@ public sealed class MessagesBackend(MessagesProvider provider, Home home, Func<s
 			AnthropicBadRequestException when message.Contains("prompt is too long", StringComparison.OrdinalIgnoreCase)
 				|| message.Contains("context", StringComparison.OrdinalIgnoreCase) && message.Contains("exceed", StringComparison.OrdinalIgnoreCase)
 				=> new ContextFullException(),
-			// A moderation block is not a failure of the request: another provider may answer it.
+			// A moderation block is a terminal refusal, not a retryable failure.
 			AnthropicBadRequestException when message.Contains("content filtering", StringComparison.OrdinalIgnoreCase)
 				|| message.Contains("blocked by content", StringComparison.OrdinalIgnoreCase)
 				=> new ModelRefusedException($"{provider.Label} blocked the request.", Trim(message), "content_filter"),

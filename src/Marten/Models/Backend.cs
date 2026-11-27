@@ -34,13 +34,12 @@ public sealed class RateLimitedException(string message, TimeSpan? retryAfter = 
 
 /// <summary>
 /// The provider blocked the request itself on policy grounds: a content filter, a moderation block,
-/// or a refusal the model was made to produce. It is not a failure of the request, so retrying the
-/// same model is pointless; the caller may move the agent to another model instead.
+/// or a refusal stop. This is terminal for the turn; do not retry the request on any model.
 /// </summary>
 public sealed class ModelRefusedException(string message, string? reason = null, string? code = null) : Exception(message) {
-	/// <summary>Why, in the provider's own words: its refusal sentence, or the code it gave.</summary>
+	/// <summary>Provider-supplied explanation. Not safe to include in runtime messages or diagnostic files.</summary>
 	public string? Reason { get; } = reason;
-	/// <summary>The provider's short machine code for the block, e.g. content_filter, when there is one.</summary>
+	/// <summary>Untrusted provider code for the block, e.g. content_filter. Allowlist before displaying.</summary>
 	public string? Code { get; } = code;
 }
 

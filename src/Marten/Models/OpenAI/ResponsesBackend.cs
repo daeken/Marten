@@ -210,7 +210,7 @@ public sealed class ResponsesBackend(ChatGptAuth auth, HttpClient http) : IModel
 					text.Append(delta);
 					return delta;
 				case "response.refusal.delta":
-					// Not streamed to the UI: a fallback model answers instead.
+					// Not streamed to the UI: the turn reports a redacted refusal.
 					refusal.Append(ev["delta"]?.GetValue<string>());
 					break;
 				case "response.output_item.added":
