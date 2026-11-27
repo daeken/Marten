@@ -33,7 +33,7 @@ public sealed class TailnetTransport(Config config) {
 			Path.Combine(home.Secrets, "tailnet-state"), Path.Combine(home.Secrets, "tailnet-auth-key") })
 			start.ArgumentList.Add(arg);
 		try {
-			using var process = Process.Start(start)!;
+			using var process = Marten.Tools.ChildProcessWatcher.StartExcluded(start)!;
 			var output = DrainOutputAsync(process.StandardOutput.BaseStream, host, log, stopping);
 			var errors = process.StandardError.BaseStream.CopyToAsync(Stream.Null, stopping);
 			try {

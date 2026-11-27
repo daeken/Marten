@@ -136,6 +136,7 @@ if(config.Tailnet != null) builder.WebHost.ConfigureKestrel(kestrel => {
 	kestrel.Listen(System.Net.IPAddress.Loopback, config.Port);
 });
 builder.Logging.SetMinimumLevel(LogLevel.Warning);
+builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = ServerShutdown.HostTimeout);
 builder.Services.ConfigureHttpJsonOptions(o => {
 	o.SerializerOptions.PropertyNamingPolicy = JsonIO.Options.PropertyNamingPolicy;
 	o.SerializerOptions.DefaultIgnoreCondition = JsonIO.Options.DefaultIgnoreCondition;
@@ -376,8 +377,8 @@ object ProcessSummary(Agent a, BackgroundProcess p) => new {
 	state = p.Stopped != null ? "stopped" : Posix.Alive(p.Pid) ? "running" : "exited",
 };
 api.MapGet("/processes", () => manager.Agents.SelectMany(a => a.Processes.OrderByDescending(p => p.Started).Select(p => ProcessSummary(a, p)))).AllowPaired();
-api.MapGet("/agents/{id}/processes", (string id) =>
-	manager.Get(id) is { } a ? Results.Ok(a.Processes.Where(p => p.Stopped == null).Select(p => ProcessSummary(a, p))) : Results.NotFound()).AllowPaired();
+api.MapGet("/agents/{id}/processes", (string id, bool? includeStopped) =>
+	manager.Get(id) is { } a ? Results.Ok(a.Processes.Where(p => includeStopped == true || p.Stopped == null).Select(p => ProcessSummary(a, p))) : Results.NotFound()).AllowPaired();
 api.MapPost("/agents/{id}/processes/{n:int}/stop", async (string id, int n) =>
 	manager.Get(id) is { } a && await a.StopProcess(n) is { } p ? Results.Ok(ProcessSummary(a, p)) : Results.NotFound()).AllowPaired();
 api.MapGet("/agents/{id}/processes/{n:int}/log", (string id, int n, int? lines) => {
@@ -460,9 +461,12 @@ api.MapGet("/events", (RequestDelegate)(async ctx => {
 		ctx.Response.StatusCode = 400;
 		return;
 	}
+	if(restart.IsStopping) {
+		ctx.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+		return;
+	}
 	using var socket = await ctx.WebSockets.AcceptWebSocketAsync();
-	using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted, Security.DeviceRevocationOf(ctx));
-	await hub.Serve(socket, lifetime.Token);
+	await hub.Serve(socket, ctx.RequestAborted, restart.Stopping, Security.DeviceRevocationOf(ctx));
 })).AllowPaired();
 
 async Task RefreshMcp(bool force) {
@@ -472,14 +476,6 @@ async Task RefreshMcp(bool force) {
 	catch(OperationCanceledException) when(restart.IsStopping) { }
 }
 
-var drain = new Lazy<Task>(async () => {
-	var grace = TimeSpan.FromSeconds(Math.Max(0, manager.Config.StopGraceSeconds));
-	try { await restart.DrainAsync(grace, grace + TimeSpan.FromSeconds(2), childWatcher.CleanForeground); }
-	catch(Exception e) { Console.Error.WriteLine($"Restart drain: {e.Message}"); }
-	try { await mcp.StopAll().WaitAsync(TimeSpan.FromSeconds(5)); }
-	catch(Exception e) { Console.Error.WriteLine($"MCP shutdown: {e.Message}"); }
-});
-using var onStopping = app.Lifetime.ApplicationStopping.Register(() => { _ = drain.Value; });
 manager.LoadAll();
 new Scheduler(manager).Start(app.Lifetime.ApplicationStopping);
 backups.Start(app.Lifetime.ApplicationStopping, Console.Error.WriteLine);
@@ -494,11 +490,15 @@ using var onStarted = app.Lifetime.ApplicationStarted.Register(() => {
 	if(config.Tailnet != null) tailnetRun = Task.Run(() => tailnet.RunAsync(home,
 		Console.Error.WriteLine, app.Lifetime.ApplicationStopping));
 });
-try { await app.RunAsync(); }
-finally {
-	if(tailnetRun != null) await tailnetRun;
-	await drain.Value;
-}
+var cleanStop = await ServerShutdown.RunAsync(app, restart, () => manager.Config.StopGraceSeconds,
+	childWatcher.CleanForeground, mcp.StopAll, config.Tailnet != null ? () => tailnetRun ?? Task.CompletedTask : null);
+modelHttp.Dispose();
+authHttp.Dispose();
+// PowerShell may leave a non-background pipeline thread after an abandoned runspace.
+// Main returning is not enough to exit the process. This is the host's signal-driven
+// stop path, after the bounded cleanup and persistence waits. Startup failures throw above.
+if(System.Reflection.Assembly.GetEntryAssembly() == typeof(Program).Assembly)
+	Environment.Exit(!cleanStop && Environment.ExitCode == 0 ? 1 : Environment.ExitCode);
 
 static string? Blank(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
 

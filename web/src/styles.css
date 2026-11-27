@@ -178,6 +178,20 @@ code, pre { font: 12.5px/1.45 ui-monospace, "SF Mono", Menlo, monospace; }
 .tasks { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 24px; border-bottom: 1px solid var(--border); background: var(--panel); }
 .task-list { flex-shrink: 0; max-height: min(10rem, 22dvh); overflow-y: auto; overscroll-behavior-y: contain; align-content: flex-start; }
 .schedules.task-list { max-height: min(7rem, 14dvh); }
+.conversation-header { flex-shrink: 0; }
+.agent-work { max-height: min(10rem, 22dvh); overflow-y: auto; overscroll-behavior-y: contain; padding: 6px 24px; border-bottom: 1px solid var(--border); background: var(--panel); }
+.agent-work:empty { display: none; }
+.agent-tasks summary, .process-section > summary { width: fit-content; cursor: pointer; font-size: 13px; }
+.agent-tasks + .agent-processes { margin-top: 4px; }
+.agent-task-body { margin-top: 4px; }
+.task-pills { display: flex; flex-wrap: wrap; gap: 6px; }
+.done-tasks { margin-top: 4px; }
+.done-tasks .task-pills { padding-top: 4px; }
+.agent-processes .inbox-item { padding: 6px 0; }
+.agent-processes .log-tail { max-height: 6rem; }
+@media (max-width: 700px) {
+  .agent-work { padding-inline: 16px; }
+}
 .task { font-size: 12px; border: 1px solid var(--border); border-radius: 12px; padding: 1px 9px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .task-state { font-weight: 600; text-transform: uppercase; font-size: 10px; letter-spacing: .04em; margin-right: 2px; }
 .task.open .task-state { color: var(--accent); }
@@ -217,9 +231,10 @@ button.small { padding: 2px 8px; font-size: 12px; }
 .project-toggle .tag { margin-left: 0; }
 .project-members:not([hidden]) { display: flex; flex-direction: column; gap: 2px; }
 .schedule .link { margin-left: 4px; padding: 0 2px; }
-.proc.running .task-state { color: var(--ok); }
-.proc.exited .task-state { color: var(--bad); }
-.proc .link { margin-left: 4px; }
+.process-section + .process-section { margin-top: 4px; }
+.process-row { overflow-wrap: anywhere; }
+.process-actions { display: flex; gap: 4px; }
+.process-actions [aria-disabled=true] { opacity: .65; cursor: default; }
 .doc.wide { max-width: 1000px; }
 .log-tail { max-height: 420px; overflow: auto; font-size: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px; white-space: pre-wrap; }
 .tool-def { margin: 6px 0; } .tool-def summary { cursor: pointer; }

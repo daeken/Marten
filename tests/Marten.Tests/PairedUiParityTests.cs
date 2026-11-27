@@ -165,7 +165,7 @@ public class PairedUiParityTests {
 			await File.WriteAllBytesAsync(Path.Combine(imageDir, "parity.png"), [1, 2], timeout.Token);
 			var ad = $"/api/agents/{id}";
 			var none = "/api/agents/does-not-exist";
-			foreach(var path in new[] { "/api/agents", "/api/inbox", "/api/messages", "/api/usage", "/api/models", "/api/processes", "/api/tools", "/api/mcp", "/api/backups", "/api/clients", "/api/pair/devices", $"{ad}/transcript?limit=80", $"{ad}/tasks", $"{ad}/schedules", $"{ad}/notebook", $"{ad}/processes" }) {
+			foreach(var path in new[] { "/api/agents", "/api/inbox", "/api/messages", "/api/usage", "/api/models", "/api/processes", "/api/tools", "/api/mcp", "/api/backups", "/api/clients", "/api/pair/devices", $"{ad}/transcript?limit=80", $"{ad}/tasks", $"{ad}/schedules", $"{ad}/notebook", $"{ad}/processes", $"{ad}/processes?includeStopped=true" }) {
 				// A scratch server has no providers configured; model discovery may return 502, but not an authorization error.
 				await Check(HttpMethod.Get, path, path == "/api/models" ? [HttpStatusCode.OK, HttpStatusCode.BadGateway] : [HttpStatusCode.OK]);
 			}

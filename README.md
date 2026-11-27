@@ -53,6 +53,12 @@ Named slots are opt-in and shared by all agents. In a PowerShell command, run `$
 
 If DNS or connection establishment fails, the agent shows **Waiting for network** with the reason and next retry time. The turn releases its slots while waiting and retries the failed model operation without rerunning tools. Retries use jittered exponential backoff (up to five minutes) and are staggered across agents. A continuous outage can wait up to 45 minutes before the turn reports an error to its parent. Pause holds dispatch; Stop, Close, and shutdown cancel the wait. Header/stream timeouts, server errors, and quota still have their separate retry policies.
 
+For failure triage, read `agents/<id>/model-attempt-failure.json` in the Marten home. This redacted file keeps just the latest observed failed completion attempt across restarts, even if a retry later succeeded. It includes timing, a run and attempt ID, an observed backend and allowlisted model when known, cancellation and shutdown flags, and allowlisted exception categories. The HTTP phase is included only when known; its absence does not imply a transport failure. No prompts, credentials, or exception messages are included in this file.
+
+## Policy refusals
+
+Sometimes a provider blocks the request itself instead of failing it: OpenAI reports a content filter or policy code, or the model answers with a refusal, and Anthropic reports a refusal stop reason or its content-filtering error. Retrying the same model cannot help, so Marten moves the agent to `refusalFallbackModel` from `config.json` (default `deepseek-flash`) and leaves a note in its transcript: what refused it, why, which model it is on now, and that it can stay there, hand the work to a fresh agent with a fuller brief, or surface the refusal if it thinks the block was right. The switch sticks until something changes it, including the agent itself with `set_model`. One fallback per turn; a refusal on the fallback itself ends the turn as a normal error. Set `"refusalFallbackModel": null` to keep the old behaviour, where a refusal is just a failed turn.
+
 ## Pausing and closing agents
 
 **Pause** holds the turn at its next model or tool dispatch. A model reply or compaction that finishes while paused is held off the transcript until resume, without keeping either slot; streamed text is suppressed while paused. A tool that already started can finish and its result is kept. The rest of the batch continues when the agent, project, and global pauses have all cleared.
@@ -61,9 +67,13 @@ If DNS or connection establishment fails, the agent shows **Waiting for network*
 
 ## Stopping and restarting
 
-Use Ctrl-C or send SIGTERM and wait for Marten to exit before starting it again. Marten stops new model calls, gives active tools `stopGraceSeconds` (5 seconds by default), then cancels unfinished tools and cleans up tracked foreground children. Detached `process_start` jobs survive a Marten restart, not a machine reboot.
+Use Ctrl-C or send SIGTERM and wait for Marten to exit before starting it again. The UI's event WebSockets disconnect immediately; an open UI doesn't delay a restart. Marten stops new model calls, gives active tools `stopGraceSeconds` (5 by default), then cancels unfinished tools and makes bounded attempts to clean up tracked foreground children and MCP servers. Detached `process_start` jobs survive a Marten restart, not a machine reboot.
+
+Look for `Marten shutdown +…ms` in stderr to see which phase is still running. These lines contain elapsed times and phase names, not tool or exception text. A shutdown phase that fails or exceeds its wait budget is reported as incomplete and yields a nonzero exit code. These are bounds on the normal managed waits, not a guarantee that every SIGTERM reaches process exit. The runtime has no self-kill watchdog; if shutdown wedges, the deploy helper handles the timeout separately.
 
 On startup, Marten tells existing agents that it restarted and records interruptions it can infer from disk. It does not automatically repeat interrupted calls. A forced kill or power loss skips cleanup; results or queued messages can be lost even when a command changed files or external state. Check the transcript, logs, and actual state before retrying.
+
+For a planned single-host macOS release on port 7450, use the [detached cutover runbook](docs/release-cutover.md).
 
 ## Linked project memory
 
@@ -71,7 +81,11 @@ Keep standing rules and short pointers in `MEMORY.md` (16 KiB by default). Link 
 
 ## As an app (desktop and phone)
 
-Marten's UI is an installable web app. Opening a conversation shows the latest 80 transcript entries. Scroll back without being pulled to the end by new replies. Use **Older** and **Newer** to read one page at a time, or **Return to latest** to follow live replies. Paging changes only the display, not the agent’s history or context. Question-card answers appear in the conversation as soon as they’re saved, even if the agent is paused. Long task and schedule lists scroll in their own panels, leaving the conversation visible. Click a project name to collapse or expand its agent list without leaving the current conversation. This preference is saved in the browser. Provider sign-in and global pause controls are in **Settings** at the top of the sidebar.
+Marten's UI is an installable web app. Opening a conversation shows the latest 80 transcript entries. Scroll back without being pulled to the end by new replies. Use **Older** and **Newer** to read one page at a time, or **Return to latest** to follow live replies. Paging changes only the display, not the agent’s history or context. Question-card answers appear in the conversation as soon as they’re saved, even if the agent is paused. Long task, process, and schedule lists scroll separately from the conversation. Click a project name to collapse or expand its agent list without leaving the current conversation. This preference is saved in the browser. Provider sign-in and global pause controls are in **Settings** at the top of the sidebar.
+
+Expand **Agent Tasks** in a conversation header to see open, waiting, and blocked work. The header counts active and completed tasks; expand **Done** inside it to see completed tasks. Both disclosures start closed.
+
+Detached jobs started with `process_start` appear under **Running processes** in their agent's header and on the sidebar's **Background processes** screen. Running rows disappear automatically when the process stops or exits; expand **Process history** to find those rows and read their saved logs. Both process disclosures start closed. Nothing is deleted when a task completes or a process exits.
 
 Use **Start fresh context** in the agent header and confirm to start over between turns. The next turn uses current instructions and project memory without earlier messages, tool results, or compaction summaries. The transcript keeps a visible divider and all earlier pages. The agent’s identity, children, tasks, schedules, and queued input are unchanged; the action itself does not wake it. Resume any agent, project, or global pause first, and wait for any active turn to finish or stop it.
 

@@ -65,6 +65,28 @@ public class RestartTests {
 	}
 
 	[Fact]
+	public async Task ABlockedForegroundSweepDoesNotHoldTheDrainOpen() {
+		var restart = new RestartDrain();
+		using var release = new ManualResetEventSlim();
+		var finished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+		var phases = new System.Collections.Concurrent.ConcurrentQueue<string>();
+		var drain = restart.DrainAsync(TimeSpan.Zero, TimeSpan.FromMilliseconds(150), () => {
+			release.Wait();
+			finished.TrySetResult();
+		}, phases.Enqueue);
+		try {
+			Assert.Null(restart.Enter());
+			await Assert.ThrowsAsync<TimeoutException>(async () => await drain.WaitAsync(TimeSpan.FromSeconds(3)));
+			Assert.True(drain.IsFaulted); // Not the outer test deadline.
+			Assert.Contains("foreground sweep timed out", phases);
+			Assert.Contains("foreground final sweep skipped", phases);
+		} finally {
+			release.Set();
+			await finished.Task.WaitAsync(TimeSpan.FromSeconds(3));
+		}
+	}
+
+	[Fact]
 	public void StartupAnnouncesRestartToIdleAndClosedAgentsWithoutWakingThem() {
 		using var dir = new TempDir();
 		var manager = Manager(dir, new FakeBackend());

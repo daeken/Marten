@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Marten.Models;
 using Marten.Storage;
 
@@ -22,13 +23,23 @@ public sealed partial class Agent {
 		var call = new ModelCallStatus(Interlocked.Increment(ref modelCallId), request.Model, kind, DateTimeOffset.UtcNow);
 		modelCall = call;
 		var outcome = ModelCallOutcome.Failed;
+		var started = Stopwatch.GetTimestamp();
+		Exception? failure = null;
+		(ModelFailureBackend Backend, string? Model) dispatch = default;
+		void ObserveDispatch(IModelBackend backend, string model) => dispatch = DescribeDispatch(backend, model);
 		try {
 			manager.Publish(new { type = "model_call_start", agentId = Info.Id, modelCall = call });
-			var pending = manager.Backend.CompleteAsync(request, delta => {
+			void OnDelta(string delta) {
 				lock(gate) {
 					if(!turnToken.IsCancellationRequested && !ct.IsCancellationRequested && !IsPaused) onDelta(delta);
 				}
-			}, ct);
+			}
+			Task<ModelResult> pending;
+			if(manager.Backend is BackendRouter router) pending = router.CompleteAsync(request, OnDelta, ct, ObserveDispatch);
+			else {
+				ObserveDispatch(manager.Backend, request.Model);
+				pending = manager.Backend.CompleteAsync(request, OnDelta, ct);
+			}
 			ModelResult result;
 			try {
 				result = await pending.WaitAsync(ct);
@@ -42,15 +53,51 @@ public sealed partial class Agent {
 			ct.ThrowIfCancellationRequested();
 			outcome = ModelCallOutcome.Succeeded;
 			return result;
+		} catch(Exception e) {
+			failure = e;
+			throw;
 		} finally {
 			if(outcome == ModelCallOutcome.Failed && (ct.IsCancellationRequested || turnToken.IsCancellationRequested)) outcome = ModelCallOutcome.Cancelled;
 			var ended = call with { EndedAt = DateTimeOffset.UtcNow, Outcome = outcome };
 			modelCall = ended;
+			if(failure != null) SaveModelFailure(ended, dispatch.Backend, dispatch.Model, (long) Stopwatch.GetElapsedTime(started).TotalMilliseconds, failure, ct, turnToken);
 			manager.Publish(new { type = "model_call_end", agentId = Info.Id, modelCall = ended });
 		}
 	}
 
 	static async Task Observe(Task pending) => await pending.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+
+	/// <summary>
+	/// A provider blocked the request on policy grounds. Move the agent to the fallback model, and say so in
+	/// the transcript, together with the three things it can do: carry on where it is, hand the work to a
+	/// fresh agent with a fuller brief, or escalate the refusal if it thinks the block was right.
+	/// </summary>
+	void MoveToRefusalFallback(ModelRefusedException refused, string? from, string to) {
+		var refusedBy = from ?? manager.KnownDefaultModel ?? "The provider";
+		UpdateSettings(to, Info.Effort);
+		Append(new Entry { Kind = EntryKind.Message, From = NudgeSender, Text = RefusalNotice(refused, refusedBy, to) });
+		SetStatus(AgentStatus.Running, $"{refusedBy} refused the request; now on {to}.");
+	}
+
+	static string Clip(string text, int max) => text.Length <= max ? text : text[..max].TrimEnd() + "…";
+
+	string RefusalNotice(ModelRefusedException refused, string from, string to) {
+		var reason = !string.IsNullOrWhiteSpace(refused.Reason) ? refused.Reason
+			: !string.IsNullOrWhiteSpace(refused.Code) ? refused.Code : "the provider gave no reason";
+		var options = Info.Kind switch {
+			AgentKind.Orchestrator =>
+				$"- Spawn a fresh agent with more context (spawn_agent) and hand the work over with a fuller brief, so it is less likely to be flagged again.\n" +
+				"- If you think the refusal was right and this shouldn't be done, surface it to Sera with send_message to \"sera\": what was asked, what was refused, and why.",
+			AgentKind.Chat =>
+				"- If you think the refusal was right and this shouldn't be done, say so plainly in your reply to Sera: what was asked, what was refused, and why. She can start a fresh chat with more context if the block was a mistake.",
+			_ =>
+				"- Ask your orchestrator (send_message) to spawn a fresh agent with more context and a fuller brief, so it is less likely to be flagged again.\n" +
+				"- If you think the refusal was right and this shouldn't be done, tell your orchestrator with send_message: what was asked, what was refused, and why.",
+		};
+		return $"{from} flagged this request and refused it: \"{Clip(reason, 400)}\"\n\n" +
+			$"You're on {to} now, for this call and after, until you change it (set_model). Nothing was lost: your history, tools and tasks are as they were.\n\n" +
+			$"You can choose to:\n- Stay here: carry on with the work on {to}.\n{options}";
+	}
 
 	void FailTurn(Exception e) {
 		AnswerDanglingCalls("Interrupted by a turn failure before this finished.");

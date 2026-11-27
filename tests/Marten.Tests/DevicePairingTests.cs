@@ -67,8 +67,7 @@ public class DevicePairingTests {
 		var listening = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 		api.MapGet("/events", (RequestDelegate)(async ctx => {
 			using var socket = await ctx.WebSockets.AcceptWebSocketAsync();
-			using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted, Security.DeviceRevocationOf(ctx));
-			var serving = hub.Serve(socket, lifetime.Token);
+			var serving = hub.Serve(socket, ctx.RequestAborted, app.Lifetime.ApplicationStopping, Security.DeviceRevocationOf(ctx));
 			listening.TrySetResult();
 			await serving;
 		})).AllowPaired();

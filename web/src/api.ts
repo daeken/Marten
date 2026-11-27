@@ -248,11 +248,12 @@ export class Api {
   tasks = (id: string) => this.call<TaskItem[]>('GET', `/agents/${id}/tasks`);
   schedules = (id: string) => this.call<Schedule[]>('GET', `/agents/${id}/schedules`);
   processes = () => this.call<BackgroundProcess[]>('GET', '/processes');
-  agentProcesses = (id: string) => this.call<BackgroundProcess[]>('GET', `/agents/${id}/processes`);
+  agentProcesses = (id: string) => this.call<BackgroundProcess[]>('GET', `/agents/${id}/processes?includeStopped=true`);
   stopProcess = (id: string, n: number) => this.call<BackgroundProcess>('POST', `/agents/${id}/processes/${n}/stop`);
   processLog = async (id: string, n: number, lines = 200) => {
     const res = await fetch(`/api/agents/${id}/processes/${n}/log?lines=${lines}`, { headers: { Authorization: `Bearer ${this.token}` } });
-    return res.ok ? res.text() : '';
+    if (!res.ok) throw new Error(`Could not load process log (${res.status}).`);
+    return res.text();
   };
   scriptTools = (projectId?: string) => this.call<ScriptToolInfo[]>('GET', `/tools${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`);
   removeSchedule = (id: string, scheduleId: number) => this.call<void>('DELETE', `/agents/${id}/schedules/${scheduleId}`);

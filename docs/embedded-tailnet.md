@@ -39,7 +39,7 @@ Choose the exact lowercase FQDN, with no scheme, path, port, or trailing dot. Th
 
 After successful enrollment, remove `secrets/tailnet-auth-key`. Persistent node identity and certificate state live in the service-owned `secrets/tailnet-state` directory (`0700`, excluded from Marten backups). Keep it on private storage supporting Unix permissions and file locking. Never point two instances at it or copy it to another server. If state is lost or registration needs to be replaced, remove the old device in Tailscale's admin console before provisioning a new one with a fresh key. For a migration, enroll a distinct node rather than sharing device state.
 
-Leave `tailnet` absent or set it to `null` to disable the helper. The helper is tied to Marten's lifetime and exits even if its parent crashes. On failure the native listener stays closed or goes away; local Marten remains available. Fix the reported configuration/approval/DNS/TLS issue and restart Marten; the supervisor does not retry enrollment automatically. Disabling the local helper is not a substitute for removing its tailnet device or revoking paired devices when decommissioning it.
+Leave `tailnet` absent or set it to `null` to disable the helper. The helper is tied to Marten's lifetime and exits even if its parent crashes. Shutdown closes the helper lease and waits for cleanup within the bounded `tailnet-stop` phase; a timeout is reported as an incomplete shutdown. On failure the native listener stays closed or goes away; local Marten remains available. Fix the reported configuration/approval/DNS/TLS issue and restart Marten; the supervisor does not retry enrollment automatically. Disabling the local helper is not a substitute for removing its tailnet device or revoking paired devices when decommissioning it.
 
 No tailnet account is required to run transport tests:
 
@@ -48,3 +48,7 @@ cd src/Marten.Tsnet
 CGO_ENABLED=0 go test -mod=readonly \
   -tags 'ts_omit_logtail ts_omit_oauthkey ts_omit_identityfederation' ./...
 ```
+
+## Rollout boundary
+
+A normal [macOS cutover](release-cutover.md) can ship these binaries with `tailnet` and `pairingOrigin` unset; neither pairing nor the embedded listener is enabled by that alone. The cutover builds the web UI and .NET server, **not** the Go helper. For an explicitly approved transport rollout, separately build/install the matching helper and provision the dedicated hostname, ACLs and enrollment key as described above. Verify readiness and native access in isolation first. Do not copy scratch node state, keys, or a pilot app into production. To disable the embedded listener, remove or null `tailnet` and leave `pairingOrigin` unset unless a separate standalone pairing service is intended, then use the normal coordinated restart procedure.

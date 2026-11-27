@@ -32,6 +32,18 @@ public sealed class RateLimitedException(string message, TimeSpan? retryAfter = 
 	public TimeSpan? RetryAfter { get; } = retryAfter;
 }
 
+/// <summary>
+/// The provider blocked the request itself on policy grounds: a content filter, a moderation block,
+/// or a refusal the model was made to produce. It is not a failure of the request, so retrying the
+/// same model is pointless; the caller may move the agent to another model instead.
+/// </summary>
+public sealed class ModelRefusedException(string message, string? reason = null, string? code = null) : Exception(message) {
+	/// <summary>Why, in the provider's own words: its refusal sentence, or the code it gave.</summary>
+	public string? Reason { get; } = reason;
+	/// <summary>The provider's short machine code for the block, e.g. content_filter, when there is one.</summary>
+	public string? Code { get; } = code;
+}
+
 /// <summary>DNS or connection establishment failed before the HTTP response. Uses the long recovery policy.</summary>
 public sealed class ProviderUnreachableException(string message, Exception? inner = null) : Exception(message, inner);
 
