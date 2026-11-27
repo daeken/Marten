@@ -197,19 +197,26 @@ export interface PairInvitation { payload: string; expiresAt: string }
 export const transcriptPageSize = 80;
 export type TranscriptPage = { entries: Entry[]; hasOlder: boolean };
 
+export type PendingMessage = { id: string; text: string; mode: 'immediate' | 'queued' };
+
+class ApiError extends Error {
+  constructor(message: string, readonly status: number) { super(message); }
+}
+
 export class Api {
   constructor(private token: string) {}
 
-  private async call<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async call<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     const res = await fetch(`/api${path}`, {
       method,
+      signal,
       headers: { Authorization: `Bearer ${this.token}`, ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
     if (res.status === 401) throw new Error('unauthorized');
     if (!res.ok) {
       const problem = await res.json().catch(() => null);
-      throw new Error(problem?.detail ?? `${method} ${path} failed (${res.status})`);
+      throw new ApiError(problem?.detail ?? `${method} ${path} failed (${res.status})`, res.status);
     }
     const text = await res.text();
     return (text ? JSON.parse(text) : undefined) as T;
@@ -236,6 +243,17 @@ export class Api {
     return { entries: page.slice(Math.max(0, stop - transcriptPageSize), stop), hasOlder: stop > transcriptPageSize };
   };
   send = (id: string, text: string, mode: 'immediate' | 'queued') => this.call<void>('POST', `/agents/${id}/messages`, { text, mode });
+  pendingMessages = (id: string, signal: AbortSignal) =>
+    this.call<PendingMessage[]>('GET', `/agents/${encodeURIComponent(id)}/pending-messages`, undefined, signal);
+  recallPendingMessage = async (id: string, messageId: string) => {
+    try {
+      return await this.call<PendingMessage>('DELETE', `/agents/${encodeURIComponent(id)}/pending-messages/${encodeURIComponent(messageId)}`,
+        undefined, AbortSignal.timeout(10_000));
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) return null;
+      throw e;
+    }
+  };
   setAgentSettings = (id: string, model: string | null, effort: string | null) =>
     this.call<AgentSummary>('PUT', `/agents/${id}/settings`, { model, effort });
   notebook = (id: string) => this.call<NotebookCell[]>('GET', `/agents/${id}/notebook?limit=300`);
