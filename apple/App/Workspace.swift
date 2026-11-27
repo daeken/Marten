@@ -543,6 +543,9 @@ private struct ConversationView: View {
     @State private var pageError: String?
     @State private var mutating = false
     @State private var draft = ""
+    #if os(iOS)
+    @FocusState private var composerFocused: Bool
+    #endif
     @State private var mode: SendMode = .queued
     @State private var refreshError: String?
     @State private var actionError: String?
@@ -684,9 +687,13 @@ private struct ConversationView: View {
                 .padding()
                 .frame(maxWidth: 860)
                 .frame(maxWidth: .infinity)
+                #if os(iOS)
+                .background { keyboardDismissSurface }
+                #endif
             }
             #if os(iOS)
             .scrollDismissesKeyboard(.interactively)
+            .background { keyboardDismissSurface }
             #endif
             .refreshable { await refresh() }
             .modifier(TranscriptAnchor(archived: timeline.archive != nil))
@@ -695,6 +702,16 @@ private struct ConversationView: View {
             .onChange(of: live) { followLatest(using: proxy) }
         }
     }
+
+    #if os(iOS)
+    // Behind the transcript, not an ancestor gesture: rows keep their links, buttons,
+    // and text selection. This covers its gutters and unused viewport space.
+    private var keyboardDismissSurface: some View {
+        Color.clear.contentShape(Rectangle())
+            .onTapGesture { composerFocused = false }
+            .accessibilityHidden(true)
+    }
+    #endif
 
     @ViewBuilder private var pagingControls: some View {
         if timeline.page?.hasOlder == true || timeline.archive != nil || pageError != nil {
@@ -732,6 +749,7 @@ private struct ConversationView: View {
                     .overlay { RoundedRectangle(cornerRadius: 6).strokeBorder(.quaternary).allowsHitTesting(false) }
                 #else
                 TextField("Message", text: $draft, axis: .vertical)
+                    .focused($composerFocused)
                     .lineLimit(1...5)
                     .textFieldStyle(.roundedBorder)
                     .accessibilityIdentifier("messageDraft")
