@@ -100,7 +100,8 @@ public sealed class Security {
 	}
 
 	public RequestDelegate Middleware(RequestDelegate next) => async ctx => {
-		if(ctx.GetEndpoint()?.Metadata.GetMetadata<MacFiles.Route>() != null)
+		var policy = ctx.GetEndpoint()?.Metadata.GetMetadata<OperatorRoute>();
+		if(policy == OperatorRoute.LocalBearer || ctx.GetEndpoint()?.Metadata.GetMetadata<MacFiles.Route>() != null)
 			ctx.Response.Headers.CacheControl = "no-store";
 		if(!HostAllowed(ctx) || !OriginAllowed(ctx)) {
 			ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
@@ -110,7 +111,6 @@ public sealed class Security {
 		var atPairingOrigin = authority != null && string.Equals(ctx.Request.Host.Host.Trim('[', ']').TrimEnd('.'),
 			authority.IdnHost.Trim('[', ']').TrimEnd('.'), StringComparison.OrdinalIgnoreCase) &&
 			(EmbeddedTailnet || (ctx.Request.Host.Port ?? 443) == authority.Port);
-		var policy = ctx.GetEndpoint()?.Metadata.GetMetadata<OperatorRoute>();
 		var requestOrigin = ctx.Request.Headers.Origin.ToString();
 		if(atPairingOrigin && (policy == null || PairingOrigin == null ||
 			!string.Equals(ctx.Request.Host.Value, authority!.Authority, EmbeddedTailnet ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase) ||
@@ -119,6 +119,19 @@ public sealed class Security {
 			return;
 		}
 		var bearer = Bearer(ctx);
+		if(policy == OperatorRoute.LocalBearer) {
+			// Unconditionally separate this surface from query, pairing and outside authentication.
+			if(atPairingOrigin || !LocalOperatorOrigin(ctx) || ctx.Request.Scheme != "http" ||
+				(ctx.Request.Headers.ContainsKey("Origin") && requestOrigin.Length == 0) || ctx.Request.QueryString.HasValue ||
+				ctx.Request.Headers.Keys.Any(h => h.StartsWith("X-Forwarded-", StringComparison.OrdinalIgnoreCase) ||
+					h.Equals("Forwarded", StringComparison.OrdinalIgnoreCase) || h.Equals(TailnetTransport.NativeProofHeader, StringComparison.OrdinalIgnoreCase)) ||
+				bearer is not { Length: > 0 } || !IsOperator(bearer)) {
+				ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
+				return;
+			}
+			await next(ctx);
+			return;
+		}
 		// A paired bearer is accepted only at the current canonical pairing origin, never at a web alias.
 		var pairedRevocation = atPairingOrigin ? Pairing?.Authenticate(bearer) : null;
 		if(policy == OperatorRoute.Management) {

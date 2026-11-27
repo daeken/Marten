@@ -60,6 +60,10 @@ code, pre { font: 12.5px/1.45 ui-monospace, "SF Mono", Menlo, monospace; }
 .backend .row > span:first-child { flex: 1; }
 .backend .spend { font-variant-numeric: tabular-nums; }
 .backend form input { flex: 1; min-width: 0; font-size: 12px; padding: 4px 6px; }
+.jev-settings { border: 1px solid var(--border); border-radius: 6px; padding: 8px; }
+.jev-settings p { margin: 6px 0; }
+.jev-settings form { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.jev-settings input[type=password] { width: 100%; min-width: 0; font-size: 12px; padding: 4px 6px; }
 .agents { overflow-y: auto; padding: 10px 8px; display: flex; flex-direction: column; gap: 2px; }
 .agents .row { display: flex; justify-content: space-between; padding: 0 8px 6px; }
 .agent { display: flex; align-items: center; gap: 8px; text-align: left; border: none; background: none; padding: 6px 8px; border-radius: 6px; }

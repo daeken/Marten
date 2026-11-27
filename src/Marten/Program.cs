@@ -190,6 +190,7 @@ object ProjectSummary(Project p) => new { p.Info.Id, p.Info.Name, p.Info.Created
 
 var api = app.MapGroup("/api");
 api.MapPairing(pairing, security);
+api.MapJevSettings(new JevSettings(home));
 var macFiles = new MacFiles(config.MacFilesEnabled, tailnet.HasNativeProof, pairing, restart.Stopping, ingressReady: () => tailnet.IsReady);
 macFiles.Map(api);
 api.MapGet("/status", (HttpContext ctx) => new {
