@@ -46,6 +46,43 @@ final class CompactWorkspaceTests: XCTestCase {
         XCTAssertEqual(sends(), [#"send queued "First\nSecond""#])
     }
 
+    @MainActor func testPendingRowsRecallOrStayReadOnly() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        let trace = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try Data().write(to: trace)
+        defer { try? FileManager.default.removeItem(at: trace) }
+        app.launchEnvironment["MARTEN_FIXTURE_TRACE"] = trace.path
+        app.launchEnvironment["MARTEN_FIXTURE_PENDING"] = "1"
+        app.launchEnvironment["MARTEN_FIXTURE_RESET"] = "1"
+        app.launch()
+        defer { app.terminate() }
+
+        XCTAssertTrue(app.navigationBars["Marten"].waitForExistence(timeout: 10))
+        let alpha = app.staticTexts["Standalone Alpha"].firstMatch
+        for _ in 0..<4 where !alpha.exists || !alpha.isHittable { app.swipeUp() }
+        XCTAssertTrue(alpha.waitForExistence(timeout: 10))
+        alpha.tap()
+        let steering = app.staticTexts["Fixture steering"]
+        let stale = app.buttons["pendingRecall.stale"]
+        let queued = app.buttons["pendingRecall.q"]
+        let draft = app.descendants(matching: .any)["messageDraft"].firstMatch
+        XCTAssertTrue(steering.waitForExistence(timeout: 8))
+        XCTAssertFalse(app.buttons["pendingRecall.s"].exists)
+        XCTAssertTrue(stale.waitForExistence(timeout: 5))
+        stale.tap()
+        XCTAssertTrue(app.staticTexts["That message is no longer pending."].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Send Message"].isEnabled)
+        queued.tap()
+        let recalled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Fixture recalled text"), object: draft)
+        XCTAssertEqual(XCTWaiter.wait(for: [recalled], timeout: 5), .completed)
+        XCTAssertTrue(queued.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(steering.exists)
+        let writes = try String(contentsOf: trace, encoding: .utf8).split(separator: "\n")
+            .filter { $0.hasPrefix("recall ") || $0.hasPrefix("send ") }
+        XCTAssertEqual(writes, ["recall stale", "recall q"])
+    }
+
     @MainActor func testCompactWorkspace() throws {
         continueAfterFailure = false
         let app = XCUIApplication()

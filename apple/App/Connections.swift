@@ -54,6 +54,7 @@ struct CredentialStore {
 
 @MainActor @Observable
 final class Connections {
+    let composers = ConversationComposers()
     private let transport: any Transport
     private let keychain: CredentialStore
     private let defaults: UserDefaults
@@ -211,6 +212,7 @@ final class Connections {
         guard pairingEnabled, api.endpoint.url.scheme == "https", let token = api.token,
               connected?.endpoint == api.endpoint, connected?.token == token else { return }
         cancelOffer()
+        composers.forget(api.endpoint)
         connected = nil
         workspaceID = UUID()
         defaults.removeObject(forKey: "activeEndpoint")
@@ -239,6 +241,7 @@ final class Connections {
         // Retain a retryable row, but never reconnect to it once cleanup has
         // started, even after failure or relaunch. Store no credentials here.
         pendingForget.insert(endpoint)
+        composers.forget(endpoint)
         persistPendingForget()
         if connected?.endpoint == endpoint {
             connected = nil

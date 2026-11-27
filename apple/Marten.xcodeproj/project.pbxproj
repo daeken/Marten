@@ -14,6 +14,7 @@
 		19F85D0A0E280CE4FE035639 /* DeviceManagement.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58CB3FDADC5254866A0B3501 /* DeviceManagement.swift */; };
 		2260B0B328F51E58556275E6 /* LiveEvents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7309633EE2E13A8F89FB924A /* LiveEvents.swift */; };
 		23A905C67BC47A823017DA6C /* Client.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13EA62427E8B256347FC0858 /* Client.swift */; };
+		27B630A4F773F4ED20DF90EE /* PendingComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F95E9B9905C7A988F2572DF /* PendingComposer.swift */; };
 		2F504A81DC2FDFF7E088AEA8 /* ProjectWorkspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = 710EAFECDF40B85F91489538 /* ProjectWorkspace.swift */; };
 		47F95AF728200D8996673317 /* QR.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB79A7B841A9E892C17E98A7 /* QR.swift */; };
 		480D9F1EE4B0159774C13F1E /* ClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E70246C11BAE9986E883FFA /* ClientTests.swift */; };
@@ -24,6 +25,7 @@
 		724A3E0D31209666CEC2652A /* Workspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7425BD4A106FDE0A234CC40 /* Workspace.swift */; };
 		7E0874FE16B8DF9701CF346C /* Administration.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6F4F3E1FB9A5D1D84E9F2B2 /* Administration.swift */; };
 		8A7216E96170AAC9585274FE /* Timeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC4FEA88791C90D0E5315E22 /* Timeline.swift */; };
+		8D082F773F5DC8EBC960FD85 /* PendingComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F95E9B9905C7A988F2572DF /* PendingComposer.swift */; };
 		9282BA520E0A8129370A981A /* Inbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26B0506E9E29AC99DFA612AE /* Inbox.swift */; };
 		996D45C0A3EF134A28D2E99E /* Notebook.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FD59F4AC4F947B3F9984D71 /* Notebook.swift */; };
 		9A6E50D3F978ADB551378FB8 /* Workspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7425BD4A106FDE0A234CC40 /* Workspace.swift */; };
@@ -87,6 +89,7 @@
 		7D5B77581012182B5CE21966 /* AgentSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSettings.swift; sourceTree = "<group>"; };
 		7E70246C11BAE9986E883FFA /* ClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientTests.swift; sourceTree = "<group>"; };
 		9F88394C5EA8FF4E026A7BC1 /* MartenApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MartenApp.swift; sourceTree = "<group>"; };
+		9F95E9B9905C7A988F2572DF /* PendingComposer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingComposer.swift; sourceTree = "<group>"; };
 		A6F4F3E1FB9A5D1D84E9F2B2 /* Administration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Administration.swift; sourceTree = "<group>"; };
 		AB79A7B841A9E892C17E98A7 /* QR.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QR.swift; sourceTree = "<group>"; };
 		AC4FEA88791C90D0E5315E22 /* Timeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Timeline.swift; sourceTree = "<group>"; };
@@ -132,6 +135,7 @@
 				1FD59F4AC4F947B3F9984D71 /* Notebook.swift */,
 				39B4F8B9ABCF38ED1999593C /* Operations.swift */,
 				C5610B571F9AB02248FE2F42 /* Pairing.swift */,
+				9F95E9B9905C7A988F2572DF /* PendingComposer.swift */,
 				710EAFECDF40B85F91489538 /* ProjectWorkspace.swift */,
 				097A46E1BF9D1439D8F4E1C1 /* Providers.swift */,
 				AB79A7B841A9E892C17E98A7 /* QR.swift */,
@@ -281,6 +285,7 @@
 				535526E45D48C8AF3A4E4BE8 /* Notebook.swift in Sources */,
 				4840A29B12CC0D8540F1CA87 /* Operations.swift in Sources */,
 				B2D11A5E574174A955EB7A2C /* Pairing.swift in Sources */,
+				8D082F773F5DC8EBC960FD85 /* PendingComposer.swift in Sources */,
 				F9EC220C55A866FB4A16D094 /* ProjectWorkspace.swift in Sources */,
 				F989CD325FF9F20E8726DC51 /* Providers.swift in Sources */,
 				C126AB3F7D6FC3F8C4159EF7 /* QR.swift in Sources */,
@@ -316,6 +321,7 @@
 				996D45C0A3EF134A28D2E99E /* Notebook.swift in Sources */,
 				A40C0E19F2A5703B53062ECF /* Operations.swift in Sources */,
 				F210C421087F3C1FE5B7C0BB /* Pairing.swift in Sources */,
+				27B630A4F773F4ED20DF90EE /* PendingComposer.swift in Sources */,
 				2F504A81DC2FDFF7E088AEA8 /* ProjectWorkspace.swift in Sources */,
 				C7D347CF686AF60C04E7A2C2 /* Providers.swift in Sources */,
 				47F95AF728200D8996673317 /* QR.swift in Sources */,
