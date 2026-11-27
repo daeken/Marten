@@ -115,6 +115,9 @@ export interface AgentMessage {
   mode: 'immediate' | 'queued'; text: string; reason?: string;
 }
 
+export type ArtifactRef = { id: string; name: string; bytes: number; previewKind: 'none' | 'text' | 'png' };
+export class ArtifactUnavailable extends Error {}
+
 export interface Entry {
   seq: number;
   ts: string;
@@ -130,6 +133,7 @@ export interface Entry {
   isError?: boolean;
   fullOutput?: string;
   images?: { path: string; mimeType: string }[];
+  artifacts?: ArtifactRef[];
   model?: string;
   /** Token usage of the model call this entry ended. */
   usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number };
@@ -279,6 +283,45 @@ export class Api {
     this.call<Project>('POST', '/projects', p);
   memory = (projectId: string) => this.call<ProjectMemory>('GET', `/projects/${projectId}/memory`);
   inbox = () => this.call<SeraMessage[]>('GET', '/inbox');
+  artifact = async (agentId: string, ref: ArtifactRef, preview: boolean, signal: AbortSignal) => {
+    if (!/^[a-f0-9]{32}$/.test(ref.id) || !/^[a-zA-Z0-9_-]+$/.test(agentId) ||
+        !Number.isInteger(ref.bytes) || ref.bytes < 0 || ref.bytes > 8 * 1024 * 1024 ||
+        (preview && ref.previewKind !== 'png' && ref.previewKind !== 'text')) throw new Error('Invalid artifact');
+    const png = preview && ref.previewKind === 'png';
+    const text = preview && ref.previewKind === 'text';
+    const expectedType = png ? 'image/png' : text ? 'text/plain' : 'application/octet-stream';
+    const limit = Math.min(ref.bytes, png ? 2 * 1024 * 1024 : text ? 64 * 1024 : ref.bytes);
+    const res = await fetch(`/api/agents/${agentId}/artifacts/${ref.id}${preview ? '/preview' : ''}`, {
+      headers: { Authorization: `Bearer ${this.token}` }, signal, redirect: 'error', cache: 'no-store', credentials: 'omit',
+    });
+    if (res.status !== 200 || res.headers.get('Content-Type')?.split(';', 1)[0]?.trim() !== expectedType || !res.body) {
+      await res.body?.cancel();
+      if (res.status === 404) throw new ArtifactUnavailable(preview
+        ? 'Preview unavailable. Try downloading the original.'
+        : 'Artifact unavailable. Routine backups restore the card, not the file.');
+      throw new Error(`Artifact request failed (${res.status})`);
+    }
+    const reader = res.body.getReader();
+    const data = new Uint8Array(limit);
+    let size = 0;
+    try {
+      const claimed = res.headers.get('Content-Length');
+      if (claimed !== null && (!/^\d+$/.test(claimed) || Number(claimed) > limit)) throw new Error('Artifact exceeds its byte limit');
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        if (chunk.value.length > limit - size) throw new Error('Artifact exceeds its byte limit');
+        data.set(chunk.value, size);
+        size += chunk.value.length;
+      }
+      if ((!text && size !== ref.bytes) || (claimed !== null && size !== Number(claimed))) throw new Error('Incomplete artifact');
+    } finally {
+      await reader.cancel().catch(() => {});
+      reader.releaseLock();
+    }
+    if (text) return { text: new TextDecoder('utf-8', { fatal: true }).decode(data.subarray(0, size)), truncated: res.headers.get('X-Marten-Preview-Truncated') === '1' };
+    return { blob: new Blob([data.subarray(0, size)], { type: expectedType }) };
+  };
   imageUrl = (agentId: string, path: string) =>
     `/api/agents/${agentId}/images/${encodeURIComponent(path.split(/[\\/]/).pop() ?? '')}?token=${encodeURIComponent(this.token)}`;
   mcp = () => this.call<McpServer[]>('GET', '/mcp');

@@ -48,6 +48,7 @@ public sealed partial class Agent : IPowerShellOwner {
 		this.info = info;
 		Instructions = instructions;
 		Transcript = new Transcript(Path.Combine(directory, "transcript"));
+		manager.ArtifactStore?.PrepareAgent(info.Id);
 		var history = Transcript.Capture();
 		lastWakeSeq = history.LastSeq(RowKind.Wake) ?? 0;
 		if(history.ReadLast(RowKind.Instructions)?.Instructions is { } rebuilt)
@@ -217,7 +218,8 @@ public sealed partial class Agent : IPowerShellOwner {
 	}
 
 	Entry Append(Entry entry) {
-		var e = Transcript.Append(entry);
+		var e = entry.Artifacts is { Count: > 0 }
+			? manager.ArtifactStore!.Commit(Info.Id, Transcript, entry) : Transcript.Append(entry);
 		manager.Publish(new { type = "entry", agentId = Info.Id, entry = e });
 		return e;
 	}
@@ -345,6 +347,7 @@ public sealed partial class Agent : IPowerShellOwner {
 			using var operation = manager.Restart.Enter();
 			if(operation == null) return;
 			string reason;
+			if(Transcript.AppendFailed) return;
 			bool resuming;
 			Turn turn;
 			lock(gate) {
@@ -430,6 +433,8 @@ public sealed partial class Agent : IPowerShellOwner {
 			MaybeNudge(changesAtStart);
 		} catch(OperationCanceledException) when(manager.Restart.IsStopping) {
 			throw;
+		} catch(Exception) when(Transcript.AppendFailed) {
+			SetStatus(AgentStatus.Error, "Transcript write outcome unknown; restart to reconcile before resuming.");
 		} catch(Exception) when(token.IsCancellationRequested && !manager.Restart.IsStopping) {
 			AnswerDanglingCalls(turn.Closed ? "Cancelled because the agent was closed. Check for partial effects before retrying." : "Interrupted by Sera before this finished.");
 			Append(new Entry { Kind = EntryKind.Idle, Reason = "interrupted" });
@@ -572,6 +577,7 @@ public sealed partial class Agent : IPowerShellOwner {
 			Append(new Entry {
 				Kind = EntryKind.ToolResult, CallId = call.CallId, Name = call.Name, Text = text,
 				IsError = output.IsError ? true : null, FullOutput = full, Images = images.Count > 0 ? images : null,
+				Artifacts = output.Artifacts,
 			});
 		}
 	}

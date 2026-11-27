@@ -7,6 +7,7 @@ namespace Marten.Tools;
 public sealed record ToolOutput(string Text, bool IsError = false) {
 	/// <summary>Images to show the model alongside the text, already saved to disk.</summary>
 	public List<ImageRef>? Images { get; init; }
+	public IReadOnlyList<ArtifactRef>? Artifacts { get; init; }
 	public static ToolOutput Error(string text) => new(text, true);
 }
 

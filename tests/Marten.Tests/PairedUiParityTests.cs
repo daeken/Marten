@@ -4,12 +4,71 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
 using System.Text.Json;
+using Marten.Agents;
 using Marten.Storage;
 using Marten.Web;
+using Microsoft.AspNetCore.Http;
 
 namespace Marten.Tests;
 
 public class PairedUiParityTests {
+	[Fact]
+	public async Task RevokedDeviceStopsFullTranscriptStreamAtNextEmission() {
+		using var scratch = new TempDir();
+		var home = new Home(scratch.File("home"));
+		const string host = "pairing-test.example";
+		var pairing = new DevicePairing(home);
+		var token = pairing.Redeem(pairing.Create()!.Code, "Scratch device")!;
+		var device = Assert.Single(pairing.List());
+		var security = new Security(home, new Config { PairingOrigin = $"https://{host}" }) { Pairing = pairing };
+		var log = new Transcript(scratch.File("transcript"));
+		const string artifactName = "later-artifact.txt";
+		log.Append(new Entry { Kind = EntryKind.Assistant, Text = new string('x', 256 * 1024) });
+		log.Append(new Entry { Kind = EntryKind.ToolResult, Artifacts = [new("0123456789abcdef0123456789abcdef", artifactName, 0, "text")] });
+		var handler = security.Middleware(ctx => TranscriptStreaming.WriteFull(ctx, log, false, CancellationToken.None));
+		DefaultHttpContext Request() {
+			var ctx = new DefaultHttpContext();
+			ctx.Request.Method = HttpMethods.Get;
+			ctx.Request.Host = new HostString(host);
+			ctx.Request.Path = "/api/agents/fixture/transcript";
+			ctx.Request.Headers.Authorization = "Bearer " + token;
+			ctx.SetEndpoint(new Endpoint(null, new EndpointMetadataCollection(OperatorRoute.Action), "transcript"));
+			return ctx;
+		}
+		var active = Request();
+		using var body = new PausedTranscriptBody();
+		active.Response.Body = body;
+		var stream = handler(active);
+		using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+		try {
+			var writeToken = await body.FirstWrite.Task.WaitAsync(timeout.Token);
+			Assert.False(stream.IsCompleted);
+			Assert.DoesNotContain(artifactName, System.Text.Encoding.UTF8.GetString(body.ToArray()));
+			var transmitted = body.Length;
+			Assert.True(pairing.Revoke(device.Id));
+			Assert.True(writeToken.IsCancellationRequested);
+			var fresh = Request();
+			await handler(fresh);
+			Assert.Equal(StatusCodes.Status401Unauthorized, fresh.Response.StatusCode);
+			body.Resume.TrySetResult();
+			await Assert.ThrowsAnyAsync<OperationCanceledException>(() => stream.WaitAsync(timeout.Token));
+			Assert.True(stream.IsCanceled);
+			Assert.Equal(transmitted, body.Length);
+		} finally {
+			body.Resume.TrySetResult();
+		}
+	}
+
+	sealed class PausedTranscriptBody : MemoryStream {
+		public TaskCompletionSource<CancellationToken> FirstWrite { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+		public TaskCompletionSource Resume { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+		public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken ct = default) {
+			await base.WriteAsync(buffer, ct);
+			// The first bytes are already handed off; subsequent writes must respect cancellation.
+			if(FirstWrite.TrySetResult(ct)) await Resume.Task;
+		}
+	}
+
 	[Theory]
 	[InlineData(false)]
 	[InlineData(true)]
@@ -38,6 +97,36 @@ public class PairedUiParityTests {
 			var helper = Path.Combine(bin, "marten-tsnet");
 			await File.WriteAllTextAsync(helper, "#!/bin/sh\nprintf 'READY\\n'\nread unused\n");
 			if(!OperatingSystem.IsWindows()) File.SetUnixFileMode(helper, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+		}
+		const string fixtureId = "artifact-fixture";
+		ArtifactRef? artifact = null;
+		const string missingId = "abcdabcdabcdabcdabcdabcdabcdabcd";
+		const string privateLeaf = "fixture-private-leaf.txt", privateLabel = "fixture-private-label", privateRaw = "fixture-private-raw";
+		if(ArtifactFiles.Supported) {
+			var fixture = home.AgentDir(fixtureId);
+			var log = new Transcript(Path.Combine(fixture, "transcript"));
+			using var store = new Artifacts(home, message => throw new Exception(message));
+			store.PrepareAgent(fixtureId);
+			await File.WriteAllTextAsync(Path.Combine(fixture, Artifacts.Staging, "example.txt"), new string('a', Artifacts.MaxText + 1));
+			artifact = await store.Publish(fixtureId, "example.txt", null, default);
+			log.Append(new Entry { Kind = EntryKind.ToolCall, Name = "publish_artifact", CallId = "fixture-call",
+				Arguments = JsonIO.Serialize(new { filename = privateLeaf, label = privateLabel }),
+				Raw = JsonSerializer.SerializeToElement(new { name = "publish_artifact", arguments = privateRaw }) });
+			log.Append(new Entry { Kind = EntryKind.ToolCall, Name = "call_tool", CallId = "delegated",
+				Arguments = JsonIO.Serialize(new { name = "publish_artifact", arguments = new { filename = privateLeaf, label = privateLabel } }),
+				Raw = JsonSerializer.SerializeToElement(new { name = "call_tool", arguments = privateRaw }) });
+			log.Append(new Entry { Kind = EntryKind.ToolResult, Name = "call_tool", CallId = "delegated", Text = privateLabel });
+			log.Append(new Entry { Kind = EntryKind.ToolCall, Name = "call_tool", CallId = "unrelated-delegated",
+				Arguments = JsonIO.Serialize(new { name = "read_file", arguments = "unrelated-publish_artifact-mention" }) });
+			log.Append(new Entry { Kind = EntryKind.ToolCall, Name = "read_file", Arguments = "unrelated-legacy-arguments" });
+			log.Append(new Entry { Kind = EntryKind.ToolResult, Artifacts = [artifact] });
+			// A reference-only restore must not read replacement bytes from the agent-writable inbox.
+			var missing = artifact with { Id = missingId };
+			log.Append(new Entry { Kind = EntryKind.ToolResult, Artifacts = [missing] });
+			await File.WriteAllTextAsync(Path.Combine(fixture, Artifacts.Staging, missingId), new string('b', (int) missing.Bytes));
+			await File.WriteAllTextAsync(Path.Combine(fixture, "system.md"), "Offline test fixture");
+			JsonIO.Save(Path.Combine(fixture, "agent.json"), new AgentInfo { Id = fixtureId, Kind = AgentKind.Chat,
+				Name = "Offline fixture", WorkingDirectory = fixture, Created = DateTimeOffset.UtcNow, Closed = true });
 		}
 		var pairing = new DevicePairing(home);
 		var token = pairing.Redeem(pairing.Create()!.Code, "Parity test")!;
@@ -72,6 +161,29 @@ public class PairedUiParityTests {
 					Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 					break;
 				} catch(HttpRequestException) { await Task.Delay(50, timeout.Token); }
+			}
+
+			if(!embedded && ArtifactFiles.Supported) {
+				using var other = new TcpListener(IPAddress.Loopback, 0);
+				other.Start();
+				var otherPort = ((IPEndPoint) other.LocalEndpoint).Port;
+				other.Stop();
+				(config with { Port = otherPort }).Save(home);
+				var alias = dir.File("alias");
+				Directory.CreateSymbolicLink(alias, home.Root);
+				var inventory = Snapshot();
+				start.Environment["MARTEN_HOME"] = alias;
+				using var loser = Process.Start(start)!;
+				try {
+					var error = loser.StandardError.ReadToEndAsync(timeout.Token);
+					await loser.WaitForExitAsync(timeout.Token);
+					Assert.Equal(1, loser.ExitCode);
+					Assert.Contains("artifact writer lease", await error);
+					Assert.Equal(inventory, Snapshot());
+				} finally { if(!loser.HasExited) loser.Kill(entireProcessTree: true); }
+				config.Save(home);
+				(string Path, DateTime Modified, long Bytes)[] Snapshot() => Directory.GetFileSystemEntries(home.Root, "*", SearchOption.AllDirectories)
+					.Order(StringComparer.Ordinal).Select(p => (p, File.GetLastWriteTimeUtc(p), File.Exists(p) ? new FileInfo(p).Length : -1L)).ToArray();
 			}
 
 			await Check(HttpMethod.Get, "/", [HttpStatusCode.Forbidden]);
@@ -184,6 +296,52 @@ public class PairedUiParityTests {
 			await Check(HttpMethod.Post, "/api/backups", [HttpStatusCode.OK]);
 			await Check(HttpMethod.Post, "/api/mcp/refresh", [HttpStatusCode.OK]);
 			await Check(HttpMethod.Post, "/api/clients", [HttpStatusCode.OK], new { name = "parity" });
+			if(artifact != null) {
+				var fixture = $"/api/agents/{fixtureId}";
+				var download = $"{fixture}/artifacts/{artifact.Id}";
+				using var full = await http.GetAsync(download, timeout.Token);
+				Assert.Equal(HttpStatusCode.OK, full.StatusCode);
+				Assert.True(full.Headers.CacheControl?.NoStore);
+				Assert.Equal("nosniff", Assert.Single(full.Headers.GetValues("X-Content-Type-Options")));
+				Assert.Equal("application/octet-stream", full.Content.Headers.ContentType?.MediaType);
+				Assert.Equal("attachment", full.Content.Headers.ContentDisposition?.DispositionType);
+				Assert.Equal(artifact.Bytes, (await full.Content.ReadAsByteArrayAsync(timeout.Token)).Length);
+				using var preview = await http.GetAsync(download + "/preview", timeout.Token);
+				Assert.Equal(HttpStatusCode.OK, preview.StatusCode);
+				Assert.Equal("text/plain", preview.Content.Headers.ContentType?.MediaType);
+				Assert.Equal("1", Assert.Single(preview.Headers.GetValues("X-Marten-Preview-Truncated")));
+				Assert.Equal(Artifacts.MaxText, (await preview.Content.ReadAsByteArrayAsync(timeout.Token)).Length);
+				await Check(HttpMethod.Get, download, [HttpStatusCode.OK], authority: local, bearer: op);
+				await Check(HttpMethod.Get, download + "?ignored=1", [HttpStatusCode.Forbidden]);
+				await Check(HttpMethod.Get, $"{ad}/artifacts/{artifact.Id}", [HttpStatusCode.NotFound]);
+				var missing = $"{fixture}/artifacts/{missingId}";
+				await Check(HttpMethod.Get, missing, [HttpStatusCode.NotFound]);
+				await Check(HttpMethod.Get, missing + "/preview", [HttpStatusCode.NotFound]);
+				using var retained = await http.GetAsync(fixture + "/transcript?limit=80", timeout.Token);
+				Assert.Contains(missingId, await retained.Content.ReadAsStringAsync(timeout.Token));
+				using var operatorHistory = await http.GetAsync(fixture + "/transcript", timeout.Token);
+				Assert.True(operatorHistory.Headers.CacheControl?.NoStore);
+				Assert.Contains(privateRaw, await operatorHistory.Content.ReadAsStringAsync(timeout.Token));
+				using var isolated = new HttpClient { BaseAddress = http.BaseAddress };
+				using var queryOnly = await isolated.GetAsync(download + "?token=" + op, timeout.Token);
+				Assert.Equal(HttpStatusCode.Forbidden, queryOnly.StatusCode);
+				using var cross = new HttpRequestMessage(HttpMethod.Get, download);
+				cross.Headers.TryAddWithoutValidation("Origin", "https://other.example");
+				using var blocked = await http.SendAsync(cross, timeout.Token);
+				Assert.Equal(HttpStatusCode.Forbidden, blocked.StatusCode);
+				var outsider = await File.ReadAllTextAsync(Path.Combine(home.Secrets, "clients", "parity.token"), timeout.Token);
+				await Check(HttpMethod.Get, download, [HttpStatusCode.Forbidden], authority: local, bearer: outsider);
+				isolated.DefaultRequestHeaders.Authorization = new("Bearer", outsider);
+				foreach(var path in new[] { fixture + "/transcript", fixture + "/transcript?limit=80", fixture + "/transcript?before=8&limit=80", $"/api/ext/agents/{fixtureId}/transcript" }) {
+					using var history = await isolated.GetAsync(path, timeout.Token);
+					Assert.Equal(HttpStatusCode.OK, history.StatusCode);
+					Assert.True(history.Headers.CacheControl?.NoStore);
+					var json = await history.Content.ReadAsStringAsync(timeout.Token);
+					foreach(var hidden in new[] { artifact.Id, missingId, privateLeaf, privateLabel, privateRaw }) Assert.DoesNotContain(hidden, json);
+					Assert.Contains("unrelated-legacy-arguments", json);
+					Assert.Contains("unrelated-publish_artifact-mention", json);
+				}
+			}
 			await Check(HttpMethod.Post, "/api/pause", [HttpStatusCode.OK], new { paused = true });
 			var outside = (await File.ReadAllTextAsync(Path.Combine(home.Secrets, "clients", "parity.token"), timeout.Token)).Trim();
 			await Check(HttpMethod.Post, "/api/ext/messages", [HttpStatusCode.OK], new { to = id, text = "outside only" }, authority: local, bearer: outside);
