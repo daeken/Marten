@@ -60,6 +60,26 @@ final class ArtifactTests: XCTestCase, @unchecked Sendable {
         XCTAssertThrowsError(try ArtifactPayload(data: png + Data([0]), reply: reply, reference: ref(kind: "png"), purpose: .png))
     }
 
+    func testOldPickerCallbacksDoNotMutateReplacementExport() {
+        var slot = ArtifactExportSlot()
+        slot.begin(Data([1]))
+        let retired = slot.document?.id
+        slot.reset()
+        slot.begin(Data([2]))
+        let current = slot.document?.id
+        slot.setPresented(false, for: retired)
+        XCTAssertFalse(slot.finish(retired))
+        XCTAssertFalse(slot.finish(nil))
+        XCTAssertTrue(slot.presented)
+        XCTAssertEqual(slot.document?.id, current)
+        XCTAssertEqual(slot.document?.data, Data([2]))
+        slot.setPresented(false, for: current)
+        XCTAssertFalse(slot.presented)
+        XCTAssertEqual(slot.document?.id, current, "Wait for completion or cancellation to release bytes")
+        XCTAssertTrue(slot.finish(current))
+        XCTAssertNil(slot.document)
+    }
+
     func testErrorAndFramingChecks() async throws {
         let endpoint = try Endpoint("https://node.tail-test.ts.net")
         func api(_ fixture: ArtifactFixture) throws -> API {
@@ -71,6 +91,11 @@ final class ArtifactTests: XCTestCase, @unchecked Sendable {
         let redirect = try api(.init(data: Data(), mime: "text/plain", status: 307, extra: ["Location": "https://elsewhere.invalid/"]))
         do { _ = try await redirect.artifact(ref(), agent: "a", purpose: .download); XCTFail() }
         catch ClientError.response(307) {}
+        for foreign in ["https://elsewhere.invalid/api/agents/a/artifacts/\(id)", "https://node.tail-test.ts.net/other"] {
+            let wrongSource = try api(.init(data: Data("abc".utf8), mime: "application/octet-stream", responseURL: URL(string: foreign)))
+            do { _ = try await wrongSource.artifact(ref(), agent: "a", purpose: .download); XCTFail() }
+            catch ClientError.origin {}
+        }
         for fixture in [
             ArtifactFixture(data: Data("abc".utf8), mime: "application/octet-stream", extra: ["Content-Length": "4"]),
             ArtifactFixture(data: Data("ab".utf8), mime: "application/octet-stream"),
@@ -91,10 +116,11 @@ private actor ArtifactFixture: ArtifactByteTransport {
     let mime: String
     let status: Int
     let extra: [String: String]
+    let responseURL: URL?
     private(set) var requests: [URLRequest] = []
 
-    init(data: Data, mime: String, status: Int = 200, extra: [String: String] = [:]) {
-        body = data; self.mime = mime; self.status = status; self.extra = extra
+    init(data: Data, mime: String, status: Int = 200, extra: [String: String] = [:], responseURL: URL? = nil) {
+        body = data; self.mime = mime; self.status = status; self.extra = extra; self.responseURL = responseURL
     }
 
     func artifactBytes(for request: URLRequest, limit: Int) async throws -> (Data, HTTPURLResponse) {
@@ -104,6 +130,6 @@ private actor ArtifactFixture: ArtifactByteTransport {
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         requests.append(request)
         let headers = ["Content-Type": mime, "Content-Disposition": "attachment"].merging(extra) { _, newest in newest }
-        return (body, HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers)!)
+        return (body, HTTPURLResponse(url: responseURL ?? request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers)!)
     }
 }

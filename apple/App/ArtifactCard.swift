@@ -13,8 +13,8 @@ struct ArtifactCard: View {
     @State private var request: Request?
     @State private var preview: ArtifactPreview?
     @State private var error: String?
-    @State private var document: ArtifactExport?
-    @State private var exporting = false
+    @State private var export = ArtifactExportSlot()
+    private var document: ArtifactExport? { export.document }
 
     private struct Request: Equatable {
         let id = UUID()
@@ -64,14 +64,12 @@ struct ArtifactCard: View {
 
     private var exportPicker: some ViewModifier {
         let identity = document?.id
-        let binding = Binding(get: { exporting && document?.id == identity && available }, set: { value in
-            if document?.id == identity { exporting = value }
+        let binding = Binding(get: { export.presented && document?.id == identity && available }, set: { value in
+            export.setPresented(value, for: identity)
         })
         return ArtifactPicker(presented: binding, document: available ? document : nil, filename: ref.exportName,
                               completion: { failed in
-            guard let identity, document?.id == identity else { return }
-            document = nil
-            exporting = false
+            guard export.finish(identity) else { return }
             if failed && available { error = "Could not export the artifact." }
         })
     }
@@ -86,8 +84,7 @@ struct ArtifactCard: View {
         request = nil
         preview = nil
         error = nil
-        exporting = false
-        document = nil
+        export.reset()
     }
 
     private func load(_ item: Request) async {
@@ -101,8 +98,7 @@ struct ArtifactCard: View {
             try Task.checkCancellation()
             guard request == item, item.route == route, available else { return }
             if case .download(let data) = payload {
-                document = ArtifactExport(data: data)
-                exporting = true
+                export.begin(data)
             } else { preview = content }
         } catch is CancellationError {
         } catch {
@@ -153,7 +149,33 @@ private struct ArtifactPicker: ViewModifier {
     }
 }
 
-private struct ArtifactExport: FileDocument {
+struct ArtifactExportSlot {
+    private(set) var document: ArtifactExport?
+    private(set) var presented = false
+
+    mutating func begin(_ data: Data) {
+        document = ArtifactExport(data: data)
+        presented = true
+    }
+
+    mutating func setPresented(_ value: Bool, for identity: UUID?) {
+        guard let identity, document?.id == identity else { return }
+        presented = value
+    }
+
+    @discardableResult mutating func finish(_ identity: UUID?) -> Bool {
+        guard let identity, document?.id == identity else { return false }
+        reset()
+        return true
+    }
+
+    mutating func reset() {
+        presented = false
+        document = nil
+    }
+}
+
+struct ArtifactExport: FileDocument {
     let id = UUID()
     static let readableContentTypes: [UTType] = [.data]
     let data: Data
