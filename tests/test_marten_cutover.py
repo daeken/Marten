@@ -1,7 +1,8 @@
 """No test invokes the deployment CLI or interacts with port 7450."""
 
+from contextlib import contextmanager
 from dataclasses import asdict, replace
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
@@ -64,7 +65,8 @@ class Fake:
             return cutover.wait_exit(host, old, seconds, lambda: self.now, self.sleep)
 
         with patch.dict(cutover.stop.__globals__, wait_exit=wait):
-            cutover.stop(self, ROOT, 51000, OLD, 60, 30, force)
+            drain = SimpleNamespace(wait_ready=lambda: None, confirm_ready=lambda: float('inf'), abort=lambda: None)
+            cutover.stop(self, ROOT, 51000, OLD, 60, 30, force, drain)
 
 
 class DrainTests(unittest.TestCase):
@@ -172,6 +174,19 @@ class NoticeCliTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, 2)
 
 
+    def test_legacy_pin_and_release_only_no_kill_gate(self):
+        pinned = ('--legacy-first-install', cutover.LEGACY_FIRST_INSTALL)
+        self.invoke('release', *pinned)
+        for mode, flags in (('release', ('--legacy-first-install', 'a' * 40)),
+                            ('resume', pinned), ('inspect', pinned),
+                            ('release', (*pinned, '--kill-after-grace')),
+                            ('release', (*pinned, '--sha', cutover.LEGACY_FIRST_INSTALL))):
+            with self.subTest(mode=mode, flags=flags), \
+                 patch.object(sys, 'stderr'), self.assertRaises(SystemExit) as raised:
+                self.invoke(mode, *flags)
+            self.assertEqual(raised.exception.code, 2)
+
+
 class ReleaseTests(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
@@ -201,7 +216,7 @@ class ReleaseTests(unittest.TestCase):
         cutover.atomic_json(self.job / 'generation.json', asdict(self.old))
         self.args = SimpleNamespace(mode='release', job=self.job, expected_home=self.mounted,
                                     sha='a' * 40, notice_deadline=None, grace=60, late_wait=60,
-                                    kill_after_grace=False)
+                                    kill_after_grace=False, legacy_first_install=None)
         self.h = Fake()
         self.h.generation = self.old
         self.events = []
@@ -390,6 +405,236 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(self.events, ['prebuild'])
 
 
+class PreRestartTests(unittest.TestCase):
+    @contextmanager
+    def endpoint(self, respond):
+        calls = []
+        lease = {}
+        test = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def handle_request(self):
+                test.assertEqual(self.headers.get('Authorization'), 'Bearer scratch-token')
+                if self.command == 'POST':
+                    lease.update(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
+                    test.assertEqual(set(lease), {'id', 'pid', 'leaseSeconds'})
+                    test.assertEqual(lease['pid'], OLD.pid)
+                    test.assertEqual(lease['leaseSeconds'], 120)
+                    test.assertRegex(lease['id'], r'^[a-f0-9]{32}$')
+                elif lease:
+                    test.assertEqual(self.headers.get('X-Marten-Drain-Id'), lease['id'])
+                    test.assertEqual(self.headers.get('X-Marten-Drain-Pid'), str(OLD.pid))
+                calls.append((self.command, self.path))
+                status, fields = respond(calls)
+                if status is None:  # Accepted POST or other request with lost response
+                    return
+                self.send_response(status)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Cache-Control', 'no-store')
+                self.end_headers()
+                if status == 200:
+                    if self.path == cutover.DRAIN_PATH and lease:
+                        fields = dict(dict(id=lease['id'], pid=OLD.pid, remainingMs=100_000,
+                                           state='ready', activeOperations=0, pendingMessages=0), **fields)
+                    self.wfile.write(json.dumps(fields).encode())
+
+            do_POST = do_DELETE = do_GET = handle_request
+
+            def log_message(self, *_):
+                pass
+
+        with ThreadingHTTPServer(('127.0.0.1', 0), Handler) as server:
+            worker = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': 0.01})
+            worker.start()
+            try:
+                yield server.server_port, calls
+            finally:
+                server.shutdown()
+                worker.join(2)
+
+    def stop(self, host, port, *, legacy=False):
+        with patch.dict(cutover.stop.__globals__, wait_exit=lambda *_: True):
+            drain = (cutover.LegacyDrain(port, 'scratch-token') if legacy else
+                     cutover.LeaseDrain(host, ROOT, port, OLD, 'scratch-token'))
+            cutover.stop(host, ROOT, port, OLD, 60, 60, False, drain)
+
+    def test_drains_and_rechecks_ready_immediately_before_term(self):
+        host = Fake()
+
+        def respond(calls):
+            self.assertEqual(host.sent, [])
+            return ((200, dict(state='draining', activeOperations=1, pendingMessages=1))
+                    if len(calls) == 1 else (200, {}))
+
+        with self.endpoint(respond) as (port, calls):
+            self.stop(host, port)
+        self.assertEqual(calls, [(method, cutover.DRAIN_PATH) for method in ('POST', 'GET', 'GET')])
+        self.assertEqual(host.sent, [(OLD, signal.SIGTERM, 0)])
+
+    def test_busy_bad_shape_stale_expiry_and_lost_begin_never_term(self):
+        scenarios = (
+            ((200, dict(state='busy', pendingMessages=1)),),
+            ((200, dict(state='ready', pendingMessages=1)),),
+            ((200, dict(state='ready', activeOperations=True)),),
+            ((200, dict(id='different')),),
+            ((200, dict(pid=12345)),),
+            ((200, {}), (200, dict(state='draining', activeOperations=1))),
+            ((200, {}), (409, {})),
+            ((200, {}), (200, dict(remainingMs=1000))),
+            ((None, {}),),
+        )
+        for responses in scenarios:
+            with self.subTest(responses=responses):
+                host = Fake()
+
+                def respond(calls):
+                    self.assertEqual(host.sent, [])
+                    return (204, {}) if calls[-1][0] == 'DELETE' else responses[len(calls) - 1]
+
+                with self.endpoint(respond) as (port, calls):
+                    with self.assertRaises(cutover.CutoverError) as error:
+                        self.stop(host, port)
+                self.assertNotIn('scratch-token', str(error.exception))
+                self.assertEqual(host.sent, [])
+                self.assertEqual([method for method, _ in calls],
+                                 ['POST'] + ['GET'] * (len(responses) - 1) + ['DELETE'])
+
+    def test_timed_out_begin_aborts_once_without_term_or_legacy(self):
+        host = Fake()
+        release_fixture = threading.Event()
+
+        def respond(calls):
+            if calls[-1][0] == 'POST':
+                release_fixture.wait(2)
+                return None, {}
+            return 204, {}
+
+        with patch.dict(cutover.LeaseDrain.observe.__globals__, DRAIN_HTTP_BUDGET=0.25):
+            with self.endpoint(respond) as (port, calls):
+                try:
+                    with self.assertRaisesRegex(cutover.CutoverError, 'HTTP'):
+                        self.stop(host, port)
+                finally:
+                    release_fixture.set()
+        self.assertEqual(calls, [(method, cutover.DRAIN_PATH) for method in ('POST', 'DELETE')])
+        self.assertEqual(host.sent, [])
+
+    def test_rejected_begin_does_not_fall_back(self):
+        for status in (302, 403, 404, 409):
+            with self.subTest(status=status):
+                host = Fake()
+                with self.endpoint(lambda _: (status, {})) as (port, calls):
+                    with self.assertRaisesRegex(cutover.CutoverError, f'HTTP {status}'):
+                        self.stop(host, port)
+                self.assertEqual(host.sent, [])
+                self.assertEqual(calls, [('POST', cutover.DRAIN_PATH)] +
+                                 ([('DELETE', cutover.DRAIN_PATH)] if status == 302 else []))
+
+    def test_generation_changes_after_final_http_no_term_or_abort_to_replacement(self):
+        host = Fake()
+
+        def respond(calls):
+            if calls[-1][0] == 'GET':
+                host.generation = replace(OLD, birth=replace(OLD.birth, version=20))
+            return 200, {}
+
+        with self.endpoint(respond) as (port, calls):
+            with self.assertRaisesRegex(cutover.CutoverError, 'generation'):
+                self.stop(host, port)
+        self.assertEqual([method for method, _ in calls], ['POST', 'GET'])
+        self.assertEqual(host.sent, [])
+
+    def test_ttl_is_anchored_before_response_and_rechecked_at_signal(self):
+        host = Fake()
+
+        def respond(calls):
+            if calls[-1][0] == 'GET':
+                host.now += 0.5
+                return 200, dict(remainingMs=2400)  # unsafe after transit, despite 2.4s in body
+            return (204, {}) if calls[-1][0] == 'DELETE' else (200, {})
+
+        with patch.object(time, 'monotonic', side_effect=lambda: host.now):
+            with self.endpoint(respond) as (port, calls):
+                with self.assertRaisesRegex(cutover.CutoverError, 'expiry'):
+                    self.stop(host, port)
+        self.assertEqual([method for method, _ in calls], ['POST', 'GET', 'DELETE'])
+        self.assertEqual(host.sent, [])
+
+    def test_final_identity_probe_consumes_ttl_margin(self):
+        host = Fake()
+        final_response_sent = threading.Event()
+        listeners = host.listeners
+
+        def slow_identity_probe(port):
+            if final_response_sent.is_set():
+                host.now += 0.5
+            return listeners(port)
+
+        host.listeners = slow_identity_probe
+
+        def respond(calls):
+            if calls[-1][0] == 'GET':
+                final_response_sent.set()
+                return 200, dict(remainingMs=2400)
+            return (204, {}) if calls[-1][0] == 'DELETE' else (200, {})
+
+        with patch.object(time, 'monotonic', side_effect=lambda: host.now):
+            with self.endpoint(respond) as (port, calls):
+                with self.assertRaisesRegex(cutover.CutoverError, 'Final readiness'):
+                    self.stop(host, port)
+        self.assertEqual([method for method, _ in calls], ['POST', 'GET', 'DELETE'])
+        self.assertEqual(host.sent, [])
+
+    def test_wait_budget_does_not_renew_even_if_server_reports_constant_remaining(self):
+        host = Fake()
+
+        def respond(calls):
+            return ((204, {}) if calls[-1][0] == 'DELETE' else
+                    (200, dict(state='draining', activeOperations=1, remainingMs=2500)))
+
+        with (patch.object(time, 'monotonic', side_effect=lambda: host.now),
+              patch.object(time, 'sleep', side_effect=host.sleep)):
+            with self.endpoint(respond) as (port, calls):
+                with self.assertRaisesRegex(cutover.CutoverError, 'Timed out'):
+                    self.stop(host, port)
+        self.assertEqual([method for method, _ in calls], ['POST', 'GET', 'DELETE'])
+        self.assertEqual(host.sent, [])
+        self.assertEqual(host.now, 0.5)
+
+    def test_legacy_only_absent_and_three_quiet_snapshots(self):
+        quiet = [dict(id='closed', status='idle', pending=0, closed=True, pausedEffective=False),
+                 dict(id='paused', status='idle', pending=0, closed=False, pausedEffective=True)]
+        for absent, final_change in ((404, {}), (200, {}), (403, {}),
+                                     (404, dict(pending=1)), (404, dict(status='paused')),
+                                     (404, dict(modelCall={'active': True})),
+                                     (404, dict(pending=False))):
+            with self.subTest(absent=absent, final_change=final_change):
+                host = Fake()
+
+                def respond(calls):
+                    self.assertEqual(host.sent, [])
+                    if calls[-1][1] == cutover.DRAIN_PATH:
+                        return absent, {}
+                    agents = [quiet[0], dict(quiet[1], **final_change)] if len(calls) == 4 else quiet
+                    return 200, dict(agents=agents)
+
+                with patch.object(time, 'sleep') as sleep:
+                    with self.endpoint(respond) as (port, calls):
+                        if absent == 404 and not final_change:
+                            self.stop(host, port, legacy=True)
+                            self.assertEqual(host.sent, [(OLD, signal.SIGTERM, 0)])
+                        else:
+                            with self.assertRaises(cutover.CutoverError):
+                                self.stop(host, port, legacy=True)
+                            self.assertEqual(host.sent, [])
+                    if absent == 404:
+                        sleep.assert_called_once_with(1)
+                    else:
+                        sleep.assert_not_called()
+                self.assertEqual(calls, [('GET', cutover.DRAIN_PATH)] +
+                                 ([('GET', '/api/status')] * 3 if absent == 404 else []))
+
+
 class HealthTests(unittest.TestCase):
     def test_loopback_ui_and_authenticated_status(self):
         paths = []
@@ -510,13 +755,37 @@ class DarwinTests(unittest.TestCase):
             fixture = root / cutover.DLL
             fixture.parent.mkdir(parents=True)
             fixture.write_text(dedent('''\
-                import os, signal, subprocess, sys, time
+                import json, os, signal, subprocess, sys, time
                 from pathlib import Path
                 from http.server import BaseHTTPRequestHandler, HTTPServer
 
                 class Handler(BaseHTTPRequestHandler):
+                    drain_id = None
+
+                    def drain_ready(self, accepted):
+                        self.send_response(200 if accepted else 409)
+                        self.send_header('Content-Type', 'application/json')
+                        self.send_header('Cache-Control', 'no-store')
+                        self.end_headers()
+                        if accepted:
+                            self.wfile.write(json.dumps(dict(id=self.drain_id, pid=os.getpid(), state='ready',
+                                activeOperations=0, pendingMessages=0, remainingMs=100_000)).encode())
+
+                    def do_POST(self):
+                        begin = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                        ok = (self.path == '/api/release/drain' and begin['pid'] == os.getpid()
+                              and self.headers.get('Authorization') == 'Bearer scratch-token')
+                        if ok:
+                            type(self).drain_id = begin['id']
+                        self.drain_ready(ok)
+
                     def do_GET(self):
                         ok = self.path == '/' or self.headers.get('Authorization') == 'Bearer scratch-token'
+                        if self.path == '/api/release/drain':
+                            self.drain_ready(ok and self.drain_id is not None
+                                and self.headers.get('X-Marten-Drain-Id') == self.drain_id
+                                and self.headers.get('X-Marten-Drain-Pid') == str(os.getpid()))
+                            return
                         self.send_response(200 if ok else 401)
                         self.end_headers()
                         if ok:
@@ -610,7 +879,7 @@ class DarwinTests(unittest.TestCase):
                 os.environ['SCRATCH_PORT'] = str(port)
                 args = SimpleNamespace(mode='release', job=job, expected_home=root / 'scratch-mounted',
                                        sha='a' * 40, notice_deadline=None, grace=1, late_wait=3,
-                                       kill_after_grace=False)
+                                       kill_after_grace=False, legacy_first_install=None)
                 m['deploy'](args, host, root)
                 ''')
             with subprocess.Popen([str(shim), cutover.DLL], cwd=root, env=env, text=True,

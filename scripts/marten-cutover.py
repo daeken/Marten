@@ -12,16 +12,23 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import signal
 import socket
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 PORT = 7450
 SHARED_LISTENER_GRACE = 2
+DRAIN_PATH = '/api/release/drain'
+DRAIN_LEASE_SECONDS = 120
+DRAIN_TERM_MARGIN = 2
+DRAIN_HTTP_BUDGET = 2
+LEGACY_FIRST_INSTALL = 'fda0f931680b4ecec0942949a888282d82ebc634'
 LOCK_DIR = Path('/private/tmp')
 DLL = 'src/Marten/bin/Debug/net10.0/Marten.dll'
 BUILD_DIR = str(Path(DLL).parent)
@@ -186,7 +193,7 @@ def wait_exit(host, old, seconds, clock=time.monotonic, sleep=time.sleep):
         sleep(min(0.25, remaining))
 
 
-def stop(host, root, port, old, grace, late, kill_after_grace):
+def stop(host, root, port, old, grace, late, kill_after_grace, drain):
     # `old` was already verified before prebuild. If it has since exited, the
     # caller may proceed through the normal port checks without sending TERM.
     if exited(host, old):
@@ -199,10 +206,25 @@ def stop(host, root, port, old, grace, late, kill_after_grace):
         raise
     if current != old:
         raise CutoverError('Listener did not match the reviewed old generation; no signal sent')
-    if not host.signal(old, signal.SIGTERM):
-        if exited(host, old):
-            return
-        raise CutoverError('TERM target could not be verified at delivery')
+    term_sent = False
+    try:
+        drain.wait_ready()
+        if inspect(host, root, port) != old:
+            raise CutoverError('Listener changed during pre-restart drain; no signal sent')
+        # Check the live lease after the potentially slow process probes, then
+        # check birth/TTL once more immediately before the kernel-bound signal.
+        confirm_until = drain.confirm_ready()
+        if (host.listeners(port) != {old.pid} or host.birth(old.pid) != old.birth
+                or time.monotonic() >= confirm_until):
+            raise CutoverError('Final readiness or generation could not be verified; no signal sent')
+        term_sent = host.signal(old, signal.SIGTERM)
+        if not term_sent:
+            if exited(host, old):
+                return
+            raise CutoverError('TERM target could not be verified at delivery')
+    finally:
+        if not term_sent:
+            drain.abort()
     if wait_exit(host, old, grace):
         return
     print(f'PID {old.pid} exceeded TERM grace; watching up to {late}s more', flush=True)
@@ -243,6 +265,182 @@ def check_port(host, port):
                 s.listen(1)
             except OSError as e:
                 raise CutoverError(f'Cannot claim port {port}; not starting ({e.strerror})') from e
+
+
+def drain_http(port, token, method, path, *, deadline, headers=None, body=None, limit=0):
+    """Return only bounded, redaction-safe data; never follow a redirect."""
+    def remaining():
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise CutoverError('Pre-restart HTTP deadline elapsed')
+        return left
+
+    headers = {'Authorization': f'Bearer {token}', **(headers or {})}
+    if body is not None:
+        headers['Content-Type'] = 'application/json'
+        body = json.dumps(body).encode('ascii')
+    conn = http.client.HTTPConnection('127.0.0.1', port, timeout=remaining())
+    timer = None
+    try:
+        conn.connect()
+        # A socket timeout alone allows a trickle response to extend each read.
+        sock = conn.sock
+
+        def cancel_read():
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+        timer = threading.Timer(remaining(), cancel_read)
+        timer.daemon = True
+        timer.start()
+        conn.request(method, path, headers=headers, body=body)
+        with conn.getresponse() as r:
+            data = r.read(limit + 1) if r.status == 200 and limit else None
+            remaining()
+            if data is not None and len(data) > limit:
+                raise CutoverError('Pre-restart HTTP response too large')
+            return r.status, r.headers, data
+    except (OSError, ValueError, http.client.HTTPException):
+        # HTTP exceptions can include peer-controlled headers or body bytes.
+        raise CutoverError('Pre-restart localhost HTTP request failed') from None
+    finally:
+        if timer:
+            timer.cancel()
+        conn.close()
+
+
+def json_object(headers, data):
+    if headers.get_content_type() == 'application/json':
+        try:
+            obj = json.loads(data, object_pairs_hook=unique_fields)
+            if isinstance(obj, dict):
+                return obj
+        except (ValueError, RecursionError):
+            pass
+    raise CutoverError('Unexpected pre-restart JSON response')
+
+
+def unique_fields(pairs):
+    obj = dict(pairs)
+    if len(obj) != len(pairs):
+        raise ValueError('Duplicate JSON fields')
+    return obj
+
+
+class LeaseDrain:
+    def __init__(self, host, root, port, old, token):
+        self.host, self.root, self.port, self.old, self.token = host, root, port, old, token
+        self.id = secrets.token_hex(16)
+        self.headers = {'X-Marten-Drain-Id': self.id, 'X-Marten-Drain-Pid': str(old.pid)}
+        self.attempted = False
+        self.until = None
+
+    def observe(self, method, body=None):
+        start = time.monotonic()
+        status, headers, data = drain_http(self.port, self.token, method, DRAIN_PATH,
+                                           deadline=min(start + DRAIN_HTTP_BUDGET, self.until),
+                                           headers=self.headers if method == 'GET' else None,
+                                           body=body, limit=4096)
+        if status != 200:
+            if method == 'POST' and status in (400, 403, 404, 409):
+                self.attempted = False  # explicit rejection, not an ambiguous begin
+            raise CutoverError(f'Pre-restart drain {method} refused (HTTP {status})')
+        obj = json_object(headers, data)
+        if ('no-store' not in (v.strip().lower() for v in headers.get('Cache-Control', '').split(','))
+                or obj.get('id') != self.id or type(obj.get('pid')) is not int or obj['pid'] != self.old.pid
+                or obj.get('state') not in ('draining', 'ready', 'busy')
+                or any(type(obj.get(k)) is not int or obj[k] < 0
+                       for k in ('remainingMs', 'activeOperations', 'pendingMessages'))
+                or obj['remainingMs'] > DRAIN_LEASE_SECONDS * 1000
+                or (obj['state'] == 'ready' and (obj['activeOperations'] or obj['pendingMessages']))):
+            raise CutoverError('Unexpected pre-restart drain response')
+        # Anchor at request start, not response receipt, and never extend it.
+        self.until = min(self.until, start + obj['remainingMs'] / 1000)
+        if obj['state'] == 'busy':
+            raise CutoverError('Pre-restart drain is busy; no TERM sent')
+        if self.until - time.monotonic() <= DRAIN_TERM_MARGIN:
+            raise CutoverError('Pre-restart drain lease expired or too close to expiry')
+        return obj['state']
+
+    def wait_ready(self):
+        self.until = time.monotonic() + DRAIN_LEASE_SECONDS
+        body = {'id': self.id, 'pid': self.old.pid, 'leaseSeconds': DRAIN_LEASE_SECONDS}
+        self.attempted = True  # POST may take effect even when its response is lost
+        state = self.observe('POST', body)
+        while state != 'ready':
+            time.sleep(min(0.25, max(0, self.until - time.monotonic() - DRAIN_TERM_MARGIN)))
+            if self.until - time.monotonic() <= DRAIN_TERM_MARGIN:
+                raise CutoverError('Timed out waiting for pre-restart drain; no TERM sent')
+            state = self.observe('GET')
+
+    def confirm_ready(self):
+        if self.observe('GET') != 'ready':
+            raise CutoverError('Pre-restart drain no longer ready; no TERM sent')
+        return self.until - DRAIN_TERM_MARGIN
+
+    def abort(self):
+        if not self.attempted:
+            return
+        self.attempted = False
+        try:
+            if inspect(self.host, self.root, self.port) == self.old:
+                status, _, _ = drain_http(self.port, self.token, 'DELETE', DRAIN_PATH, headers=self.headers,
+                                          deadline=time.monotonic() + DRAIN_HTTP_BUDGET)
+                if status == 204:
+                    return
+        except (CutoverError, OSError, subprocess.SubprocessError):
+            pass
+        print('Could not confirm drain release; any lease expires automatically', flush=True)
+
+
+class LegacyDrain:
+    """Explicit first install only. Old status is an observation, not a fence."""
+    def __init__(self, port, token):
+        self.port, self.token = port, token
+        self.ids = None
+
+    def probe(self, path, limit=0):
+        return drain_http(self.port, self.token, 'GET', path, limit=limit,
+                          deadline=time.monotonic() + DRAIN_HTTP_BUDGET)
+
+    def wait_ready(self):
+        status, _, _ = self.probe(DRAIN_PATH)
+        if status != 404:
+            raise CutoverError('Legacy first install requires HTTP 404 from the drain endpoint')
+        self.observe()
+        time.sleep(1)
+        self.observe()
+
+    def observe(self):
+        start = time.monotonic()
+        status, headers, data = self.probe('/api/status', limit=8 * 1024 * 1024)
+        if status != 200:
+            raise CutoverError(f'Legacy status request refused (HTTP {status})')
+        agents = json_object(headers, data).get('agents')
+        if not isinstance(agents, list) or not agents:
+            raise CutoverError('Legacy status lacks a nonempty agent inventory')
+        ids = set()
+        for agent in agents:
+            if (not isinstance(agent, dict) or not isinstance(agent.get('id'), str)
+                    or not agent['id'] or agent['id'] in ids or type(agent.get('closed')) is not bool
+                    or type(agent.get('pausedEffective')) is not bool
+                    or type(agent.get('pending')) is not int or agent['pending'] < 0):
+                raise CutoverError('Unexpected legacy agent status response')
+            if agent.get('status') != 'idle' or agent['pending'] or agent.get('modelCall') is not None:
+                raise CutoverError('Legacy agent status is not quiet; no TERM sent')
+            ids.add(agent['id'])
+        if self.ids is not None and ids != self.ids:
+            raise CutoverError('Legacy agent inventory changed; no TERM sent')
+        self.ids = ids
+        return start + DRAIN_HTTP_BUDGET
+
+    def confirm_ready(self):
+        return self.observe()
+
+    def abort(self):
+        pass  # No lease ever acquired in legacy mode.
 
 
 def http_check(port, token, timeout):
@@ -476,7 +674,9 @@ def deploy(args, host, root):
                         time.sleep(wait)
                 check_tree(root, args.sha)
                 verify_artifacts(root, base['artifacts'])
-                stop(host, root, PORT, old, args.grace, args.late_wait, args.kill_after_grace)
+                drain = (LegacyDrain(PORT, token) if args.legacy_first_install
+                         else LeaseDrain(host, root, PORT, old, token))
+                stop(host, root, PORT, old, args.grace, args.late_wait, args.kill_after_grace, drain)
             stage = 'startup'
             if not exited(host, old):
                 raise CutoverError('Old generation still running; not starting')
@@ -507,6 +707,8 @@ def main():
     p.add_argument('--grace', type=int, choices=range(1, 601), default=60, metavar='1..600')
     p.add_argument('--late-wait', type=int, choices=range(1, 601), default=60, metavar='1..600')
     p.add_argument('--kill-after-grace', action='store_true', help='allow same-generation KILL after both waits')
+    p.add_argument('--legacy-first-install', choices=(LEGACY_FIRST_INSTALL,), metavar='LIVE_SHA',
+                   help='attest the pinned old runtime is under a quiet maintenance window; no KILL')
     args = p.parse_args()
     if args.mode != 'inspect' and (not args.expected_home or not re.fullmatch(r'[0-9a-f]{40}', args.sha or '')):
         p.error('release/resume requires --expected-home and the full tested --sha')
@@ -520,6 +722,9 @@ def main():
         args.notice_deadline = time.monotonic() + (args.not_before - now)
     if args.mode != 'release' and args.kill_after_grace:
         p.error('only release may escalate')
+    if args.legacy_first_install and (args.mode != 'release' or args.kill_after_grace
+                                      or args.sha == LEGACY_FIRST_INSTALL):
+        p.error('legacy first install requires a new release SHA and disallows KILL')
     os.environ['PATH'] = PATH_PREFIX + os.environ.get('PATH', '')
     try:
         host = Darwin()
