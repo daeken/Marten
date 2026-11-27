@@ -1,6 +1,6 @@
 import XCTest
 
-/// Opt-in protocol: a human drives the official Device Hub posture control;
+/// Opt-in protocol: the operator drives the official Device Hub posture control;
 /// XCUI never synthesizes posture or accepts simulator geometry overrides.
 final class DuoTransitionTests: XCTestCase {
     @MainActor func testCoverToInnerAndBackMidChat() throws {
@@ -51,8 +51,18 @@ final class DuoTransitionTests: XCTestCase {
         }
 
         XCTAssertTrue(app.navigationBars["Marten"].waitForExistence(timeout: 10))
+        // This runner pins the dedicated Duo. During the display handoff, XCUI
+        // can briefly report 155.3 × 226 instead of the 466 × 678 cover.
+        func onCover() -> Bool {
+            let size = window.frame.size
+            return abs(size.width - 466) <= 2 && abs(size.height - 678) <= 2
+        }
+        if !onCover() {
+            XCTContext.runActivity(named: "SETUP ACTION: use official Device Hub to FOLD to the starting cover now") { _ in
+                wait("starting portrait cover", timeout: 120, until: onCover)
+            }
+        }
         let coverWidth = window.frame.width
-        XCTAssertGreaterThan(coverWidth, 0)
         let agent = app.staticTexts["Standalone Alpha"].firstMatch
         for _ in 0..<4 where !agent.exists || !agent.isHittable { app.swipeUp() }
         XCTAssertTrue(agent.isHittable)
@@ -67,16 +77,16 @@ final class DuoTransitionTests: XCTestCase {
         let baseline = try XCTUnwrap(times().last)
 
         XCTContext.runActivity(named: "ACTION: use official Device Hub to UNFOLD the dedicated Duo now") { _ in
-            wait("wider portrait inner display", timeout: 120) {
-                let size = window.frame.size
-                return size.width > coverWidth * 1.25 && size.height > size.width
+            // The Duo's default inner display is wider than tall even
+            // when the device itself has not rotated.
+            wait("wider inner display", timeout: 120) {
+                window.frame.width > coverWidth * 1.25
             }
             checkpoint("02 Inner · same conversation, archive and draft")
         }
         XCTContext.runActivity(named: "ACTION: use official Device Hub to FOLD back to cover now") { _ in
             wait("return to original portrait cover width", timeout: 120) {
-                let size = window.frame.size
-                return abs(size.width - coverWidth) <= 2 && size.height > size.width
+                onCover()
             }
             checkpoint("03 Returned cover · same conversation, archive and draft")
         }
