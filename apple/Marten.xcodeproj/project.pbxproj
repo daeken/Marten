@@ -1,0 +1,696 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		05CEFCF0AE2C7E8586FB8B4C /* Client.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13EA62427E8B256347FC0858 /* Client.swift */; };
+		0DD8586BD854D7794F711551 /* Messages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52B596FD73CE03FE5810A97B /* Messages.swift */; };
+		128763D247C303D05E3A32BA /* TailnetTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33414BAA3A0D9F1A66305699 /* TailnetTransport.swift */; };
+		12FDF7BB1B61E6AA06E8638B /* ArtifactContract.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86DFC4DB657A7EAC7BD651B8 /* ArtifactContract.swift */; };
+		16ADAD197A45DB844E4602DE /* WorkspaceDirectoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CAF38E5F8A92A6FDD19E7DB /* WorkspaceDirectoryTests.swift */; };
+		19F85D0A0E280CE4FE035639 /* DeviceManagement.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58CB3FDADC5254866A0B3501 /* DeviceManagement.swift */; };
+		2260B0B328F51E58556275E6 /* LiveEvents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7309633EE2E13A8F89FB924A /* LiveEvents.swift */; };
+		23A905C67BC47A823017DA6C /* Client.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13EA62427E8B256347FC0858 /* Client.swift */; };
+		27B630A4F773F4ED20DF90EE /* PendingComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F95E9B9905C7A988F2572DF /* PendingComposer.swift */; };
+		2F504A81DC2FDFF7E088AEA8 /* ProjectWorkspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = 710EAFECDF40B85F91489538 /* ProjectWorkspace.swift */; };
+		47F95AF728200D8996673317 /* QR.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB79A7B841A9E892C17E98A7 /* QR.swift */; };
+		480D9F1EE4B0159774C13F1E /* ClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E70246C11BAE9986E883FFA /* ClientTests.swift */; };
+		4840A29B12CC0D8540F1CA87 /* Operations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39B4F8B9ABCF38ED1999593C /* Operations.swift */; };
+		535526E45D48C8AF3A4E4BE8 /* Notebook.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FD59F4AC4F947B3F9984D71 /* Notebook.swift */; };
+		56322259F308F31D088F6C3E /* Timeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC4FEA88791C90D0E5315E22 /* Timeline.swift */; };
+		584D35746983352495BAF27B /* Connections.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FF64C6D95C2712DCD5F203E /* Connections.swift */; };
+		724A3E0D31209666CEC2652A /* Workspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7425BD4A106FDE0A234CC40 /* Workspace.swift */; };
+		7C279146A357027265D94DB4 /* ArtifactContract.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86DFC4DB657A7EAC7BD651B8 /* ArtifactContract.swift */; };
+		7E0874FE16B8DF9701CF346C /* Administration.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6F4F3E1FB9A5D1D84E9F2B2 /* Administration.swift */; };
+		8A7216E96170AAC9585274FE /* Timeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC4FEA88791C90D0E5315E22 /* Timeline.swift */; };
+		8D082F773F5DC8EBC960FD85 /* PendingComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F95E9B9905C7A988F2572DF /* PendingComposer.swift */; };
+		9282BA520E0A8129370A981A /* Inbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26B0506E9E29AC99DFA612AE /* Inbox.swift */; };
+		996D45C0A3EF134A28D2E99E /* Notebook.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FD59F4AC4F947B3F9984D71 /* Notebook.swift */; };
+		9A6E50D3F978ADB551378FB8 /* Workspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7425BD4A106FDE0A234CC40 /* Workspace.swift */; };
+		9CA6F859AB2A9024A2BEB3B9 /* RichTranscript.swift in Sources */ = {isa = PBXBuildFile; fileRef = 504195C01908429552CF5CD0 /* RichTranscript.swift */; };
+		A17F69A36520FBB7F303DDD0 /* ArtifactCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 065D08128D44080649FE294D /* ArtifactCard.swift */; };
+		A40C0E19F2A5703B53062ECF /* Operations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39B4F8B9ABCF38ED1999593C /* Operations.swift */; };
+		A765567A3860572D2F0B8BC5 /* MartenApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F88394C5EA8FF4E026A7BC1 /* MartenApp.swift */; };
+		AFA7F7F72F06595FF42F4EED /* AgentSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D5B77581012182B5CE21966 /* AgentSettings.swift */; };
+		B25E14328507A741FC4D4DC6 /* Connections.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FF64C6D95C2712DCD5F203E /* Connections.swift */; };
+		B2D11A5E574174A955EB7A2C /* Pairing.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5610B571F9AB02248FE2F42 /* Pairing.swift */; };
+		B4EE9191BCBFE52AB6BD866A /* MartenApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F88394C5EA8FF4E026A7BC1 /* MartenApp.swift */; };
+		B800BF68FCA150DB57CDB962 /* DeviceManagement.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58CB3FDADC5254866A0B3501 /* DeviceManagement.swift */; };
+		B8BA10C79AF174A4F7C9A1AB /* ClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E70246C11BAE9986E883FFA /* ClientTests.swift */; };
+		BCFDA48C0F9A61E70A4CDFBA /* TailnetTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33414BAA3A0D9F1A66305699 /* TailnetTransport.swift */; };
+		C0AD9A9D49D390CD6B9A4B9A /* ArtifactTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 063D968EB5BE925F95845096 /* ArtifactTests.swift */; };
+		C126AB3F7D6FC3F8C4159EF7 /* QR.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB79A7B841A9E892C17E98A7 /* QR.swift */; };
+		C478B7E89E54ECBB840212F7 /* Messages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52B596FD73CE03FE5810A97B /* Messages.swift */; };
+		C7D347CF686AF60C04E7A2C2 /* Providers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 097A46E1BF9D1439D8F4E1C1 /* Providers.swift */; };
+		C8A1FCFC8656D59C6F56FE67 /* LiveEvents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7309633EE2E13A8F89FB924A /* LiveEvents.swift */; };
+		DB582F4344E8D6A0B81CF279 /* ArtifactTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 063D968EB5BE925F95845096 /* ArtifactTests.swift */; };
+		DCC1E2EA2D51545F3615A95E /* RichTranscript.swift in Sources */ = {isa = PBXBuildFile; fileRef = 504195C01908429552CF5CD0 /* RichTranscript.swift */; };
+		E652BC28F8B7DD4B7E6BCC15 /* Administration.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6F4F3E1FB9A5D1D84E9F2B2 /* Administration.swift */; };
+		E7AFE5B2B48A8E47536B6C39 /* WorkspaceDirectoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CAF38E5F8A92A6FDD19E7DB /* WorkspaceDirectoryTests.swift */; };
+		EB35EBE20DC0BA1FA31B3BA1 /* ArtifactCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 065D08128D44080649FE294D /* ArtifactCard.swift */; };
+		F210C421087F3C1FE5B7C0BB /* Pairing.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5610B571F9AB02248FE2F42 /* Pairing.swift */; };
+		F22070ABEBD1DC30FD6873CF /* Inbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26B0506E9E29AC99DFA612AE /* Inbox.swift */; };
+		F989CD325FF9F20E8726DC51 /* Providers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 097A46E1BF9D1439D8F4E1C1 /* Providers.swift */; };
+		F9EC220C55A866FB4A16D094 /* ProjectWorkspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = 710EAFECDF40B85F91489538 /* ProjectWorkspace.swift */; };
+		FD50C3D509048985E1E04C0C /* AgentSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D5B77581012182B5CE21966 /* AgentSettings.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		8769300DD7DF57355BFD7FD8 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 3DB0DBF04017FAA80A74488D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C500E33940A7173A55C76789;
+			remoteInfo = Marten_macOS;
+		};
+		D5B2483B8D5745EEF9FF1D4D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 3DB0DBF04017FAA80A74488D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 7E5AFF2E0EA7093D85951C68;
+			remoteInfo = Marten_iOS;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		00C68D4A98BF181D3CE88355 /* MartenTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = MartenTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		063D968EB5BE925F95845096 /* ArtifactTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArtifactTests.swift; sourceTree = "<group>"; };
+		065D08128D44080649FE294D /* ArtifactCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArtifactCard.swift; sourceTree = "<group>"; };
+		097A46E1BF9D1439D8F4E1C1 /* Providers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Providers.swift; sourceTree = "<group>"; };
+		13EA62427E8B256347FC0858 /* Client.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Client.swift; sourceTree = "<group>"; };
+		1FD59F4AC4F947B3F9984D71 /* Notebook.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Notebook.swift; sourceTree = "<group>"; };
+		1FF64C6D95C2712DCD5F203E /* Connections.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Connections.swift; sourceTree = "<group>"; };
+		26B0506E9E29AC99DFA612AE /* Inbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Inbox.swift; sourceTree = "<group>"; };
+		33414BAA3A0D9F1A66305699 /* TailnetTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TailnetTransport.swift; sourceTree = "<group>"; };
+		39B4F8B9ABCF38ED1999593C /* Operations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Operations.swift; sourceTree = "<group>"; };
+		3CAF38E5F8A92A6FDD19E7DB /* WorkspaceDirectoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceDirectoryTests.swift; sourceTree = "<group>"; };
+		504195C01908429552CF5CD0 /* RichTranscript.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RichTranscript.swift; sourceTree = "<group>"; };
+		52B596FD73CE03FE5810A97B /* Messages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Messages.swift; sourceTree = "<group>"; };
+		58CB3FDADC5254866A0B3501 /* DeviceManagement.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceManagement.swift; sourceTree = "<group>"; };
+		710EAFECDF40B85F91489538 /* ProjectWorkspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectWorkspace.swift; sourceTree = "<group>"; };
+		7309633EE2E13A8F89FB924A /* LiveEvents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveEvents.swift; sourceTree = "<group>"; };
+		7436B48633AF38F0900290F1 /* MartenTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MartenTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		7D5B77581012182B5CE21966 /* AgentSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSettings.swift; sourceTree = "<group>"; };
+		7E70246C11BAE9986E883FFA /* ClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientTests.swift; sourceTree = "<group>"; };
+		86DFC4DB657A7EAC7BD651B8 /* ArtifactContract.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArtifactContract.swift; sourceTree = "<group>"; };
+		9F88394C5EA8FF4E026A7BC1 /* MartenApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MartenApp.swift; sourceTree = "<group>"; };
+		9F95E9B9905C7A988F2572DF /* PendingComposer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingComposer.swift; sourceTree = "<group>"; };
+		A6F4F3E1FB9A5D1D84E9F2B2 /* Administration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Administration.swift; sourceTree = "<group>"; };
+		AB79A7B841A9E892C17E98A7 /* QR.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QR.swift; sourceTree = "<group>"; };
+		AC4FEA88791C90D0E5315E22 /* Timeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Timeline.swift; sourceTree = "<group>"; };
+		BEE2674A0B2F5E7B72841D3F /* Marten.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Marten.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		C5610B571F9AB02248FE2F42 /* Pairing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Pairing.swift; sourceTree = "<group>"; };
+		C7AEF0AE07D2853578E1F294 /* Marten.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Marten.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		D7425BD4A106FDE0A234CC40 /* Workspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Workspace.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		1490046DDA8F6516148D49E5 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				BEE2674A0B2F5E7B72841D3F /* Marten.app */,
+				C7AEF0AE07D2853578E1F294 /* Marten.app */,
+				00C68D4A98BF181D3CE88355 /* MartenTests.xctest */,
+				7436B48633AF38F0900290F1 /* MartenTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		1E93BCA3FC2846A9727B3208 /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				063D968EB5BE925F95845096 /* ArtifactTests.swift */,
+				7E70246C11BAE9986E883FFA /* ClientTests.swift */,
+				3CAF38E5F8A92A6FDD19E7DB /* WorkspaceDirectoryTests.swift */,
+			);
+			path = Tests;
+			sourceTree = "<group>";
+		};
+		9333A5C200A70EAD051F4DD5 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				A6F4F3E1FB9A5D1D84E9F2B2 /* Administration.swift */,
+				7D5B77581012182B5CE21966 /* AgentSettings.swift */,
+				065D08128D44080649FE294D /* ArtifactCard.swift */,
+				86DFC4DB657A7EAC7BD651B8 /* ArtifactContract.swift */,
+				13EA62427E8B256347FC0858 /* Client.swift */,
+				1FF64C6D95C2712DCD5F203E /* Connections.swift */,
+				58CB3FDADC5254866A0B3501 /* DeviceManagement.swift */,
+				26B0506E9E29AC99DFA612AE /* Inbox.swift */,
+				7309633EE2E13A8F89FB924A /* LiveEvents.swift */,
+				9F88394C5EA8FF4E026A7BC1 /* MartenApp.swift */,
+				52B596FD73CE03FE5810A97B /* Messages.swift */,
+				1FD59F4AC4F947B3F9984D71 /* Notebook.swift */,
+				39B4F8B9ABCF38ED1999593C /* Operations.swift */,
+				C5610B571F9AB02248FE2F42 /* Pairing.swift */,
+				9F95E9B9905C7A988F2572DF /* PendingComposer.swift */,
+				710EAFECDF40B85F91489538 /* ProjectWorkspace.swift */,
+				097A46E1BF9D1439D8F4E1C1 /* Providers.swift */,
+				AB79A7B841A9E892C17E98A7 /* QR.swift */,
+				504195C01908429552CF5CD0 /* RichTranscript.swift */,
+				33414BAA3A0D9F1A66305699 /* TailnetTransport.swift */,
+				AC4FEA88791C90D0E5315E22 /* Timeline.swift */,
+				D7425BD4A106FDE0A234CC40 /* Workspace.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		F0BFD1C8FA7D84FFC1167B00 = {
+			isa = PBXGroup;
+			children = (
+				9333A5C200A70EAD051F4DD5 /* App */,
+				1E93BCA3FC2846A9727B3208 /* Tests */,
+				1490046DDA8F6516148D49E5 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		1A40054CB00A36D4EA566F05 /* MartenTests_macOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 82A3890AC7AB1AC010AC8F5E /* Build configuration list for PBXNativeTarget "MartenTests_macOS" */;
+			buildPhases = (
+				5E47CD19D6B219AA02D68F01 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				C09A36250B73788531D2C214 /* PBXTargetDependency */,
+			);
+			name = MartenTests_macOS;
+			packageProductDependencies = (
+			);
+			productName = MartenTests_macOS;
+			productReference = 7436B48633AF38F0900290F1 /* MartenTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		4D207568F4A12190A0549449 /* MartenTests_iOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FAD4A4E3263CA397D7D6AE11 /* Build configuration list for PBXNativeTarget "MartenTests_iOS" */;
+			buildPhases = (
+				9550957BEC8755B217F1EE36 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				0BD12F980F94A46AF9EE2ACA /* PBXTargetDependency */,
+			);
+			name = MartenTests_iOS;
+			packageProductDependencies = (
+			);
+			productName = MartenTests_iOS;
+			productReference = 00C68D4A98BF181D3CE88355 /* MartenTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		7E5AFF2E0EA7093D85951C68 /* Marten_iOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1A5A3B1AD5FA8FE12C8856C8 /* Build configuration list for PBXNativeTarget "Marten_iOS" */;
+			buildPhases = (
+				47D867AD7682BD75E173EC30 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Marten_iOS;
+			packageProductDependencies = (
+			);
+			productName = Marten_iOS;
+			productReference = BEE2674A0B2F5E7B72841D3F /* Marten.app */;
+			productType = "com.apple.product-type.application";
+		};
+		C500E33940A7173A55C76789 /* Marten_macOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D95D208B8CEA3A6DDEF51FD7 /* Build configuration list for PBXNativeTarget "Marten_macOS" */;
+			buildPhases = (
+				5FC0CC5C9E88A0D76C1D328A /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Marten_macOS;
+			packageProductDependencies = (
+			);
+			productName = Marten_macOS;
+			productReference = C7AEF0AE07D2853578E1F294 /* Marten.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		3DB0DBF04017FAA80A74488D /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					7E5AFF2E0EA7093D85951C68 = {
+						ProvisioningStyle = Automatic;
+					};
+					C500E33940A7173A55C76789 = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = F969FE62512DEC69085ECDBC /* Build configuration list for PBXProject "Marten" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = F0BFD1C8FA7D84FFC1167B00;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 1490046DDA8F6516148D49E5 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				7E5AFF2E0EA7093D85951C68 /* Marten_iOS */,
+				C500E33940A7173A55C76789 /* Marten_macOS */,
+				4D207568F4A12190A0549449 /* MartenTests_iOS */,
+				1A40054CB00A36D4EA566F05 /* MartenTests_macOS */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		47D867AD7682BD75E173EC30 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E652BC28F8B7DD4B7E6BCC15 /* Administration.swift in Sources */,
+				FD50C3D509048985E1E04C0C /* AgentSettings.swift in Sources */,
+				A17F69A36520FBB7F303DDD0 /* ArtifactCard.swift in Sources */,
+				7C279146A357027265D94DB4 /* ArtifactContract.swift in Sources */,
+				05CEFCF0AE2C7E8586FB8B4C /* Client.swift in Sources */,
+				B25E14328507A741FC4D4DC6 /* Connections.swift in Sources */,
+				B800BF68FCA150DB57CDB962 /* DeviceManagement.swift in Sources */,
+				F22070ABEBD1DC30FD6873CF /* Inbox.swift in Sources */,
+				C8A1FCFC8656D59C6F56FE67 /* LiveEvents.swift in Sources */,
+				B4EE9191BCBFE52AB6BD866A /* MartenApp.swift in Sources */,
+				C478B7E89E54ECBB840212F7 /* Messages.swift in Sources */,
+				535526E45D48C8AF3A4E4BE8 /* Notebook.swift in Sources */,
+				4840A29B12CC0D8540F1CA87 /* Operations.swift in Sources */,
+				B2D11A5E574174A955EB7A2C /* Pairing.swift in Sources */,
+				8D082F773F5DC8EBC960FD85 /* PendingComposer.swift in Sources */,
+				F9EC220C55A866FB4A16D094 /* ProjectWorkspace.swift in Sources */,
+				F989CD325FF9F20E8726DC51 /* Providers.swift in Sources */,
+				C126AB3F7D6FC3F8C4159EF7 /* QR.swift in Sources */,
+				DCC1E2EA2D51545F3615A95E /* RichTranscript.swift in Sources */,
+				BCFDA48C0F9A61E70A4CDFBA /* TailnetTransport.swift in Sources */,
+				8A7216E96170AAC9585274FE /* Timeline.swift in Sources */,
+				724A3E0D31209666CEC2652A /* Workspace.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5E47CD19D6B219AA02D68F01 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				DB582F4344E8D6A0B81CF279 /* ArtifactTests.swift in Sources */,
+				B8BA10C79AF174A4F7C9A1AB /* ClientTests.swift in Sources */,
+				E7AFE5B2B48A8E47536B6C39 /* WorkspaceDirectoryTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5FC0CC5C9E88A0D76C1D328A /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7E0874FE16B8DF9701CF346C /* Administration.swift in Sources */,
+				AFA7F7F72F06595FF42F4EED /* AgentSettings.swift in Sources */,
+				EB35EBE20DC0BA1FA31B3BA1 /* ArtifactCard.swift in Sources */,
+				12FDF7BB1B61E6AA06E8638B /* ArtifactContract.swift in Sources */,
+				23A905C67BC47A823017DA6C /* Client.swift in Sources */,
+				584D35746983352495BAF27B /* Connections.swift in Sources */,
+				19F85D0A0E280CE4FE035639 /* DeviceManagement.swift in Sources */,
+				9282BA520E0A8129370A981A /* Inbox.swift in Sources */,
+				2260B0B328F51E58556275E6 /* LiveEvents.swift in Sources */,
+				A765567A3860572D2F0B8BC5 /* MartenApp.swift in Sources */,
+				0DD8586BD854D7794F711551 /* Messages.swift in Sources */,
+				996D45C0A3EF134A28D2E99E /* Notebook.swift in Sources */,
+				A40C0E19F2A5703B53062ECF /* Operations.swift in Sources */,
+				F210C421087F3C1FE5B7C0BB /* Pairing.swift in Sources */,
+				27B630A4F773F4ED20DF90EE /* PendingComposer.swift in Sources */,
+				2F504A81DC2FDFF7E088AEA8 /* ProjectWorkspace.swift in Sources */,
+				C7D347CF686AF60C04E7A2C2 /* Providers.swift in Sources */,
+				47F95AF728200D8996673317 /* QR.swift in Sources */,
+				9CA6F859AB2A9024A2BEB3B9 /* RichTranscript.swift in Sources */,
+				128763D247C303D05E3A32BA /* TailnetTransport.swift in Sources */,
+				56322259F308F31D088F6C3E /* Timeline.swift in Sources */,
+				9A6E50D3F978ADB551378FB8 /* Workspace.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		9550957BEC8755B217F1EE36 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C0AD9A9D49D390CD6B9A4B9A /* ArtifactTests.swift in Sources */,
+				480D9F1EE4B0159774C13F1E /* ClientTests.swift in Sources */,
+				16ADAD197A45DB844E4602DE /* WorkspaceDirectoryTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		0BD12F980F94A46AF9EE2ACA /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 7E5AFF2E0EA7093D85951C68 /* Marten_iOS */;
+			targetProxy = D5B2483B8D5745EEF9FF1D4D /* PBXContainerItemProxy */;
+		};
+		C09A36250B73788531D2C214 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C500E33940A7173A55C76789 /* Marten_macOS */;
+			targetProxy = 8769300DD7DF57355BFD7FD8 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		0226515D4139BBDCD6722F4F /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.marten.native.tests;
+				PRODUCT_NAME = MartenTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Marten.app/Marten";
+			};
+			name = Debug;
+		};
+		07B1F97BE513F49EB18D596E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.marten.native.tests;
+				PRODUCT_NAME = MartenTests;
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Marten.app/Contents/MacOS/Marten";
+			};
+			name = Debug;
+		};
+		0A3E3C29551429FE6D52EA1A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				INFOPLIST_FILE = Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.marten.native;
+				PRODUCT_NAME = Marten;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		2150B8D2700B89C34B5E988F /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.marten.native;
+				PRODUCT_NAME = Marten;
+				SDKROOT = macosx;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		26387A4D40826D966C4E6037 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		552546D8BD8B598877A0B899 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				INFOPLIST_FILE = Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.marten.native;
+				PRODUCT_NAME = Marten;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		639E99E1737060E36C81ADE1 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.marten.native.tests;
+				PRODUCT_NAME = MartenTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Marten.app/Marten";
+			};
+			name = Release;
+		};
+		D2DB729D0B9E47F858D9D909 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.marten.native;
+				PRODUCT_NAME = Marten;
+				SDKROOT = macosx;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		FBC901AB3AFF8F8C7A87220C /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		FD0195A53282BE4F76D6E642 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.marten.native.tests;
+				PRODUCT_NAME = MartenTests;
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Marten.app/Contents/MacOS/Marten";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		1A5A3B1AD5FA8FE12C8856C8 /* Build configuration list for PBXNativeTarget "Marten_iOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				552546D8BD8B598877A0B899 /* Debug */,
+				0A3E3C29551429FE6D52EA1A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		82A3890AC7AB1AC010AC8F5E /* Build configuration list for PBXNativeTarget "MartenTests_macOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				07B1F97BE513F49EB18D596E /* Debug */,
+				FD0195A53282BE4F76D6E642 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		D95D208B8CEA3A6DDEF51FD7 /* Build configuration list for PBXNativeTarget "Marten_macOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				2150B8D2700B89C34B5E988F /* Debug */,
+				D2DB729D0B9E47F858D9D909 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		F969FE62512DEC69085ECDBC /* Build configuration list for PBXProject "Marten" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				26387A4D40826D966C4E6037 /* Debug */,
+				FBC901AB3AFF8F8C7A87220C /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		FAD4A4E3263CA397D7D6AE11 /* Build configuration list for PBXNativeTarget "MartenTests_iOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0226515D4139BBDCD6722F4F /* Debug */,
+				639E99E1737060E36C81ADE1 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 3DB0DBF04017FAA80A74488D /* Project object */;
+}
