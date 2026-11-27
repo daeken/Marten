@@ -10,6 +10,7 @@ struct WorkspaceView: View {
     let routeID: UUID
     let networkActive: Bool
     let composers: ConversationComposers
+    var artifactSessionIsCurrent: @MainActor () -> Bool = { false }
     @State private var pendingHint = UUID()
     @State private var controls = WorkspaceControls()
     @State private var showClosedChats = false
@@ -258,6 +259,7 @@ struct WorkspaceView: View {
                 ConversationView(api: api, agent: agent, refreshStatus: refresh, routeID: routeID,
                                  networkActive: networkActive && path.last == destination, eventHint: eventHint,
                                  pendingHint: pendingHint, pending: composers.state(id, using: api),
+                                 artifactRouteIsCurrent: { artifactSessionIsCurrent() && path.last == destination },
                                  inbox: inbox, answer: submitAnswer,
                                  activity: networkActive ? activity[id] : nil,
                                  controlsReady: controlsReady, lifecycle: { action in
@@ -549,6 +551,7 @@ private struct ConversationView: View {
     @State private var timeline = TimelinePages()
     let pendingHint: UUID
     let pending: PendingComposer
+    let artifactRouteIsCurrent: @MainActor () -> Bool
     let inbox: InboxState
     let answer: (InboxMessage, Int?) -> Void
     let activity: LiveActivity?
@@ -695,7 +698,8 @@ private struct ConversationView: View {
                                     case .question(let question):
                                         QuestionCard(message: question, inbox: inbox, active: networkActive, answer: answer)
                                     case .entry(let entry, let result):
-                                        EntryRow(entry: entry, result: result, api: api, agent: agent.id, active: networkActive, route: routeID)
+                                        EntryRow(entry: entry, result: result, api: api, agent: agent.id, active: networkActive,
+                                                 route: routeID, artifactRouteIsCurrent: artifactRouteIsCurrent)
                                     }
                                 }.id(row.id)
                             }

@@ -22,6 +22,17 @@ struct TailnetTransport: EventTransport {
         return try await transport.boundedData(for: request, limit: limit)
     }
 
+    func artifactBytes(for request: URLRequest, limit: Int) async throws -> (Data, HTTPURLResponse) {
+        try check(request, events: false)
+        guard request.httpMethod == "GET", request.url?.query == nil,
+              let bearer = request.value(forHTTPHeaderField: "Authorization"), bearer.hasPrefix("Bearer "),
+              API.validToken(String(bearer.dropFirst(7))) else { throw ClientError.unauthorized }
+        guard let stream = transport as? any ArtifactByteTransport else { throw ClientError.tailnetNotReady }
+        let (bytes, response) = try await stream.artifactBytes(for: request, limit: limit)
+        guard response.url?.absoluteString == request.url?.absoluteString else { throw ClientError.origin }
+        return (bytes, response)
+    }
+
     func events(for request: URLRequest) throws -> EventStream {
         try check(request, events: true)
         guard let header = request.value(forHTTPHeaderField: "Authorization"), header.hasPrefix("Bearer "),

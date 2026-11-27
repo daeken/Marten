@@ -22,22 +22,34 @@ struct RootView: View {
     @Bindable var connections: Connections
     @Environment(\.scenePhase) private var phase
     @State private var foregroundReady = false
+    @State private var artifactForeground = UUID()
 
     var body: some View {
         Group {
             if let api = connections.connected {
+                let generation = connections.transportGeneration
+                let workspace = connections.workspaceID
+                let foreground = artifactForeground
                 WorkspaceView(api: api, showServers: { connections.showServers = true },
                               endPairedSession: connections.pairingEnabled && api.endpoint.url.scheme == "https"
                                   ? { connections.endRejectedPairedSession(api) } : nil,
                               routeID: connections.transportGeneration,
                               networkActive: phase == .active && foregroundReady && !connections.busy && connections.routeUsable,
-                              composers: connections.composers)
+                              composers: connections.composers,
+                              artifactSessionIsCurrent: {
+                    phase == .active && foregroundReady && artifactForeground == foreground
+                        && !connections.busy && connections.routeUsable && !connections.showServers
+                        && connections.workspaceID == workspace && connections.transportGeneration == generation
+                        && connections.connected?.endpoint == api.endpoint && connections.connected?.token == api.token
+                })
                     .id(connections.workspaceID)
             } else {
                 ServerScreen(connections: connections)
             }
         }
-        .onChange(of: phase) { if phase != .active { foregroundReady = false } }
+        .onChange(of: phase) {
+            if phase != .active { foregroundReady = false; artifactForeground = UUID() }
+        }
         .task(id: phase) {
             guard phase == .active else { return }
             // A cancelled recovery may still be closing the old node.
