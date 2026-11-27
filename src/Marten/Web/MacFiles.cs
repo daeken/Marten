@@ -10,7 +10,7 @@ namespace Marten.Web;
 
 internal sealed class MacFiles(bool enabled, Func<HttpContext, bool> nativeIngress, DevicePairing pairing,
 	CancellationToken stopping, string rootPath = "/", Func<MacFiles.PublicationPhase, Task>? publicationFixture = null, Func<bool>? ingressReady = null,
-	TimeProvider? clock = null, TimeSpan? sweepInterval = null, TimeSpan? operationBudget = null) {
+	TimeProvider? clock = null, TimeSpan? sweepInterval = null, TimeSpan? operationBudget = null, Action<string>? closingFixture = null) {
 	internal sealed class Route;
 	internal enum PublicationPhase { Staged, Committed, FirstChunk }
 	internal int ActiveOperations { get { lock(gate) return busy.Count; } }
@@ -170,19 +170,23 @@ internal sealed class MacFiles(bool enabled, Func<HttpContext, bool> nativeIngre
 	}
 
 	void FinishOperation(CancellationToken device) {
-		List<Walker> expired;
-		lock(gate) {
-			// Election and busy release are ordered together against the shutdown
-			// sweep: either it sees us idle, or we see stopping and own cleanup.
-			expired = DetachExpired(device);
-			if(expired.Count == 0) { busy.Remove(device); return; }
+		while(true) {
+			List<Walker> expired;
+			lock(gate) {
+				// Even after an off-lock close, re-elect before releasing busy:
+				// shutdown may have skipped this owner during that close.
+				expired = DetachExpired(device);
+				if(expired.Count == 0) { busy.Remove(device); return; }
+			}
+			foreach(var walk in expired) Release(walk);
 		}
-		try { foreach(var walk in expired) Release(walk); }
-		finally { lock(gate) busy.Remove(device); }
 	}
 
 	void Release(Walker walk) {
-		try { walk.Dispose(); } finally { lock(gate) walks.Remove(walk); }
+		try {
+			try { closingFixture?.Invoke(walk.Directory.Path); }
+			finally { walk.Dispose(); }
+		} finally { lock(gate) walks.Remove(walk); }
 	}
 
 	void Commit(CancellationToken device, Pending pending, CancellationToken token) {

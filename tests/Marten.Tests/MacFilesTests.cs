@@ -153,7 +153,58 @@ public class MacFilesTests {
 		long ticks;
 		public override long TimestampFrequency => TimeSpan.TicksPerSecond;
 		public override long GetTimestamp() => Interlocked.Read(ref ticks);
-		public void Expire() => Interlocked.Add(ref ticks, TimeSpan.FromMinutes(4).Ticks);
+		public void Expire() => Advance(TimeSpan.FromMinutes(4));
+		public void Advance(TimeSpan delta) => Interlocked.Add(ref ticks, delta.Ticks);
+	}
+
+	[Fact]
+	public async Task ShutdownDuringOffLockCloseRetiresBothWalkersExactlyOnce() {
+		if(!MacFileSystem.Supported) return;
+		var time = new CursorClock();
+		var staged = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+		var resume = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+		var closing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+		var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+		var closed = new System.Collections.Concurrent.ConcurrentQueue<string>();
+		var armed = 0;
+		await using var f = await Fixture.Start(clock: time, publicationFixture: async phase => {
+			if(phase == MacFiles.PublicationPhase.Staged && Interlocked.Exchange(ref armed, 0) == 1) {
+				staged.SetResult();
+				await resume.Task.WaitAsync(TimeSpan.FromSeconds(5));
+			}
+		}, closingFixture: path => {
+			closed.Enqueue(path);
+			if(path == "older") {
+				closing.TrySetResult();
+				release.Task.WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+			}
+		});
+		foreach(var name in new[] { "older", "newer" }) {
+			var dir = Directory.CreateDirectory(Path.Combine(f.Root, name)).FullName;
+			for(var i = 0; i < 101; i++) File.WriteAllText(Path.Combine(dir, $"f{i:000}"), "");
+		}
+		var root = (await f.Json("roots"))[0].GetProperty("id").GetString();
+		var dirs = (await f.Json($"entries/{root}")).GetProperty("entries").EnumerateArray()
+			.ToDictionary(d => d.GetProperty("name").GetString()!, d => d.GetProperty("id").GetString());
+		await f.Json($"entries/{dirs["older"]}");
+		time.Advance(TimeSpan.FromMinutes(2));
+		await f.Json($"entries/{dirs["newer"]}");
+		Assert.Equal(2, f.RetainedStreams);
+		Interlocked.Exchange(ref armed, 1);
+		var pending = f.Get("roots");
+		try {
+			await staged.Task.WaitAsync(TimeSpan.FromSeconds(5));
+			time.Advance(TimeSpan.FromMinutes(2));
+			resume.TrySetResult();
+			await closing.Task.WaitAsync(TimeSpan.FromSeconds(5));
+			f.Stop();
+			await f.SweepCompletion.WaitAsync(TimeSpan.FromSeconds(5));
+			Assert.Equal(2, f.RetainedStreams);
+			Assert.Equal(1, f.ActiveOperations);
+		} finally { resume.TrySetResult(); release.TrySetResult(); }
+		using var response = await pending;
+		await f.WaitForIdle();
+		Assert.Equal(new[] { "", "older", "newer" }, closed.ToArray());
 	}
 
 	[Theory]
@@ -269,6 +320,51 @@ public class MacFilesTests {
 		Assert.Equal(HttpStatusCode.Unauthorized, (await f.Get("roots")).StatusCode);
 	}
 
+	[Theory]
+	[InlineData(false)]
+	[InlineData(true)]
+	public async Task ActualLauncherStartsMatchedGoFixtureAndClosesLease(bool enabled) {
+		var executable = Environment.GetEnvironmentVariable("MARTEN_MAC_FILES_PROXY_FIXTURE");
+		if(executable == null || !(OperatingSystem.IsMacOS() || OperatingSystem.IsLinux())) return;
+		using var data = new TempDir();
+		var home = new Home(data.File("launcher-home"));
+		Directory.CreateDirectory(Path.Combine(home.Root, "bin"));
+		var helper = Path.Combine(home.Root, "bin", "marten-tsnet");
+		File.Copy(executable, helper);
+		File.SetUnixFileMode(helper, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+		var matched = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+		TailnetTransport? transport = null;
+		var builder = WebApplication.CreateSlimBuilder();
+		builder.Logging.ClearProviders();
+		builder.WebHost.UseUrls("http://127.0.0.1:0");
+		await using var app = builder.Build();
+		app.MapGet("/fixture/launcher", (HttpContext ctx) => {
+			if(transport?.IsReady != true) return Results.StatusCode(425);
+			var hasHeader = ctx.Request.Headers.ContainsKey(TailnetTransport.NativeProofHeader);
+			if(hasHeader != enabled || transport.HasNativeProof(ctx) != enabled) return Results.StatusCode(403);
+			matched.TrySetResult();
+			return Results.NoContent();
+		});
+		await app.StartAsync();
+		transport = new TailnetTransport(new Config {
+			Port = new Uri(app.Urls.Single()).Port, MacFilesEnabled = enabled,
+			Tailnet = new TailnetSettings { Host = "files-launch-fixture.scratch.ts.net" },
+		});
+		using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+		var launched = transport.RunAsync(home, _ => { }, stop.Token);
+		try {
+			if(await Task.WhenAny(launched, matched.Task).WaitAsync(TimeSpan.FromSeconds(7)) == launched)
+				Assert.Fail("scratch Go child exited before the launcher accepted READY and checked proof mode");
+			Assert.True(transport.IsReady);
+			Assert.False(File.Exists(Path.Combine(home.Root, "fixture-eof")));
+		} finally {
+			await stop.CancelAsync();
+			await launched.WaitAsync(TimeSpan.FromSeconds(7));
+		}
+		Assert.False(transport.IsReady);
+		Assert.Equal("observed\n", File.ReadAllText(Path.Combine(home.Root, "fixture-eof")));
+	}
+
 	[Fact]
 	public async Task CanonicalGoTlsToRealKestrelWhenFixtureExecutableProvided() {
 		var executable = Environment.GetEnvironmentVariable("MARTEN_MAC_FILES_PROXY_FIXTURE");
@@ -333,7 +429,8 @@ public class MacFilesTests {
 		}
 
 		public static async Task<Fixture> Start(bool enabled = true, Func<MacFiles.PublicationPhase, Task>? publicationFixture = null,
-			string host = "mac-files.example", TimeProvider? clock = null, TimeSpan? operationBudget = null) {
+			string host = "mac-files.example", TimeProvider? clock = null, TimeSpan? operationBudget = null,
+			Action<string>? closingFixture = null) {
 			var data = new TempDir();
 			var root = Directory.CreateDirectory(data.File("scratch")).FullName;
 			if(root.StartsWith("/var/", StringComparison.Ordinal)) root = "/private" + root;
@@ -353,7 +450,7 @@ public class MacFilesTests {
 			var proof = System.Text.Encoding.ASCII.GetBytes(ingress);
 			var files = new MacFiles(enabled, ctx => TailnetTransport.ConsumeNativeProof(ctx, proof),
 				pairing, app.Lifetime.ApplicationStopping, root, publicationFixture, clock: clock,
-				sweepInterval: TimeSpan.FromMilliseconds(20), operationBudget: operationBudget);
+				sweepInterval: TimeSpan.FromMilliseconds(20), operationBudget: operationBudget, closingFixture: closingFixture);
 			files.Map(app.MapGroup("/api"));
 			app.MapGet("/api/status", (HttpContext ctx) => Results.Json(new { macFiles = files.StatusCapability(ctx) }, JsonIO.Options)).AllowPaired();
 			app.MapGet("/api/proof-control", (HttpContext ctx) => ctx.Request.Headers.ContainsKey(TailnetTransport.NativeProofHeader)

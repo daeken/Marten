@@ -24,6 +24,63 @@ import (
 
 const testHost = "marten.example.ts.net"
 
+const launcherFixtureHost = "files-launch-fixture.scratch.ts.net"
+
+func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == launcherFixtureHost {
+		os.Exit(runLauncherFixture(os.Args[1:]))
+	}
+	os.Exit(m.Run())
+}
+
+// Test binary only: substitute scratch loopback for tsnet enrollment/cert
+// issuance, but use the same wire parser, READY marker and stdin lease.
+func runLauncherFixture(args []string) int {
+	args, proof, ok := readBootstrap(args, os.Stdin)
+	if !ok {
+		return badConfig
+	}
+	port, err := strconv.Atoi(args[1])
+	if err != nil || port < 1 || port > 65535 {
+		return badConfig
+	}
+	if _, err := io.WriteString(os.Stdout, "READY\n"); err != nil {
+		return 1
+	}
+	client := &http.Client{Transport: &http.Transport{}, Timeout: time.Second}
+	deadline := time.Now().Add(5 * time.Second)
+	verified := false
+	for !time.Now().After(deadline) {
+		r, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:"+strconv.Itoa(port)+"/fixture/launcher", nil)
+		if err != nil {
+			return 1
+		}
+		if proof != "" {
+			r.Header.Set(nativeProofHeader, proof)
+		}
+		response, err := client.Do(r)
+		if err == nil {
+			response.Body.Close()
+			if response.StatusCode == http.StatusNoContent {
+				verified = true
+				break
+			}
+			if response.StatusCode != http.StatusTooEarly {
+				return 1
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !verified {
+		return 1
+	}
+	awaitLeaseEOF(os.Stdin)
+	if err := os.WriteFile("fixture-eof", []byte("observed\n"), 0600); err != nil {
+		return 1
+	}
+	return 0
+}
+
 func TestBootstrapProofAndLease(t *testing.T) {
 	legacy := []string{testHost, "7450", "/scratch-state", "/scratch-key"}
 	proof := strings.Repeat("a1", 32)
