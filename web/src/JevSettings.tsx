@@ -27,10 +27,10 @@ export function JevSettings({ api }: { api: Api }) {
     setNotice('');
     try {
       setSettings(await action());
-      if (operation === 'remove') setNotice('Removed from Marten. Revoke the key separately in the Typesafe AI console.');
+      if (operation === 'remove') setNotice('Removed from Marten. Removing it here does not revoke it at TypeSafe.');
     } catch {
       setError(operation === 'remove'
-        ? 'Local removal could not be confirmed. Revoke the key separately in the Typesafe AI console.'
+        ? 'Local removal could not be confirmed. Removing it here does not revoke it at TypeSafe.'
         : 'Could not save Jev settings. Use a valid key and check that local settings storage is available.');
       try { setSettings(await api.jevStatus()); } catch { setSettings(undefined); }
     } finally {
@@ -40,7 +40,7 @@ export function JevSettings({ api }: { api: Api }) {
 
   return <section className="jev-settings" aria-label="Typesafe AI Jev">
     <div>Typesafe AI Jev</div>
-    <p className="muted small">Create a Jev API key in the Typesafe AI console and paste it here, not in chat. Marten does not check it with Typesafe AI.</p>
+    <p className="muted small">Get an API key in the <a href="https://console.typesafe.ai/keys" target="_blank" rel="noreferrer">TypeSafe console</a> and paste it here, not in chat. Marten does not check it with TypeSafe.</p>
     {settings && <>
       <div className="muted small">{!settings.storageHealthy ? 'Local settings unavailable · off' : settings.hasKey ? 'Key set' : 'No key set'}</div>
       <form autoComplete="off" onSubmit={e => {
@@ -63,7 +63,7 @@ export function JevSettings({ api }: { api: Api }) {
         onChange={e => void update(() => api.setJevOptions(e.target.checked, settings.imagePreviewEnabled), 'options')} /> Enable Jev</label></div>
       <div><label className="small"><input type="checkbox" checked={settings.imagePreviewEnabled} disabled={busy || !settings.hasKey}
         onChange={e => void update(() => api.setJevOptions(settings.enabled, e.target.checked), 'options')} /> Allow image preview API (opt-in)</label></div>
-      <p className="muted small">These settings do not make provider calls or expose an agent tool.</p>
+      <p className="muted small">These settings do not make provider calls. Once agent dispatch is wired, enabling Jev makes it available to all agents without per-call approval. Explicitly requested payloads go to TypeSafe; images require the separate preview opt-in.</p>
     </>}
     {error && <div className="error small" role="alert">{error}</div>}
     {notice && <div className="muted small" role="status">{notice}</div>}
