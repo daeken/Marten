@@ -16,27 +16,21 @@ public sealed partial class Agent {
 	string OutputPath(string callId) =>
 		Path.Combine(OutputsDir, $"{string.Concat(callId.Select(c => char.IsLetterOrDigit(c) || c is '-' or '_' ? c : '_'))}.txt");
 
-	IEnumerable<Entry> ContextEntries() {
-		var entries = Transcript.Entries;
-		var reset = entries.LastOrDefault(e => e.Kind == EntryKind.ContextReset);
-		return reset == null ? entries : entries.SkipWhile(e => e.Seq <= reset.Seq);
-	}
-
 	public List<Entry> View() {
-		var entries = ContextEntries().ToList();
-		var compaction = entries.LastOrDefault(e => e.Kind == EntryKind.Compaction);
-		var elided = entries.Where(e => e.Kind == EntryKind.Elide).SelectMany(e => e.Seqs ?? []).ToHashSet();
+		var history = Transcript.Capture();
+		var reset = history.LastSeq(RowKind.Reset);
+		var compaction = history.ReadLast(RowKind.Compaction, reset);
+		var after = reset is long boundary && compaction?.UpTo is long upTo ? Math.Max(boundary, upTo) : compaction?.UpTo ?? reset;
+		// A marker before the compaction cutoff can still refer to a retained row.
+		var elided = history.Read(RowKind.Elide, reset).SelectMany(e => e.Seqs ?? []).Where(seq => after == null || seq > after).ToHashSet();
 		var view = new List<Entry>();
 		if(compaction != null)
 			view.Add(new Entry {
 				Seq = compaction.Seq, Kind = EntryKind.Message, From = NudgeSender,
 				Text = $"Earlier context was compacted. Your summary of it:\n\n{compaction.Text}",
 			});
-		foreach(var e in entries) {
-			if(compaction != null && e.Seq <= compaction.UpTo) continue;
-			if(e.Kind is EntryKind.Elide or EntryKind.Compaction or EntryKind.Reload) continue;
+		foreach(var e in history.Read(RowKind.All & ~RowKind.ViewChange, after))
 			view.Add(e.Kind == EntryKind.ToolResult && elided.Contains(e.Seq) ? e with { Text = ElidedNote(e), Images = null } : e);
-		}
 		return view;
 	}
 
@@ -88,7 +82,7 @@ public sealed partial class Agent {
 		long lastSeq;
 		long lastTokens;
 		lock(gate) (lastSeq, lastTokens) = (state.LastInputSeq, state.LastInputTokens);
-		var changedSince = Transcript.Entries.Any(e => e.Seq > lastSeq && e.Kind is EntryKind.Elide or EntryKind.Compaction or EntryKind.Reload or EntryKind.ContextReset);
+		var changedSince = lastTokens > 0 && Transcript.Capture().LastSeq(RowKind.ViewChange, lastSeq) != null;
 		if(lastTokens > 0 && !changedSince)
 			return lastTokens + view.Where(e => e.Seq > lastSeq).Sum(Chars) / CharsPerToken;
 		return baseTokens + view.Sum(Chars) / CharsPerToken;
