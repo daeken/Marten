@@ -115,6 +115,11 @@ code, pre { font: 12.5px/1.45 ui-monospace, "SF Mono", Menlo, monospace; }
 .tool pre { margin: 0; padding: 8px 10px; border-top: 1px solid var(--border); background: var(--code); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 420px; overflow: auto; }
 
 .composer { border-top: 1px solid var(--border); background: var(--panel); padding: 12px 24px 14px; }
+.pending-composer { max-width: 860px; margin: 0 auto 8px; }
+.pending-composer ul { display: grid; gap: 4px; margin: 0; padding: 2px; list-style: none; max-height: min(120px, 24dvh); overflow: auto; }
+.pending-row { display: flex; align-items: baseline; gap: 8px; width: 100%; text-align: left; font-size: 12.5px; padding: 4px 8px; }
+.pending-row .muted { flex: none; }
+.pending-text { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .composer-row { display: flex; gap: 8px; align-items: stretch; max-width: 860px; margin: 0 auto; }
 .composer textarea { flex: 1; min-width: 0; resize: vertical; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
 .composer .actions { display: flex; flex-direction: column; gap: 6px; }

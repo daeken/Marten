@@ -262,6 +262,10 @@ public sealed partial class Agent : IPowerShellOwner {
 		if(resumeReason != null) signal.Release();
 	}
 
+	// Only the authenticated operator composer route marks an inbound as visible/recallable.
+	internal void SendOperator(string text, SendMode mode) =>
+		Send(new Inbound("Sera", text, mode) { ComposerId = Guid.NewGuid().ToString("N") });
+
 	public void Send(Inbound message) {
 		if(message.From == "Sera") manager.Loops.Reset(Info.Id);
 		if(message.FromId is { } fromId && manager.Get(fromId) is { } sender)
@@ -298,6 +302,23 @@ public sealed partial class Agent : IPowerShellOwner {
 
 	public int PendingCount { get { lock(gate) return inbox.Count; } }
 
+	internal PendingMessage[] GetPendingMessages() {
+		lock(gate) return inbox.Where(m => m.ComposerId != null)
+			.Select(m => new PendingMessage(m.ComposerId!, m.Text, m.Mode)).ToArray();
+	}
+
+	internal PendingMessage? RecallPendingMessage(string id) {
+		Inbound removed;
+		lock(gate) {
+			var index = inbox.FindIndex(m => m.Mode == SendMode.Queued && m.ComposerId == id);
+			if(index < 0) return null;
+			removed = inbox[index];
+			inbox.RemoveAt(index);
+		}
+		manager.Publish(new { type = "inbox", agentId = Info.Id, pending = PendingCount });
+		return new PendingMessage(id, removed.Text, removed.Mode);
+	}
+
 	/// <summary>Stop the current turn. The in-flight model call or tool is cancelled and the agent goes idle.</summary>
 	public void Interrupt() { lock(gate) activeTurn?.Cancel(); }
 
@@ -322,16 +343,18 @@ public sealed partial class Agent : IPowerShellOwner {
 			using var operation = manager.Restart.Enter();
 			if(operation == null) return;
 			string reason;
+			bool resuming;
 			Turn turn;
 			lock(gate) {
 				if(activeTurn != null || Info.Closed || (resumeReason == null && inbox.Count == 0)) continue;
 				var reasons = inbox.Select(m => m.Reason ?? (m.From == NudgeSender ? "nudge" : "message")).Distinct().ToList();
+				resuming = resumeReason != null;
 				reason = resumeReason ?? (reasons.Count == 1 ? reasons[0] : "message");
 				resumeReason = null;
 				activeTurn = turn = new Turn();
 			}
 			try {
-				await RunTurn(reason, turn);
+				await RunTurn(reason, turn, resuming);
 			} catch(OperationCanceledException) when(manager.Restart.IsStopping) {
 				// Leave the Wake and any unanswered calls for Recover, not the Sera interrupt path.
 				return;
@@ -344,15 +367,23 @@ public sealed partial class Agent : IPowerShellOwner {
 		}
 	}
 
-	async Task RunTurn(string reason, Turn turn) {
+	async Task RunTurn(string reason, Turn turn, bool resuming) {
 		var token = turn.Cancellation.Token;
 		using var slots = new TurnSlots(this, token);
 		using var modelCts = CancellationTokenSource.CreateLinkedTokenSource(token, manager.Restart.Stopping);
 		using var toolCts = CancellationTokenSource.CreateLinkedTokenSource(token, manager.Restart.CancelTools);
 		try {
+			(AgentStatus Status, string? Detail, DateTimeOffset? RetryAt) beforePause;
+			lock(statusGate) beforePause = turnStatus;
 			await WaitWhilePaused(modelCts.Token);
 			lock(gate) {
 				slots.ThrowIfStopped(modelCts.Token);
+				// A recall can empty the inbox while this turn is waiting to start (e.g. paused).
+				if(!resuming && inbox.Count == 0) {
+					if(TurnStatus == AgentStatus.Paused)
+						SetStatus(beforePause.Status, beforePause.Detail, beforePause.RetryAt);
+					return;
+				}
 				SetStatus(AgentStatus.Running);
 				lastWakeSeq = Append(new Entry { Kind = EntryKind.Wake, Reason = reason }).Seq;
 				ReloadChangedPrompt();

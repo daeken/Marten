@@ -65,6 +65,10 @@ For failure triage, read `agents/<id>/model-attempt-failure.json` in the Marten 
 
 Sometimes a provider blocks the request itself instead of failing it: OpenAI reports a content filter or policy code, or the model answers with a refusal, and Anthropic reports a refusal stop reason or its content-filtering error. Retrying the same model cannot help, so Marten moves the agent to `refusalFallbackModel` from `config.json` (default `deepseek-flash`) and leaves a note in its transcript: what refused it, why, which model it is on now, and that it can stay there, hand the work to a fresh agent with a fuller brief, or surface the refusal if it thinks the block was right. The switch sticks until something changes it, including the agent itself with `set_model`. One fallback per turn; a refusal on the fallback itself ends the turn as a normal error. Set `"refusalFallbackModel": null` to keep the old behaviour, where a refusal is just a failed turn.
 
+## Pending chat messages
+
+Operator messages that are still waiting appear above the composer. With an empty draft, select a **Queued** row to remove it from the queue and edit it before sending it again. **Steering** rows are read-only. Once the agent takes a message, it appears in the transcript instead; if it beat you to the queued message, recall won’t restore it as a draft. Pending messages are not saved across server restarts.
+
 ## Pausing and closing agents
 
 **Pause** holds the turn at its next model or tool dispatch. A model reply or compaction that finishes while paused is held off the transcript until resume, without keeping either slot; streamed text is suppressed while paused. A tool that already started can finish and its result is kept. The rest of the batch continues when the agent, project, and global pauses have all cleared.

@@ -257,8 +257,36 @@ public class PairedUiParityTests {
 					Assert.Contains("unrelated-legacy-arguments", json);
 				}
 			}
-			await Check(HttpMethod.Delete, "/api/clients/parity", [HttpStatusCode.OK]);
 			await Check(HttpMethod.Post, "/api/pause", [HttpStatusCode.OK], new { paused = true });
+			var outside = (await File.ReadAllTextAsync(Path.Combine(home.Secrets, "clients", "parity.token"), timeout.Token)).Trim();
+			await Check(HttpMethod.Post, "/api/ext/messages", [HttpStatusCode.OK], new { to = id, text = "outside only" }, authority: local, bearer: outside);
+			await Check(HttpMethod.Post, $"{ad}/messages", [HttpStatusCode.Forbidden], new { text = "unauthorized" }, authority: local, bearer: outside);
+			await Check(HttpMethod.Post, $"{ad}/messages", [HttpStatusCode.Accepted], new { text = "operator queued" }, authority: local, bearer: op);
+			await Check(HttpMethod.Post, $"{ad}/messages", [HttpStatusCode.Accepted], new { text = "paired steering", mode = "immediate" });
+			var pendingPath = $"{ad}/pending-messages";
+			using var pendingResponse = await http.GetAsync(pendingPath, timeout.Token);
+			Assert.Equal(HttpStatusCode.OK, pendingResponse.StatusCode);
+			Assert.True(pendingResponse.Headers.CacheControl?.NoStore);
+			var pending = (await pendingResponse.Content.ReadFromJsonAsync<JsonElement>(timeout.Token)).EnumerateArray().ToArray();
+			Assert.Equal(2, pending.Length);
+			Assert.Equal("queued", pending[0].GetProperty("mode").GetString());
+			Assert.Equal("operator queued", pending[0].GetProperty("text").GetString());
+			Assert.Equal("immediate", pending[1].GetProperty("mode").GetString());
+			Assert.Equal("paired steering", pending[1].GetProperty("text").GetString());
+			var queued = $"{pendingPath}/{pending[0].GetProperty("id").GetString()}";
+			await Check(HttpMethod.Get, pendingPath, [HttpStatusCode.OK], authority: local, bearer: op);
+			await Check(HttpMethod.Get, pendingPath, [HttpStatusCode.Unauthorized], authority: legacyHost);
+			await Check(HttpMethod.Get, pendingPath, [HttpStatusCode.Forbidden], authority: local, bearer: outside);
+			await Check(HttpMethod.Delete, queued, [HttpStatusCode.Forbidden], authority: local, bearer: outside);
+			await Check(HttpMethod.Delete, queued, [HttpStatusCode.Forbidden], authority: local, bearer: op, origin: "https://foreign.example");
+			await Check(HttpMethod.Delete, $"{pendingPath}/{pending[1].GetProperty("id").GetString()}", [HttpStatusCode.NotFound]);
+			using var recalled = await http.DeleteAsync(queued, timeout.Token);
+			Assert.Equal(HttpStatusCode.OK, recalled.StatusCode);
+			Assert.True(recalled.Headers.CacheControl?.NoStore);
+			Assert.True(JsonElement.DeepEquals(pending[0], await recalled.Content.ReadFromJsonAsync<JsonElement>(timeout.Token)));
+			await Check(HttpMethod.Delete, queued, [HttpStatusCode.NotFound]);
+			await Check(HttpMethod.Get, $"{none}/pending-messages", [HttpStatusCode.NotFound]);
+			await Check(HttpMethod.Delete, "/api/clients/parity", [HttpStatusCode.OK]);
 			// Validate authorization without starting a project orchestrator and its PowerShell runspace.
 			await Check(HttpMethod.Post, "/api/projects", [HttpStatusCode.BadRequest], new { name = "Parity project", bindings = Array.Empty<string>() });
 			await Check(HttpMethod.Post, "/api/projects/missing/pause", [HttpStatusCode.NotFound], new { paused = true });
@@ -280,9 +308,10 @@ public class PairedUiParityTests {
 		}
 
 		async Task Check(HttpMethod method, string path, HttpStatusCode[] allowed, object? json = null,
-			string? authority = null, string? bearer = null) {
+			string? authority = null, string? bearer = null, string? origin = null) {
 			using var request = new HttpRequestMessage(method, path);
 			if(authority != null) request.Headers.Host = authority;
+			if(origin != null) request.Headers.Add("Origin", origin);
 			if(bearer != null) request.Headers.Authorization = new("Bearer", bearer);
 			if(json != null) request.Content = JsonContent.Create(json);
 			using var response = await http.SendAsync(request, timeout.Token);
