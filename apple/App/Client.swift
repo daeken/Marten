@@ -126,6 +126,7 @@ struct EventStream: Sendable {
     let hints: AsyncThrowingStream<Void, any Error>
     let cancel: @Sendable () -> Void
     var activity: AsyncStream<[String: LiveActivity]>? = nil
+    var pendingAgents: AsyncStream<String>? = nil
 }
 
 protocol EventTransport: Transport {
@@ -156,10 +157,11 @@ struct URLSessionTransport: EventTransport {
         socket.maximumMessageSize = 1_048_576
         let (hints, continuation) = AsyncThrowingStream<Void, any Error>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let (activity, updates) = AsyncStream<[String: LiveActivity]>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let (pending, pendingUpdates) = AsyncStream<String>.makeStream(bufferingPolicy: .bufferingNewest(32))
         let reader = Task {
             var live = LiveEvents()
             socket.resume()
-            defer { updates.finish(); socket.cancel(with: .goingAway, reason: nil) }
+            defer { updates.finish(); pendingUpdates.finish(); socket.cancel(with: .goingAway, reason: nil) }
             do {
                 while !Task.isCancelled {
                     let frame = try await socket.receive()
@@ -170,6 +172,7 @@ struct URLSessionTransport: EventTransport {
                     @unknown default: continue
                     }
                     let change = live.receive(payload)
+                    if let agent = live.pendingAgent { pendingUpdates.yield(agent) }
                     if change.updated { updates.yield(live.agents) }
                     if change.invalidate { continuation.yield(()) }
                 }
@@ -181,7 +184,7 @@ struct URLSessionTransport: EventTransport {
             socket.cancel(with: .goingAway, reason: nil)
         }
         continuation.onTermination = { @Sendable _ in cancel() }
-        return EventStream(hints: hints, cancel: cancel, activity: activity)
+        return EventStream(hints: hints, cancel: cancel, activity: activity, pendingAgents: pending)
     }
 
     func boundedData(for request: URLRequest, limit: Int) async throws -> (Data, HTTPURLResponse) {
@@ -553,6 +556,28 @@ struct API: Sendable {
 
     func send(_ agent: String, text: String, mode: SendMode) async throws {
         _ = try await call("POST", route(agent, "messages"), body: JSONEncoder().encode(Message(text: text, mode: mode)))
+    }
+
+    func pendingMessages(_ agent: String) async throws -> [PendingOperatorMessage] {
+        do {
+            let data = try await call("GET", route(agent, "pending-messages"))
+            return try decode([PendingOperatorMessage].self, data).filter(\.visible)
+        } catch ClientError.response(404), ClientError.response(405), ClientError.response(501) {
+            // Older servers do not implement the read route.
+            return []
+        }
+    }
+
+    func recallPendingMessage(_ agent: String, id: String) async throws -> PendingOperatorMessage? {
+        try Self.checkRouteID(id)
+        do {
+            let data = try await call("DELETE", route(agent, "pending-messages/\(id)"))
+            let removed = try decode(PendingOperatorMessage.self, data)
+            guard removed.id == id, removed.recallable else { throw ClientError.malformed }
+            return removed
+        } catch ClientError.response(404) {
+            return nil
+        }
     }
 
     func pause(_ agent: String, paused: Bool) async throws {
