@@ -80,16 +80,50 @@ public sealed class Transcript {
 		Dir = dir;
 		Directory.CreateDirectory(dir);
 		var segments = Directory.GetFiles(dir, "*.jsonl").Order(StringComparer.Ordinal).ToList();
-		foreach(var seg in segments)
-			foreach(var line in File.ReadLines(seg)) {
-				if(string.IsNullOrWhiteSpace(line)) continue;
-				try {
-					if(JsonIO.Deserialize<Entry>(line) is { } e) Remember(e);
-				} catch(JsonException) when(seg == segments[^1]) {
-					// A crash mid-append leaves a torn final line; everything before it is intact.
+		foreach(var seg in segments) LoadSegment(seg, seg == segments[^1]);
+		segmentPath = segments.Count > 0 ? segments[^1] : SegmentName(1);
+	}
+
+	void LoadSegment(string path, bool latest) {
+		// The newline is part of the commit record. A crash may leave fully parseable JSON
+		// without it; a later normal append must not turn that artifact ref into authorization.
+		long tailStart = 0;
+		bool unterminated;
+		using(var file = File.OpenRead(path)) {
+			unterminated = file.Length > 0 && file.Seek(-1, SeekOrigin.End) >= 0 && file.ReadByte() != '\n';
+			if(unterminated) {
+				Span<byte> buffer = stackalloc byte[4096];
+				for(long end = file.Length; end > 0;) {
+					var count = (int) Math.Min(end, buffer.Length);
+					end -= count;
+					file.Position = end;
+					file.ReadExactly(buffer[..count]);
+					var newline = buffer[..count].LastIndexOf((byte) '\n');
+					if(newline >= 0) { tailStart = end + newline + 1; break; }
 				}
 			}
-		segmentPath = segments.Count > 0 ? segments[^1] : SegmentName(1);
+		}
+		bool drop = false;
+		using(var lines = File.ReadLines(path).GetEnumerator()) {
+			var more = lines.MoveNext();
+			while(more) {
+				var line = lines.Current;
+				more = lines.MoveNext();
+				if(string.IsNullOrWhiteSpace(line)) continue;
+				try {
+					if(JsonIO.Deserialize<Entry>(line) is not { } e) continue;
+					if(!more && unterminated && e.Artifacts is { Count: > 0 }) drop = true;
+					else Remember(e);
+				} catch(JsonException) when(latest) {
+					// Existing recovery for legacy entries and incomplete JSON.
+				}
+			}
+		}
+		if(drop) {
+			using var file = File.OpenWrite(path);
+			file.SetLength(tailStart);
+			file.Flush(flushToDisk: true);
+		}
 	}
 
 	void Remember(Entry entry) {

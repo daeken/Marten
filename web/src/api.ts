@@ -116,6 +116,7 @@ export interface AgentMessage {
 }
 
 export type ArtifactRef = { id: string; name: string; bytes: number; previewKind: 'none' | 'text' | 'png' };
+export class ArtifactUnavailable extends Error {}
 
 export interface Entry {
   seq: number;
@@ -277,7 +278,10 @@ export class Api {
     });
     if (res.status !== 200 || res.headers.get('Content-Type')?.split(';', 1)[0]?.trim() !== expectedType || !res.body) {
       await res.body?.cancel();
-      throw new Error(res.status === 404 ? 'Artifact unavailable' : `Artifact request failed (${res.status})`);
+      if (res.status === 404) throw new ArtifactUnavailable(preview
+        ? 'Preview unavailable. Try downloading the original.'
+        : 'Artifact unavailable. Routine backups restore the card, not the file.');
+      throw new Error(`Artifact request failed (${res.status})`);
     }
     const reader = res.body.getReader();
     const data = new Uint8Array(limit);

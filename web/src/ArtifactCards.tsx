@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Api, ArtifactRef } from './api';
+import { Api, ArtifactRef, ArtifactUnavailable } from './api';
 
 export function ArtifactCards({ items, api, agentId }: { items?: ArtifactRef[]; api: Api; agentId: string }) {
   return items?.map(item => <ArtifactCard key={`${agentId}/${item.id}`} item={item} api={api} agentId={agentId} />);
@@ -9,6 +9,7 @@ function ArtifactCard({ item, api, agentId }: { item: ArtifactRef; api: Api; age
   const [preview, setPreview] = useState<{ image: string } | { text: string; truncated: boolean }>();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
+  const [missing, setMissing] = useState(false);
   const request = useRef<AbortController>();
   const image = useRef<string>();
   const clearImage = () => { if (image.current) URL.revokeObjectURL(image.current); image.current = undefined; };
@@ -40,7 +41,14 @@ function ArtifactCard({ item, api, agentId }: { item: ArtifactRef; api: Api; age
         window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
       }
     } catch (e) {
-      if (!controller.signal.aborted) setError(e instanceof Error ? e.message : 'Artifact request failed');
+      if (!controller.signal.aborted) {
+        if (!show && e instanceof ArtifactUnavailable) {
+          clearImage();
+          setPreview(undefined);
+          setMissing(true);
+        }
+        setError(e instanceof Error ? e.message : 'Artifact request failed');
+      }
     } finally {
       if (request.current === controller) {
         request.current = undefined;
@@ -52,8 +60,8 @@ function ArtifactCard({ item, api, agentId }: { item: ArtifactRef; api: Api; age
   return <div className="tool" aria-label={`Artifact: ${item.name}`}>
     <div className="row small"><strong>{item.name}</strong> <span className="muted">{item.bytes.toLocaleString()} bytes</span>
       {preview ? <button className="small" onClick={() => { clearImage(); setPreview(undefined); }}>Hide preview</button> :
-        (item.previewKind === 'text' || item.previewKind === 'png') && <button className="small" disabled={pending} onClick={() => void fetchItem(true)}>Preview</button>}
-      <button className="small" disabled={pending} onClick={() => void fetchItem(false)}>Download</button>
+        (item.previewKind === 'text' || item.previewKind === 'png') && <button className="small" disabled={pending || missing} onClick={() => void fetchItem(true)}>Preview</button>}
+      <button className="small" disabled={pending || missing} onClick={() => void fetchItem(false)}>Download</button>
       {pending && <button className="small" onClick={() => { request.current?.abort(); request.current = undefined; setPending(false); }}>Cancel</button>}
     </div>
     {error && <div className="error small" role="status">{error}</div>}

@@ -64,6 +64,29 @@ public sealed class ArtifactTests {
 	}
 
 	[Fact]
+	public async Task UnterminatedArtifactRecordDoesNotAuthorizeAfterRecoveryOrLaterAppend() {
+		if(!ArtifactFiles.Supported) return;
+		using var temp = new TempDir();
+		var directory = temp.File("agent");
+		var path = Path.Combine(directory, "transcript");
+		var log = new Transcript(path);
+		var store = new Artifacts();
+		store.Recover(directory, log);
+		await File.WriteAllTextAsync(Path.Combine(directory, Artifacts.Staging, "fixture.txt"), "uncommitted");
+		var item = await store.Publish(directory, "fixture.txt", null, default);
+		log.Append(new Entry { Kind = EntryKind.ToolCall, CallId = "test" });
+		await File.AppendAllTextAsync(Path.Combine(path, "000001.jsonl"),
+			JsonIO.Serialize(new Entry { Kind = EntryKind.ToolResult, Seq = 2, CallId = "test", Artifacts = [item] }));
+		var recovered = new Transcript(path);
+		Assert.Null(recovered.Artifact(item.Id));
+		Assert.Single(recovered.Entries);
+		new Artifacts().Recover(directory, recovered);
+		Assert.Null(Artifacts.Open(directory, item));
+		Assert.Equal(2, recovered.Append(new Entry { Kind = EntryKind.ToolResult, CallId = "test" }).Seq);
+		Assert.Null(new Transcript(path).Artifact(item.Id));
+	}
+
+	[Fact]
 	public async Task StagingRejectsTraversalLinksFifoAndOversizeAndLeavesNoCancelledCopy() {
 		if(!ArtifactFiles.Supported) return;
 		using var home = new TempDir();

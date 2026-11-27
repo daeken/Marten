@@ -42,6 +42,7 @@ public class PairedUiParityTests {
 		}
 		const string fixtureId = "artifact-fixture";
 		ArtifactRef? artifact = null;
+		const string missingId = "abcdabcdabcdabcdabcdabcdabcdabcd";
 		if(ArtifactFiles.Supported) {
 			var fixture = home.AgentDir(fixtureId);
 			var log = new Transcript(Path.Combine(fixture, "transcript"));
@@ -50,6 +51,10 @@ public class PairedUiParityTests {
 			await File.WriteAllTextAsync(Path.Combine(fixture, Artifacts.Staging, "example.txt"), new string('a', Artifacts.MaxText + 1));
 			artifact = await store.Publish(fixture, "example.txt", null, default);
 			log.Append(new Entry { Kind = EntryKind.ToolResult, Artifacts = [artifact] });
+			// A reference-only restore must not read replacement bytes from the agent-writable inbox.
+			var missing = artifact with { Id = missingId };
+			log.Append(new Entry { Kind = EntryKind.ToolResult, Artifacts = [missing] });
+			await File.WriteAllTextAsync(Path.Combine(fixture, Artifacts.Staging, missingId), new string('b', (int) missing.Bytes));
 			await File.WriteAllTextAsync(Path.Combine(fixture, "system.md"), "Offline test fixture");
 			JsonIO.Save(Path.Combine(fixture, "agent.json"), new AgentInfo { Id = fixtureId, Kind = AgentKind.Chat,
 				Name = "Offline fixture", WorkingDirectory = fixture, Created = DateTimeOffset.UtcNow, Closed = true });
@@ -217,6 +222,11 @@ public class PairedUiParityTests {
 				await Check(HttpMethod.Get, download, [HttpStatusCode.OK], authority: local, bearer: op);
 				await Check(HttpMethod.Get, download + "?ignored=1", [HttpStatusCode.Forbidden]);
 				await Check(HttpMethod.Get, $"{ad}/artifacts/{artifact.Id}", [HttpStatusCode.NotFound]);
+				var missing = $"{fixture}/artifacts/{missingId}";
+				await Check(HttpMethod.Get, missing, [HttpStatusCode.NotFound]);
+				await Check(HttpMethod.Get, missing + "/preview", [HttpStatusCode.NotFound]);
+				using var retained = await http.GetAsync(fixture + "/transcript?limit=80", timeout.Token);
+				Assert.Contains(missingId, await retained.Content.ReadAsStringAsync(timeout.Token));
 				using var isolated = new HttpClient { BaseAddress = http.BaseAddress };
 				using var queryOnly = await isolated.GetAsync(download + "?token=" + op, timeout.Token);
 				Assert.Equal(HttpStatusCode.Forbidden, queryOnly.StatusCode);
