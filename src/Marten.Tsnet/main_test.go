@@ -240,6 +240,21 @@ func TestMacFilesProxyToKestrel(t *testing.T) {
 		}
 		return res.Header, body
 	}
+	for _, c := range []struct{ address, path, proof string }{
+		{fixture.URL, "status", ""}, {disabledProof.URL, "status", fixture.Ingress},
+		{front.URL, "status?", ""}, {front.URL, "%73tatus", ""},
+	} {
+		_, body := get(native, c.address, c.path, host, fixture.Bearer, c.proof, 200)
+		if strings.Contains(string(body), "macFiles") {
+			t.Fatal("status advertised Files outside canonical proved ingress")
+		}
+	}
+	get(native, front.URL, "status", host, "", "", 401)
+	_, statusBody := get(native, front.URL, "status", host, fixture.Bearer, "", 200)
+	var status struct{ MacFiles bool }
+	if json.Unmarshal(statusBody, &status) != nil || !status.MacFiles {
+		t.Fatal("paired canonical status did not advertise Files")
+	}
 	const roots = "mac-files/roots"
 	get(native, fixture.URL, roots, host, fixture.Bearer, "", 403)
 	get(native, fixture.URL, roots, host, fixture.Bearer, strings.Repeat("0", 64), 403)

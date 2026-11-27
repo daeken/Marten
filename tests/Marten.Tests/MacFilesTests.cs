@@ -197,8 +197,10 @@ public class MacFilesTests {
 			var app = builder.Build();
 			app.UseRouting(); app.Use(security.Middleware);
 			var proof = System.Text.Encoding.ASCII.GetBytes(ingress);
-			new MacFiles(enabled, ctx => TailnetTransport.ConsumeNativeProof(ctx, proof),
-				pairing, app.Lifetime.ApplicationStopping, root, publicationFixture).Map(app.MapGroup("/api"));
+			var files = new MacFiles(enabled, ctx => TailnetTransport.ConsumeNativeProof(ctx, proof),
+				pairing, app.Lifetime.ApplicationStopping, root, publicationFixture);
+			files.Map(app.MapGroup("/api"));
+			app.MapGet("/api/status", (HttpContext ctx) => Results.Json(new { macFiles = files.StatusCapability(ctx) }, JsonIO.Options)).AllowPaired();
 			app.MapGet("/api/proof-control", (HttpContext ctx) => ctx.Request.Headers.ContainsKey(TailnetTransport.NativeProofHeader)
 				? Microsoft.AspNetCore.Http.Results.BadRequest() : Microsoft.AspNetCore.Http.Results.NoContent()).AllowPaired();
 			await app.StartAsync();

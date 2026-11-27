@@ -1,12 +1,25 @@
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.RegularExpressions;
+using Microsoft.AspNetCore.Http.Features;
 using Marten.Storage;
 using static Marten.Web.MacFileSystem;
 
 namespace Marten.Web;
 
 internal sealed class MacFiles(bool enabled, Func<HttpContext, bool> nativeIngress, DevicePairing pairing,
-	CancellationToken stopping, string rootPath = "/", Func<bool, Task>? publicationFixture = null) {
+	CancellationToken stopping, string rootPath = "/", Func<bool, Task>? publicationFixture = null, Func<bool>? ingressReady = null) {
+	internal sealed class Route;
+	static readonly Regex NativeFilesTarget = new(@"\A/api/mac-files/(?:roots|entries/[0-9a-f]{32}|bytes/[0-9a-f]{32}/(?:text|raster|share))\z",
+		RegexOptions.NonBacktracking | RegexOptions.CultureInvariant);
+	static bool CanonicalGet(HttpContext ctx) => HttpMethods.IsGet(ctx.Request.Method) && !ctx.Request.Headers.ContainsKey("Origin") &&
+		ctx.Features.Get<IHttpRequestFeature>()?.RawTarget == ctx.Request.Path.Value;
+
+	internal bool? StatusCapability(HttpContext ctx) {
+		var native = nativeIngress(ctx);
+		if(!enabled || !Supported || stopping.IsCancellationRequested || !native || !CanonicalGet(ctx) || ctx.Request.Path != "/api/status") return null;
+		return pairing.CommitIfActive(Security.DeviceRevocationOf(ctx), () => { }) ? true : null;
+	}
 	const int MaxScan = 2000, PageSize = 100, MaxHandles = 4096, PerDeviceHandles = 2200;
 	readonly object gate = new();
 	readonly HashSet<CancellationToken> busy = [];
@@ -21,7 +34,7 @@ internal sealed class MacFiles(bool enabled, Func<HttpContext, bool> nativeIngre
 	sealed class Denied(int status) : Exception { public int Status => status; }
 
 	public void Map(RouteGroupBuilder api) {
-		var files = api.MapGroup("/mac-files");
+		var files = api.MapGroup("/mac-files").WithMetadata(new Route());
 		files.MapGet("/roots", (HttpContext ctx) => Run(ctx, (device, pending, token) => Roots(pending))).AllowPaired();
 		files.MapGet("/entries/{handle}", (HttpContext ctx, string handle) => Run(ctx,
 			(device, pending, token) => Entries(device, pending, handle, token))).AllowPaired();
@@ -35,10 +48,11 @@ internal sealed class MacFiles(bool enabled, Func<HttpContext, bool> nativeIngre
 		response.Headers.XContentTypeOptions = "nosniff";
 		var device = Security.DeviceRevocationOf(ctx);
 		var native = nativeIngress(ctx);
-		if(!device.CanBeCanceled || ctx.Request.QueryString.HasValue || ctx.Request.Headers.ContainsKey("Origin")) {
+		if(!device.CanBeCanceled || !CanonicalGet(ctx)) {
 			response.StatusCode = 403; return;
 		}
 		if(!enabled) { response.StatusCode = 404; return; }
+		if(!NativeFilesTarget.IsMatch(ctx.Request.Path.Value ?? "")) { response.StatusCode = 404; return; }
 		if(!native) { response.StatusCode = 403; return; }
 		if(!Supported) { response.StatusCode = 404; return; }
 		if(ctx.Request.Headers.ContainsKey("Range")) { response.StatusCode = 416; return; }
@@ -53,7 +67,10 @@ internal sealed class MacFiles(bool enabled, Func<HttpContext, bool> nativeIngre
 			stop.Token.ThrowIfCancellationRequested();
 			result = await Task.Run(() => prepare(device, pending, stop.Token), stop.Token);
 			if(publicationFixture != null) await publicationFixture(false);
-			if(!pairing.CommitIfActive(device, () => Commit(device, pending, stop.Token))) throw new Denied(403);
+			if(!pairing.CommitIfActive(device, () => {
+				if(ingressReady?.Invoke() == false) throw new Denied(403);
+				Commit(device, pending, stop.Token);
+			})) throw new Denied(403);
 			// Once committed, a cancellation aborts the transport, including a
 			// stalled write. It cannot retract bytes already handed to the proxy.
 			using var abort = stop.Token.Register(ctx.Abort);

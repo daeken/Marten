@@ -162,6 +162,13 @@ func exactTLS(host string, getCert func(context.Context) (*tls.Certificate, erro
 
 const nativeProofHeader = "X-Marten-Native-Proof"
 
+var macFilesNativePath = regexp.MustCompile(`^/api/(status|mac-files/(roots|entries/[0-9a-f]{32}|bytes/[0-9a-f]{32}/(text|raster|share)))$`)
+
+func macFilesProofRequest(r *http.Request, host string) bool {
+	return r.Method == http.MethodGet && r.TLS != nil && r.TLS.ServerName == host && r.Host == host &&
+		len(r.Header.Values("Origin")) == 0 && r.RequestURI == r.URL.Path && macFilesNativePath.MatchString(r.URL.Path)
+}
+
 func tailnetProxy(host string, upstream *url.URL) http.Handler {
 	return tailnetProxyWithProof(host, upstream, "")
 }
@@ -176,12 +183,11 @@ func tailnetProxyWithProof(host string, upstream *url.URL, proof string) http.Ha
 			r.Out.Host = host
 			for h := range r.Out.Header {
 				name := strings.ToLower(h)
-				if strings.HasPrefix(name, "x-forwarded-") || strings.HasPrefix(name, "tailscale-") || name == "via" {
-					r.Out.Header.Del(h)
+				if strings.HasPrefix(name, "x-forwarded-") || strings.HasPrefix(name, "tailscale-") || name == "via" || strings.EqualFold(h, nativeProofHeader) {
+					delete(r.Out.Header, h)
 				}
 			}
-			r.Out.Header.Del(nativeProofHeader)
-			if proof != "" && r.In.TLS != nil && r.In.TLS.ServerName == host && strings.HasPrefix(r.Out.URL.Path, "/api/mac-files/") {
+			if proof != "" && macFilesProofRequest(r.In, host) {
 				r.Out.Header.Set(nativeProofHeader, proof)
 			}
 			// ReverseProxy removes Forwarded and handles HTTP Upgrade. No tailnet
@@ -190,6 +196,16 @@ func tailnetProxyWithProof(host string, upstream *url.URL, proof string) http.Ha
 		ErrorLog: log.New(io.Discard, "", 0),
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		files := strings.HasPrefix(strings.ToLower(r.URL.Path), "/api/mac-files/")
+		if files {
+			w.Header().Set("Cache-Control", "no-store")
+		}
+		// No request body/Trailers on any proof-bearing request. Don't proxy a
+		// nominated or delayed caller proof as a trailer on Files or status.
+		if (files || r.URL.Path == "/api/status") && (len(r.Trailer) != 0 || r.ContentLength != 0 || len(r.TransferEncoding) != 0) {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
 		if r.Host != host || r.Method == http.MethodConnect || r.URL.IsAbs() {
 			w.WriteHeader(http.StatusForbidden)
 			return
@@ -204,12 +220,16 @@ func tailnetProxyWithProof(host string, upstream *url.URL, proof string) http.Ha
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/api/mac-files/") {
+		if files {
 			// A stalled downstream must not retain a Files delivery indefinitely.
 			controller := http.NewResponseController(w)
-			if controller.SetWriteDeadline(time.Now().Add(20*time.Second)) == nil {
-				defer controller.SetWriteDeadline(time.Time{})
+			if controller.SetWriteDeadline(time.Now().Add(20*time.Second)) != nil {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
 			}
+			defer controller.SetWriteDeadline(time.Time{})
+			// Upstream owns the final policy and can send more specific errors.
+			w.Header().Del("Cache-Control")
 		}
 		proxy.ServeHTTP(w, r)
 	})

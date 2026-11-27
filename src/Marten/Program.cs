@@ -190,8 +190,10 @@ object ProjectSummary(Project p) => new { p.Info.Id, p.Info.Name, p.Info.Created
 
 var api = app.MapGroup("/api");
 api.MapPairing(pairing, security);
-new MacFiles(config.MacFilesEnabled, tailnet.HasNativeProof, pairing, restart.Stopping).Map(api);
-api.MapGet("/status", () => new {
+var macFiles = new MacFiles(config.MacFilesEnabled, tailnet.HasNativeProof, pairing, restart.Stopping, ingressReady: () => tailnet.IsReady);
+macFiles.Map(api);
+api.MapGet("/status", (HttpContext ctx) => new {
+	macFiles = macFiles.StatusCapability(ctx),
 	auth = new { connected = auth.Connected, email = auth.Email, signingIn = auth.SigningIn, lastError = auth.LastError },
 	backends = messagesBackends.Select(BackendSummary),
 	config = new { manager.Config.Model, manager.Config.Effort, DefaultModel = manager.KnownDefaultModel },
