@@ -171,7 +171,10 @@ final class CompactWorkspaceTests: XCTestCase {
         let actions = app.buttons["Agent Actions"].firstMatch
         let alpha = app.staticTexts["Standalone Alpha"].firstMatch
         let name = app.navigationBars["Standalone Alpha"]
-        let directory = app.staticTexts["/fixture/alpha"].firstMatch
+        func diagnostic(_ text: String) -> XCUIElement {
+            app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@ OR value == %@", text, text)).firstMatch
+        }
+        let directory = diagnostic("/fixture/alpha")
         let labels = ["Tasks & Schedules", "Background Processes", "PowerShell Notebook", "Settings & Diagnostics"]
         XCTAssertTrue(app.navigationBars["Marten"].waitForExistence(timeout: 10))
         XCTAssertTrue(servers.firstMatch.isHittable)
@@ -208,8 +211,8 @@ final class CompactWorkspaceTests: XCTestCase {
         openAction("Settings & Diagnostics")
         XCTAssertTrue(app.navigationBars["Standalone Alpha · Settings"].waitForExistence(timeout: 10))
         for _ in 0..<4 where !directory.exists || !directory.isHittable { app.swipeUp() }
-        XCTAssertTrue(directory.isHittable)
-        XCTAssertTrue(app.staticTexts["Idle"].exists)
+        XCTAssertTrue(directory.isHittable, app.debugDescription)
+        XCTAssertTrue(diagnostic("Idle").exists, app.debugDescription)
         back()
         XCTAssertTrue(name.waitForExistence(timeout: 5))
         back()

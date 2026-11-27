@@ -111,5 +111,16 @@ final class DuoTransitionTests: XCTestCase {
             // tolerance, but reject a route remount that duplicates the next poll.
             XCTAssertGreaterThanOrEqual(next - previous, 3.5, "Unexpected latest fetch burst around posture change")
         }
+
+        // Confirm the relocated actions are actually available from the menu
+        // after returning to cover. CompactWorkspaceTests opens each route.
+        app.buttons["Agent Actions"].firstMatch.tap()
+        for label in ["Tasks & Schedules", "Background Processes", "PowerShell Notebook", "Settings & Diagnostics"] {
+            XCTAssertTrue(app.buttons[label].firstMatch.waitForExistence(timeout: 5), "Missing Agent Actions item: \(label)")
+        }
+        let menu = XCTAttachment(screenshot: app.screenshot())
+        menu.name = "04 Agent Actions after return to cover"
+        menu.lifetime = .keepAlways
+        add(menu)
     }
 }
