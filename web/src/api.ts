@@ -197,6 +197,8 @@ export function takeToken(): string | null {
 export interface Device { id: string; name: string; createdAt: string }
 export interface PairStatus { enabled: boolean; requiresTailscaleEnrollment: boolean; devices: Device[] }
 export interface PairInvitation { payload: string; expiresAt: string }
+export interface JevStatus { hasKey: boolean; enabled: boolean; imagePreviewEnabled: boolean; storageHealthy: boolean }
+export interface JevRemoval { settings: JevStatus; localRemovalSucceeded: boolean; upstreamRevoked: false }
 
 export const transcriptPageSize = 80;
 export type TranscriptPage = { entries: Entry[]; hasOlder: boolean };
@@ -210,10 +212,11 @@ class ApiError extends Error {
 export class Api {
   constructor(private token: string) {}
 
-  private async call<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  private async call<T>(method: string, path: string, body?: unknown, signal?: AbortSignal, localOnly = false): Promise<T> {
     const res = await fetch(`/api${path}`, {
       method,
       signal,
+      ...(localOnly ? { cache: 'no-store', redirect: 'error', mode: 'same-origin' } : {}),
       headers: { Authorization: `Bearer ${this.token}`, ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
@@ -228,6 +231,10 @@ export class Api {
 
   startFreshContext = (id: string) => this.call<void>('POST', `/agents/${id}/start-fresh-context`);
   status = () => this.call<Status_>('GET', '/status');
+  jevStatus = (signal?: AbortSignal) => this.call<JevStatus>('GET', '/jev/settings', undefined, signal, true);
+  setJevKey = (key: string) => this.call<JevStatus>('PUT', '/jev/key', { key }, undefined, true);
+  setJevOptions = (enabled: boolean, imagePreviewEnabled: boolean) => this.call<JevStatus>('PUT', '/jev/settings', { enabled, imagePreviewEnabled }, undefined, true);
+  removeJevKey = () => this.call<JevRemoval>('DELETE', '/jev/key', undefined, undefined, true);
   pairStatus = () => this.call<PairStatus>('GET', '/pair/devices');
   createPairCode = (tsAuthKey?: string) => this.call<PairInvitation>('POST', '/pair/create', tsAuthKey ? { tsAuthKey } : undefined);
   revokeDevice = (id: string) => this.call<void>('DELETE', `/pair/devices/${id}`);

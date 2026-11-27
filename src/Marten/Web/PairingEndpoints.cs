@@ -7,7 +7,7 @@ namespace Marten.Web;
 
 // One route policy consumed by Security for both credential and native-authority admission.
 internal sealed class OperatorRoute {
-	public static readonly OperatorRoute Action = new(), Management = new(), Redemption = new();
+	public static readonly OperatorRoute Action = new(), Management = new(), Redemption = new(), LocalBearer = new();
 	private OperatorRoute() { }
 }
 

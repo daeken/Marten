@@ -8,6 +8,8 @@ public sealed record ToolOutput(string Text, bool IsError = false) {
 	/// <summary>Images to show the model alongside the text, already saved to disk.</summary>
 	public List<ImageRef>? Images { get; init; }
 	public IReadOnlyList<ArtifactRef>? Artifacts { get; init; }
+	[System.Text.Json.Serialization.JsonIgnore]
+	internal Marten.Agents.JevPresentation? Jev { get; init; }
 	public static ToolOutput Error(string text) => new(text, true);
 }
 
@@ -46,6 +48,7 @@ public sealed class ToolRegistry {
 	readonly List<IToolSource> sources = new();
 	// Delegation (call_tool) must not bypass the originating turn's admission check.
 	readonly AsyncLocal<Func<Task>?> currentAdmission = new();
+	readonly AsyncLocal<bool> deferJevResult = new();
 
 	public ToolRegistry Add(ITool tool) {
 		tools[tool.Name] = tool;
@@ -76,16 +79,20 @@ public sealed class ToolRegistry {
 	public IReadOnlyList<ToolSpec> SpecsFor(IToolContext ctx) => For(ctx).Select(Spec).ToList();
 	public IReadOnlyList<ToolSpec> BuiltInSpecsFor(IToolContext ctx) => tools.Values.Where(t => t.AvailableTo(ctx)).Select(Spec).ToList();
 
-	public async Task<ToolOutput> InvokeAsync(IToolContext ctx, string name, string? arguments, CancellationToken ct, Func<Task>? admit = null) {
+	public async Task<ToolOutput> InvokeAsync(IToolContext ctx, string name, string? arguments, CancellationToken ct, Func<Task>? admit = null, bool deferJev = false) {
 		if(Find(ctx, name) is not { } tool) return ToolOutput.Error($"Unknown tool: {name}");
+		if(tool is Marten.Agents.JevTool && arguments?.Length > Marten.Agents.JevTool.MaxArgumentsChars)
+			return ToolOutput.Error("Invalid Jev arguments.");
 		JsonObject args;
 		try {
 			args = JsonNode.Parse(string.IsNullOrWhiteSpace(arguments) ? "{}" : arguments) as JsonObject
 				?? throw new ArgumentException("Arguments must be a JSON object.");
 		} catch(Exception e) when(e is System.Text.Json.JsonException or ArgumentException) {
+			if(tool is Marten.Agents.JevTool) return ToolOutput.Error("Invalid Jev arguments.");
 			return ToolOutput.Error($"Invalid arguments for {name}: {e.Message}");
 		}
 		var previous = currentAdmission.Value;
+		var previousDefer = deferJevResult.Value;
 		admit ??= previous;
 		try {
 			if(admit != null) await admit();
@@ -95,11 +102,14 @@ public sealed class ToolRegistry {
 			}
 			ct.ThrowIfCancellationRequested();
 			currentAdmission.Value = admit;
-			return await tool.InvokeAsync(ctx, args, ct);
+			deferJevResult.Value = deferJev || previousDefer;
+			var result = await tool.InvokeAsync(ctx, args, ct);
+			return !deferJevResult.Value && result.Jev is { } pending ? pending.Accept(ct) : result;
 		} catch(ToolException e) {
 			return ToolOutput.Error(e.Message);
 		} finally {
 			currentAdmission.Value = previous;
+			deferJevResult.Value = previousDefer;
 		}
 	}
 }
@@ -119,6 +129,10 @@ public static class Schema {
 	public static JsonObject Enum(string description, params string[] values) => new() {
 		["type"] = "string", ["description"] = description, ["enum"] = new JsonArray(values.Select(v => (JsonNode) v).ToArray()),
 	};
+	internal static JsonObject Nullable(JsonObject schema) {
+		schema["type"] = new JsonArray(JsonValue.Create(schema["type"]!.GetValue<string>()), JsonValue.Create("null"));
+		return schema;
+	}
 	public static JsonObject Array(string description, JsonObject items) => new() {
 		["type"] = "array", ["description"] = description, ["items"] = items,
 	};

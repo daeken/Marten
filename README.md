@@ -18,7 +18,7 @@ State lives in `~/.marten` (override with `MARTEN_HOME`):
 | Path | What |
 | --- | --- |
 | `config.json` | Model, effort, port, timeouts, truncation size |
-| `secrets/` | ChatGPT tokens and the UI token (mode 0600) |
+| `secrets/` | Operator credentials, including the UI token and optional Jev key (mode 0600; excluded from Marten backups) |
 | `prompts/` | The Marten-wide prompt and one per agent kind; edit freely |
 | `agents/<id>/` | `agent.json`, `system.md` (current generated system prompt), `state.json`, `tasks.json`, `NOTES.md` (task agents), `transcript/*.jsonl`, `outputs/` |
 | `projects/<id>/` | `project.json`, `prompt.md`, `MEMORY.md`, `memory/*.md`, `memory-log.jsonl`, `worktrees/` |
@@ -94,6 +94,8 @@ Keep standing rules and short pointers in `MEMORY.md` (16 KiB by default). Link 
 ## As an app (desktop and phone)
 
 Marten's UI is an installable web app. Opening a conversation shows the latest 80 transcript entries. Scroll back without being pulled to the end by new replies. Use **Older** and **Newer** to read one page at a time, or **Return to latest** to follow live replies. Paging changes only the display, not the agent’s history or context. Question-card answers appear in the conversation as soon as they’re saved, even if the agent is paused. Long task, process, and schedule lists scroll separately from the conversation. Click a project name to collapse or expand its agent list without leaving the current conversation. This preference is saved in the browser. Provider sign-in and global pause controls are in **Settings** at the top of the sidebar.
+
+**Settings → Typesafe AI Jev** is available only in the local Marten web UI (open the printed loopback URL and sign in as operator). Get an API key in the [TypeSafe console](https://console.typesafe.ai/keys), paste it into the password field—not into a chat—and choose **Set key**. **Enable Jev** defaults off; image preview has a separate opt-in. Replacing a healthy key preserves those choices. **Remove key** disables Jev and clears the locally stored key and both options; revoke the key separately in the Typesafe AI console. After rotating, also revoke the old key there. Settings does not contact TypeSafe to check the key. Enabling Jev gives all agents the `jev` tool under ordinary tool permissions, with no per-call approval. Use it for a second opinion with `decide`, `choice`, or `noul`. Explicit state, question, options and an optional same-agent published PNG go to TypeSafe; conversation history and other files are never attached automatically. Do not put secrets into tool arguments. Image preview is experimental and requires its own toggle. See [the Jev Settings contract](docs/jev-settings.md).
 
 Expand **Agent Tasks** in a conversation header to see open, waiting, and blocked work. The header counts active and completed tasks; expand **Done** inside it to see completed tasks. Both disclosures start closed.
 

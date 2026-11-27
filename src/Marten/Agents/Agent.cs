@@ -406,7 +406,7 @@ public sealed partial class Agent : IPowerShellOwner {
 			var changesAtStart = taskChanges;
 			while(true) {
 				manager.Restart.ThrowIfStopping();
-				var (result, view) = await CallModel(slots, modelCts.Token);
+				var (result, view, visibility) = await CallModel(slots, modelCts.Token);
 				var calls = new List<Entry>();
 				await CommitModelOutput(slots, modelCts.Token, () => {
 					RecordUsage(result, view);
@@ -418,7 +418,7 @@ public sealed partial class Agent : IPowerShellOwner {
 				// No tool boundary left in this turn: anything that arrived during the reply wakes a new one.
 				if(calls.Count == 0) break;
 				foreach(var call in calls) {
-					await RunTool(call, slots, toolCts.Token);
+					await RunTool(call, slots, toolCts.Token, view, visibility);
 				}
 				lock(gate) {
 					slots.ThrowIfStopped(modelCts.Token);
@@ -544,7 +544,7 @@ public sealed partial class Agent : IPowerShellOwner {
 		SaveState();
 	}
 
-	async Task RunTool(Entry call, TurnSlots slots, CancellationToken ct) {
+	async Task RunTool(Entry call, TurnSlots slots, CancellationToken ct, IReadOnlyList<Entry> view, long? visibility) {
 		async Task Admit() {
 			while(true) {
 				await slots.EnsureAgent(ct);
@@ -562,7 +562,7 @@ public sealed partial class Agent : IPowerShellOwner {
 		TakeViewedImages();
 		toolTurn.Value = slots.TurnToken;
 		try {
-			output = await manager.Tools.InvokeAsync(this, call.Name ?? "", call.Arguments, ct, Admit);
+			output = await manager.Tools.InvokeAsync(this, call.Name ?? "", call.Arguments, ct, Admit, deferJev: true);
 		} catch(OperationCanceledException) when(ct.IsCancellationRequested || slots.TurnToken.IsCancellationRequested || manager.Restart.IsStopping) {
 			throw;
 		} catch(Exception e) {
@@ -570,15 +570,25 @@ public sealed partial class Agent : IPowerShellOwner {
 		} finally {
 			toolTurn.Value = default;
 		}
+		var jev = output.Jev;
+		EvidenceResult? evidence = null;
+		bool Visible() => Transcript.Capture().LastSeq(RowKind.ViewChange) == visibility;
+		if(jev is { NeedsEvidence: true } && Visible() && jev.IsCurrent()) evidence = jev.Evidence(view, ct);
 		lock(gate) {
 			slots.ThrowIfStopped(ct);
-			var (text, full) = Truncate(call.CallId ?? Guid.NewGuid().ToString("N"), output.Text);
-			List<ImageRef> images = [.. output.Images ?? [], .. TakeViewedImages()];
-			Append(new Entry {
-				Kind = EntryKind.ToolResult, CallId = call.CallId, Name = call.Name, Text = text,
-				IsError = output.IsError ? true : null, FullOutput = full, Images = images.Count > 0 ? images : null,
-				Artifacts = output.Artifacts,
-			});
+			void Publish(ToolOutput value) {
+				var (text, full) = Truncate(call.CallId ?? Guid.NewGuid().ToString("N"), value.Text);
+				List<ImageRef> images = [.. value.Images ?? [], .. TakeViewedImages()];
+				Append(new Entry {
+					Kind = EntryKind.ToolResult, CallId = call.CallId, Name = call.Name, Text = text,
+					IsError = value.IsError ? true : null, FullOutput = full, Images = images.Count > 0 ? images : null,
+					Artifacts = value.Artifacts,
+				});
+			}
+			// Accept under the turn gate; once accepted, an operator change cannot recall this handoff.
+			if(jev != null) output = jev.Accept(ct, evidence != null && Visible() ? evidence : null);
+			slots.ThrowIfStopped(ct);
+			Publish(output);
 		}
 	}
 
@@ -623,7 +633,7 @@ public sealed partial class Agent : IPowerShellOwner {
 		};
 	}
 
-	async Task<(ModelResult Result, List<Entry> View)> CallModel(TurnSlots slots, CancellationToken ct) {
+	async Task<(ModelResult Result, List<Entry> View, long? Visibility)> CallModel(TurnSlots slots, CancellationToken ct) {
 		var transientFailures = 0;
 		var quotaWait = TimeSpan.FromSeconds(30);
 		var recoveringOverflow = false;
@@ -646,7 +656,7 @@ public sealed partial class Agent : IPowerShellOwner {
 					retainedSuffix = await Compact(model, slots, ct);
 					forceCompaction = false;
 				} else if(!recoveringOverflow) await ManageContext(model, slots, ct);
-				var view = View();
+				var view = View(out var visibility);
 				var request = AgentRequest(model, view);
 				SetStatus(AgentStatus.Running);
 				var result = await slots.Complete(request, ModelCallKind.Reply,
@@ -654,7 +664,7 @@ public sealed partial class Agent : IPowerShellOwner {
 				// Keep each call's usage in the log, on its last item.
 				if(result.Usage != null && result.Items.Count > 0)
 					result = result with { Items = [.. result.Items.SkipLast(1), result.Items[^1] with { Usage = result.Usage }] };
-				return (result, view);
+				return (result, view, visibility);
 			} catch(Exception) when(ct.IsCancellationRequested || slots.TurnToken.IsCancellationRequested) {
 				slots.ThrowIfStopped(ct);
 				throw;

@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { DevicePairing } from './DevicePairing';
+import { JevSettings } from './JevSettings';
 import { AgentMessage, AgentSummary, Api, Backend, BackupStatus, Entry, NotebookCell, OutsideClient, McpServer, Project, ProjectMemory, Schedule, ScriptToolInfo, SeraMessage, ServerEvent, Status_, TaskItem, takeToken, TranscriptPage, transcriptPageSize } from './api';
 import { ProcessPanels } from './ProcessPanels';
 import { ArtifactCards } from './ArtifactCards';
@@ -239,6 +240,7 @@ function Sidebar({ api, status, selected, onSelect, onChange }: {
   };
 
   const [showClosed, setShowClosed] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() => {
     try {
       const stored: unknown = JSON.parse(localStorage.getItem('marten.collapsedProjects') ?? '[]');
@@ -268,7 +270,7 @@ function Sidebar({ api, status, selected, onSelect, onChange }: {
       </header>
       {status.paused && <div className="banner small">Everything is paused. Agents finish their current step and hold; nudges and schedules stop.</div>}
       <nav className="agents">
-        <details className="sidebar-settings">
+        <details className="sidebar-settings" onToggle={e => setSettingsOpen(e.currentTarget.open)}>
           <summary>Settings</summary>
           <section className="auth">
             <button className={`link small ${status.paused ? 'on' : ''}`} title="Pause or resume every agent, nudge and schedule"
@@ -287,6 +289,7 @@ function Sidebar({ api, status, selected, onSelect, onChange }: {
               </>
             )}
             <DevicePairing api={api} />
+            {settingsOpen && location.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(location.hostname) && <JevSettings api={api} />}
             {status.backends.map(b => <BackendRow key={b.provider} api={api} backend={b} onChange={onChange} />)}
           </section>
         </details>
