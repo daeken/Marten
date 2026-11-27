@@ -62,8 +62,44 @@ public class MacFilesTests {
 		var next = page.GetProperty("next").GetString();
 		Assert.Equal(HttpStatusCode.NotFound, (await f.Get($"entries/{next}", token: f.Other)).StatusCode);
 		Assert.Equal(3, (await f.Json($"entries/{next}")).GetProperty("entries").GetArrayLength());
+		Assert.Equal(HttpStatusCode.NotFound, (await f.Get($"entries/{next}")).StatusCode);
+		var fresh = (await f.Json($"entries/{root}")).GetProperty("next").GetString();
 		File.WriteAllText(Path.Combine(f.Root, "changed"), "");
-		Assert.Equal(HttpStatusCode.Conflict, (await f.Get($"entries/{next}")).StatusCode);
+		Assert.Equal(HttpStatusCode.Conflict, (await f.Get($"entries/{fresh}")).StatusCode);
+		Assert.Equal(HttpStatusCode.NotFound, (await f.Get($"entries/{fresh}")).StatusCode);
+	}
+
+	[Fact]
+	public async Task LargeDirectoriesProgressPastScanAndHandleCaps() {
+		if(!MacFileSystem.Supported) return;
+		await using var f = await Fixture.Start();
+		for(var i = 0; i < 2311; i++) File.WriteAllText(Path.Combine(f.Root, $"f{i:0000}"), "");
+		var root = (await f.Json("roots"))[0].GetProperty("id").GetString();
+		var next = root;
+		var seen = new HashSet<string>();
+		for(var n = 0; next != null && n < 25; n++) {
+			var page = await f.Json($"entries/{next}");
+			var rows = page.GetProperty("entries").EnumerateArray().ToArray();
+			Assert.InRange(rows.Length, 1, 100);
+			foreach(var row in rows) Assert.True(seen.Add(row.GetProperty("name").GetString()!));
+			next = page.TryGetProperty("next", out var value) ? value.GetString() : null;
+		}
+		Assert.Null(next);
+		Assert.Equal(2311, seen.Count);
+	}
+
+	[Fact]
+	public async Task AFilteredPageStillHasContinuationAndMakesProgress() {
+		if(!MacFileSystem.Supported) return;
+		await using var f = await Fixture.Start();
+		for(var i = 0; i < 300; i++) File.CreateSymbolicLink(Path.Combine(f.Root, $"link{i:000}"), "missing");
+		var root = (await f.Json("roots"))[0].GetProperty("id").GetString();
+		var page = await f.Json($"entries/{root}");
+		Assert.Empty(page.GetProperty("entries").EnumerateArray());
+		var next = page.GetProperty("next").GetString();
+		var tail = await f.Json($"entries/{next}");
+		Assert.Empty(tail.GetProperty("entries").EnumerateArray());
+		Assert.False(tail.TryGetProperty("next", out _));
 	}
 
 	[Fact]
@@ -237,6 +273,6 @@ public class MacFilesTests {
 			using var document = JsonDocument.Parse(await r.Content.ReadAsByteArrayAsync());
 			return document.RootElement.Clone();
 		}
-		public async ValueTask DisposeAsync() { client.Dispose(); await app.DisposeAsync(); data.Dispose(); }
+		public async ValueTask DisposeAsync() { client.Dispose(); await app.StopAsync(); await app.DisposeAsync(); data.Dispose(); }
 	}
 }
