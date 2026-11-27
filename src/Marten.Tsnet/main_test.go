@@ -14,10 +14,26 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"tailscale.com/feature/buildfeatures"
 	"tailscale.com/ipn/ipnstate"
 )
 
 const testHost = "marten.example.ts.net"
+
+func TestRunRequiresPeerAPIServerAndLogUploadOmitted(t *testing.T) {
+	dir := t.TempDir()
+	state := filepath.Join(dir, "state")
+	want := badKey // no credential or state, so never start a node
+	if buildfeatures.HasLogTail || buildfeatures.HasPeerAPIServer {
+		want = badConfig
+	}
+	if code := run([]string{testHost, "7450", state, filepath.Join(dir, "missing-key")}); code != want {
+		t.Fatalf("startup returned %d; want %d", code, want)
+	}
+	if _, err := os.Stat(state); want == badConfig && !os.IsNotExist(err) {
+		t.Fatalf("unsafe build checked the state directory before being rejected: %v", err)
+	}
+}
 
 func TestPrivateStateAndDeviceKey(t *testing.T) {
 	d := t.TempDir()

@@ -11,6 +11,8 @@ The native app reaches `https://<device>.<tailnet>.ts.net` and `wss://` on the s
 - Use a dedicated tailnet tag, e.g. `tag:marten`, with limited tag ownership. Allow only the intended users/devices to connect to that tag on `tcp:443`. If an existing broad allow rule also grants that access, narrow that rule; adding a stricter grant does not override an existing allow. No inbound Internet listener or host firewall port 443 rule is needed.
 - Generate a short-lived, **one-off, non-ephemeral Tailscale device auth key** tagged only for this server. Preapprove it if required by your device approval policy, or complete approval in the admin console. Do not use a tailnet API key, OAuth client secret, reusable key, or another administrator credential. The helper accepts only `tskey-auth-…` format; the expiry, tags and one-off setting are chosen in Tailscale.
 
+The build must omit SDK log upload and the unused Tailscale PeerAPI server. In the pinned SDK, PeerAPI can open a wildcard TCP socket on the host even in userspace mode. Marten does not use it: native HTTPS/WSS use the private tailnet listener instead. The helper refuses to start if either feature is compiled in. When upgrading an existing helper, rebuild and stage the new binary; keep the same private node state (no re-enrollment needed).
+
 Set `MARTEN_HOME` to the server's actual home (default `~/.marten`). Build the helper from the same checkout and install it as the user running Marten:
 
 ```sh
@@ -20,9 +22,17 @@ chmod 700 "$marten_home/secrets"
 (
   cd src/Marten.Tsnet
   CGO_ENABLED=0 go build -mod=readonly \
-    -tags 'ts_omit_logtail ts_omit_oauthkey ts_omit_identityfederation' \
+    -tags 'ts_omit_logtail ts_omit_oauthkey ts_omit_identityfederation ts_omit_peerapiserver' \
     -trimpath -o "$marten_home/bin/marten-tsnet" .
 )
+```
+
+To cross-build for Linux amd64, run from `src/Marten.Tsnet` and stage the resulting binary on the Linux server (not on the build host):
+
+```sh
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -mod=readonly \
+  -tags 'ts_omit_logtail ts_omit_oauthkey ts_omit_identityfederation ts_omit_peerapiserver' \
+  -trimpath -o /tmp/marten-tsnet-linux-amd64 .
 ```
 
 Use a secret-file editor or your normal secret-management workflow to create `$MARTEN_HOME/secrets/tailnet-auth-key` (owned by the Marten user, mode `0600`) containing only the device auth key. Do not put it in shell command arguments, environment variables, `config.json`, logs, or a pairing QR. Add the following to `config.json`, merging it with existing settings:
@@ -46,7 +56,7 @@ No tailnet account is required to run transport tests:
 ```sh
 cd src/Marten.Tsnet
 CGO_ENABLED=0 go test -mod=readonly \
-  -tags 'ts_omit_logtail ts_omit_oauthkey ts_omit_identityfederation' ./...
+  -tags 'ts_omit_logtail ts_omit_oauthkey ts_omit_identityfederation ts_omit_peerapiserver' ./...
 ```
 
 ## Rollout boundary
