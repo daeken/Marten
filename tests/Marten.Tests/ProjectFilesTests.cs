@@ -28,6 +28,14 @@ public class ProjectFilesTests {
 	}
 
 	[Fact]
+	public async Task OrdinaryBootDoesNotExposeRootsEvenWithGrantConfigured() {
+		if(!ProjectFileSystem.Supported) return;
+		await using var server = await Fixture.Start(enableScratchResolver: false);
+		server.Grant();
+		Assert.Equal(HttpStatusCode.NotFound, (await server.Get("roots")).StatusCode);
+	}
+
+	[Fact]
 	public async Task ApprovedBindingListsOnlySafeEntriesAndUsesScopedRevisionHandles() {
 		if(!ProjectFileSystem.Supported) return;
 		await using var server = await Fixture.Start();
@@ -93,7 +101,7 @@ public class ProjectFilesTests {
 		public string LocalHost => new Uri(endpoint).Authority;
 		public string Other => other;
 		public string Operator => op;
-		public static async Task<Fixture> Start() {
+		public static async Task<Fixture> Start(bool enableScratchResolver = true) {
 			var dir = new TempDir();
 			var home = new Home(dir.File("home"));
 			var root = Directory.CreateDirectory(dir.File("binding")).FullName;
@@ -110,7 +118,7 @@ public class ProjectFilesTests {
 			app.UseRouting();
 			app.Use(security.Middleware);
 			new ProjectFiles(id => id == project.Info.Id ? project : null, () => cfg, home.Root, () => dir.File("backups"),
-				app.Lifetime.ApplicationStopping).Map(app.MapGroup("/api"));
+				app.Lifetime.ApplicationStopping, enableScratchResolver).Map(app.MapGroup("/api"));
 			await app.StartAsync();
 			return new Fixture(dir, app, app.Urls.Single(), project, token, other, security.Token, cfg.ProjectFiles);
 		}

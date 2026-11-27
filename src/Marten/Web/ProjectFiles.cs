@@ -7,7 +7,8 @@ using static Marten.Web.ProjectFileSystem;
 
 namespace Marten.Web;
 
-internal sealed class ProjectFiles(Func<string, Project?> projectFor, Func<Config> config, string home, Func<string> backups, CancellationToken stopping) {
+internal sealed class ProjectFiles(Func<string, Project?> projectFor, Func<Config> config, string home, Func<string> backups, CancellationToken stopping,
+	bool enableScratchResolver = false) {
 	const int MaxScan = 2_000, Page = 100, MaxGrants = 16, Text = 256 * 1024, Raster = 8 * 1024 * 1024, Share = 32 * 1024 * 1024;
 	readonly SemaphoreSlim operations = new(4);
 	readonly object gate = new();
@@ -35,7 +36,8 @@ internal sealed class ProjectFiles(Func<string, Project?> projectFor, Func<Confi
 		ctx.Response.Headers.XContentTypeOptions = "nosniff";
 		var paired = Security.DeviceRevocationOf(ctx); // set only after canonical paired bearer admission
 		if(!paired.CanBeCanceled || ctx.Request.QueryString.HasValue) { ctx.Response.StatusCode = 403; return; }
-		if(!Supported || config().ProjectFiles is not { Count: > 0 and <= MaxGrants } || projectFor(project) == null) {
+		// Ordinary boot has no config or runtime override until Darwin containment is reviewed.
+		if(!enableScratchResolver || !Supported || config().ProjectFiles is not { Count: > 0 and <= MaxGrants } || projectFor(project) == null) {
 			ctx.Response.StatusCode = 404;
 			return;
 		}
