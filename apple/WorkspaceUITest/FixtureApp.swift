@@ -45,6 +45,7 @@ actor Fixture: Transport {
         let url = request.url!
         let path = url.path
         if path == "/api/inbox" || path == "/api/messages" { try record(path) }
+        let compactChrome = ProcessInfo.processInfo.environment["MARTEN_FIXTURE_COMPACT_CHROME"] == "1"
         var body = "[]"
         if path == "/api/status" {
             #if os(macOS)
@@ -54,10 +55,11 @@ actor Fixture: Transport {
             let leadID = ""
             let lead = ""
             #endif
+            let alphaDirectory = compactChrome ? #", "workingDirectory":"/fixture/alpha""# : ""
             body = #"""
             {"paused":false,"inbox":5,"openQuestions":2,
             "projects":[{"id":"p","name":"Fixture Project"\#(leadID)},{"id":"q","name":"Second Project"}],"agents":[
-              {"id":"a","name":"Standalone Alpha","kind":"chat","status":"idle","paused":false,"pausedEffective":false},
+              {"id":"a","name":"Standalone Alpha","kind":"chat","status":"idle","paused":false,"pausedEffective":false\#(alphaDirectory)},
               {"id":"b","name":"Project Beta","kind":"task","projectId":"p","status":"idle","paused":false,"pausedEffective":false},
               \#(lead)
               {"id":"c","name":"Closed Gamma","kind":"chat","closed":true,"status":"idle","paused":false,"pausedEffective":false},

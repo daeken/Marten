@@ -77,6 +77,13 @@ struct WorkspaceView: View {
         NavigationStack(path: $path) {
             List { sidebar }
                 .navigationTitle("Marten")
+                .toolbar {
+                    if path.isEmpty {
+                        ToolbarItem(placement: .primaryAction) {
+                            Button("Servers", systemImage: "server.rack", action: showServers)
+                        }
+                    }
+                }
                 .navigationDestination(for: WorkspaceDestination.self, destination: detail)
         }
         #endif
@@ -262,11 +269,13 @@ struct WorkspaceView: View {
 
     var body: some View {
         navigation
+        #if os(macOS)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button("Servers", systemImage: "server.rack", action: showServers)
             }
         }
+        #endif
         .refreshable { await refresh() }
         .task(id: RefreshRoute(id: routeID, active: networkActive)) {
             guard networkActive else { return }
@@ -579,6 +588,7 @@ private struct ConversationView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     LazyVStack(alignment: .leading, spacing: 12) {
+                        #if os(macOS)
                         NavigationLink(value: WorkspaceDestination.operations(agent.id, task: nil)) {
                             Label("Tasks & Schedules", systemImage: "checklist")
                         }.buttonStyle(.borderless)
@@ -592,6 +602,7 @@ private struct ConversationView: View {
                         if let directory = agent.worktree ?? agent.workingDirectory {
                             Text(directory).font(.footnote.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
                         }
+                        #endif
                         if agent.pausedEffective && !agent.paused {
                             Text("Paused by the server or project.").font(.footnote).foregroundStyle(.secondary)
                         }

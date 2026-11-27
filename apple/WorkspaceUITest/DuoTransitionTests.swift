@@ -44,6 +44,10 @@ final class DuoTransitionTests: XCTestCase {
                 title.exists && (draft.value as? String) == text && anchor.isHittable
                     && app.staticTexts["Older entries"].exists
             }
+            XCTAssertTrue(app.buttons["Agent Actions"].firstMatch.isHittable)
+            for label in ["Servers", "Tasks & Schedules", "Background Processes", "PowerShell Notebook"] {
+                XCTAssertFalse(app.buttons[label].firstMatch.exists, "Inline duplicate: \(label)")
+            }
             let attachment = XCTAttachment(screenshot: app.screenshot())
             attachment.name = label
             attachment.lifetime = .keepAlways
@@ -62,7 +66,6 @@ final class DuoTransitionTests: XCTestCase {
                 wait("starting portrait cover", timeout: 120, until: onCover)
             }
         }
-        let coverWidth = window.frame.width
         let agent = app.staticTexts["Standalone Alpha"].firstMatch
         for _ in 0..<4 where !agent.exists || !agent.isHittable { app.swipeUp() }
         XCTAssertTrue(agent.isHittable)
@@ -80,7 +83,8 @@ final class DuoTransitionTests: XCTestCase {
             // The Duo's default inner display is wider than tall even
             // when the device itself has not rotated.
             wait("wider inner display", timeout: 120) {
-                window.frame.width > coverWidth * 1.25
+                let size = window.frame.size
+                return abs(size.width - 951) <= 2 && abs(size.height - 669) <= 2
             }
             checkpoint("02 Inner · same conversation, archive and draft")
         }

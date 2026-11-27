@@ -159,6 +159,63 @@ final class CompactWorkspaceTests: XCTestCase {
         attach(app, name: "Compact latest on re-entry")
     }
 
+    @MainActor func testCompactConversationChrome() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchEnvironment["MARTEN_FIXTURE_RESET"] = "1"
+        app.launchEnvironment["MARTEN_FIXTURE_COMPACT_CHROME"] = "1"
+        app.launch()
+        defer { app.terminate() }
+
+        let servers = app.buttons["Servers"]
+        let actions = app.buttons["Agent Actions"].firstMatch
+        let alpha = app.staticTexts["Standalone Alpha"].firstMatch
+        let name = app.navigationBars["Standalone Alpha"]
+        let directory = app.staticTexts["/fixture/alpha"].firstMatch
+        let labels = ["Tasks & Schedules", "Background Processes", "PowerShell Notebook", "Settings & Diagnostics"]
+        XCTAssertTrue(app.navigationBars["Marten"].waitForExistence(timeout: 10))
+        XCTAssertTrue(servers.firstMatch.isHittable)
+        for _ in 0..<4 where !alpha.exists || !alpha.isHittable { app.swipeUp() }
+        XCTAssertTrue(alpha.isHittable)
+        alpha.tap()
+        XCTAssertTrue(name.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["BackButton"].firstMatch.isHittable)
+        XCTAssertTrue(actions.isHittable)
+        XCTAssertTrue(app.descendants(matching: .any)["messageDraft"].firstMatch.isHittable)
+        XCTAssertTrue(app.buttons["Older transcript page"].firstMatch.waitForExistence(timeout: 10))
+        app.buttons["Older transcript page"].tap()
+        let first = app.staticTexts["A fixture entry 1"].firstMatch
+        XCTAssertTrue(first.waitForExistence(timeout: 10))
+        XCTAssertTrue(first.isHittable, "The archive should open at its first entry without scrolling")
+        for label in labels { XCTAssertFalse(app.buttons[label].firstMatch.exists, "Inline duplicate: \(label)") }
+        XCTAssertFalse(servers.firstMatch.exists)
+        XCTAssertFalse(app.staticTexts["Idle"].firstMatch.exists)
+        XCTAssertFalse(directory.exists)
+        attach(app, name: "Compact conversation archive without duplicate header")
+
+        func openAction(_ label: String) {
+            XCTAssertTrue(actions.waitForExistence(timeout: 5))
+            actions.tap()
+            XCTAssertTrue(app.buttons[label].firstMatch.waitForExistence(timeout: 5))
+            for label in labels { XCTAssertEqual(app.buttons.matching(identifier: label).count, 1) }
+            app.buttons[label].tap()
+        }
+        func back() { app.buttons["BackButton"].firstMatch.tap() }
+
+        openAction("PowerShell Notebook")
+        XCTAssertTrue(app.staticTexts["No PowerShell runs yet."].waitForExistence(timeout: 10))
+        back()
+        openAction("Settings & Diagnostics")
+        XCTAssertTrue(app.navigationBars["Standalone Alpha · Settings"].waitForExistence(timeout: 10))
+        for _ in 0..<4 where !directory.exists || !directory.isHittable { app.swipeUp() }
+        XCTAssertTrue(directory.isHittable)
+        XCTAssertTrue(app.staticTexts["Idle"].exists)
+        back()
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        back()
+        XCTAssertTrue(servers.firstMatch.waitForExistence(timeout: 5))
+    }
+
     @MainActor func testOperationDisclosures() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
