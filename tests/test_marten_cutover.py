@@ -637,6 +637,42 @@ class PreRestartTests(unittest.TestCase):
                                  ([('GET', '/api/status')] * 3 if absent == 404 else []))
 
 
+    def test_legacy_retained_terminal_attempts_pass_but_inflight_or_malformed_refuse(self):
+        # Exact fda0f931 ModelCallStatus wire fields, System.Text.Json DateTimeOffset
+        # and snake_case lowercase enums. Deliberately reverse the wall-clock times.
+        completed = dict(id=37, model='gpt-5.2', kind='reply',
+                         startedAt='2026-11-27T19:14:40.1234567+00:00',
+                         endedAt='2026-11-27T19:14:38.1234+00:00', outcome='succeeded')
+        invalid = (dict(endedAt=None), dict(outcome=None), dict(outcome='Succeeded'),
+                   dict(startedAt='2026-11-27T19:14:40'), dict(endedAt='2026-02-30T19:14:40Z'),
+                   dict(endedAt='2026-11-27T19:14:40+00:60'), dict(startedAt=45),
+                   dict(id=True), dict(id=0), dict(kind='unknown'), dict(model=' '))
+        cases = [(completed, True), (dict(completed, kind='compaction', outcome='failed'), True),
+                 (dict(completed, outcome='cancelled'), True),
+                 ({k: v for k, v in completed.items() if k not in ('endedAt', 'outcome')}, False)]
+        cases.extend((dict(completed, **change), False) for change in invalid)
+        for model_call, allowed in cases:
+            with self.subTest(model_call=model_call):
+                host = Fake()
+
+                def respond(calls):
+                    self.assertEqual(host.sent, [])
+                    if calls[-1][1] == cutover.DRAIN_PATH:
+                        return 404, {}
+                    return 200, dict(agents=[dict(id='scratch-closed', status='idle', pending=0,
+                        closed=True, pausedEffective=True,
+                        modelCall=model_call if len(calls) == 4 else completed)])
+
+                with patch.object(time, 'sleep'), self.endpoint(respond) as (port, calls):
+                    if allowed:
+                        self.stop(host, port, legacy=True)
+                    else:
+                        with self.assertRaisesRegex(cutover.CutoverError, 'not quiet'):
+                            self.stop(host, port, legacy=True)
+                self.assertEqual(bool(host.sent), allowed)
+                self.assertEqual(calls, [('GET', cutover.DRAIN_PATH)] + [('GET', '/api/status')] * 3)
+
+
 class HealthTests(unittest.TestCase):
     def test_loopback_ui_and_authenticated_status(self):
         paths = []

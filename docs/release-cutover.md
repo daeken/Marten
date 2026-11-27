@@ -162,8 +162,11 @@ status, timeout, or malformed status snapshot stops the job without TERM.
 The helper observes the full agent inventory from authenticated `GET /api/status`
 twice a second apart and once more just before TERM. Every agent (including
 closed and effectively paused agents) must report `status: "idle"`, exact zero
-`pending`, and `modelCall` omitted or null; the unique agent IDs must be
-unchanged. `pending` is
+`pending`, and no in-flight model call. `fda0f931` retains the latest
+model attempt after it ends, so `modelCall` may be absent or null, or a
+well-formed terminal `reply` or `compaction` (`succeeded`, `failed`, or
+`cancelled`, with valid zoned start/end timestamps). In-flight or malformed
+attempts block TERM. The unique agent IDs must be unchanged. `pending` is
 full in-memory inbox depth, not just the user-authored entries visible in
 `pending-messages`. Closed and effective pause are separate flags and can be
 idle; `status: "paused"` can be an unfinished turn held at a dispatch boundary

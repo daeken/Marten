@@ -4,6 +4,7 @@
 import argparse
 import ctypes as C
 from dataclasses import asdict, dataclass
+from datetime import datetime
 import errno
 import fcntl
 import hashlib
@@ -398,6 +399,35 @@ class LeaseDrain:
         print('Could not confirm drain release; any lease expires automatically', flush=True)
 
 
+def dotnet_timestamp(value):
+    if not isinstance(value, str):
+        return False
+    match = re.fullmatch(r'([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})'
+                         r'(?:\.([0-9]{1,7}))?(Z|[+-](?:0[0-9]|1[0-3]):[0-5][0-9]|[+-]14:00)', value)
+    if match is None:
+        return False
+    whole, fraction, zone = match.groups()
+    try:
+        # System.Text.Json can emit seven fractional digits; Python 3.10 accepts six.
+        datetime.fromisoformat(f'{whole}.{(fraction or "").ljust(6, "0")[:6]}'
+                               + ('+00:00' if zone == 'Z' else zone))
+        return True
+    except ValueError:
+        return False
+
+
+def legacy_model_quiet(call):
+    if call is None:
+        return True
+    # fda0f931 retains the latest attempt even after the turn is idle. Both
+    # timestamps are wall-clock values; a clock correction may reverse them.
+    return (isinstance(call, dict) and type(call.get('id')) is int and 0 < call['id'] < 2**63
+            and isinstance(call.get('model'), str) and bool(call['model'].strip())
+            and call.get('kind') in ('reply', 'compaction')
+            and call.get('outcome') in ('succeeded', 'failed', 'cancelled')
+            and dotnet_timestamp(call.get('startedAt')) and dotnet_timestamp(call.get('endedAt')))
+
+
 class LegacyDrain:
     """Explicit first install only. Old status is an observation, not a fence."""
     def __init__(self, port, token):
@@ -431,7 +461,7 @@ class LegacyDrain:
                     or type(agent.get('pausedEffective')) is not bool
                     or type(agent.get('pending')) is not int or agent['pending'] < 0):
                 raise CutoverError('Unexpected legacy agent status response')
-            if agent.get('status') != 'idle' or agent['pending'] or agent.get('modelCall') is not None:
+            if agent.get('status') != 'idle' or agent['pending'] or not legacy_model_quiet(agent.get('modelCall')):
                 raise CutoverError('Legacy agent status is not quiet; no TERM sent')
             ids.add(agent['id'])
         if self.ids is not None and ids != self.ids:
