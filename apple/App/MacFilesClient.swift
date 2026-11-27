@@ -96,13 +96,17 @@ struct MacFilesListing {
     let id = UUID()
     private var copy: MacFilesStagedCopy?
     private let work: MacFilesWork
+    private(set) var acquiredByActivity = false
 
     init(_ copy: MacFilesStagedCopy, work: MacFilesWork) { self.copy = copy; self.work = work }
 
     func leaseForActivity(current: MacFilesWork, destinationIsCurrent: Bool) -> Lease? {
-        guard work.permits(current, destinationIsCurrent: destinationIsCurrent) else { return nil }
-        return copy.map(Lease.init)
+        guard !acquiredByActivity, let copy, work.permits(current, destinationIsCurrent: destinationIsCurrent) else { return nil }
+        acquiredByActivity = true
+        return Lease(copy)
     }
+
+    func preservesPresentation(inBackground: Bool) -> Bool { acquiredByActivity && !inBackground }
 
     func finish(current: inout MacFilesShare?) {
         requestCleanup()

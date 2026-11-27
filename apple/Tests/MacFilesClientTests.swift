@@ -163,6 +163,30 @@ final class MacFilesClientTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(FileManager.default.fileExists(atPath: oldPath))
     }
 
+    @MainActor func testForegroundRoundTripNeverPreservesUnacquiredCopyButKeepsAcquiredActivity() throws {
+        let scope = MacFilesSession.Key(endpoint: endpoint, pairedSession: UUID(), route: UUID())
+        let initial = MacFilesWork(scope: scope, destination: .file(row(bytes: 4)), generation: UUID(), foregroundEpoch: UUID())
+        var resumed = initial
+        resumed.foregroundEpoch = UUID()
+        var first: MacFilesShare? = try initial.share(MacFilesStagedCopy.create(leaf: "unacquired"),
+                                                      current: initial, destinationIsCurrent: true)
+        let before = try XCTUnwrap(first)
+        XCTAssertFalse(before.preservesPresentation(inBackground: false))
+        XCTAssertNil(before.leaseForActivity(current: initial, destinationIsCurrent: false)) // inactive
+        before.finish(current: &first)
+        XCTAssertNil(first)
+        XCTAssertNil(before.leaseForActivity(current: resumed, destinationIsCurrent: true)) // active again
+
+        let after = try XCTUnwrap(resumed.share(MacFilesStagedCopy.create(leaf: "acquired"),
+                                              current: resumed, destinationIsCurrent: true))
+        let lease = try XCTUnwrap(after.leaseForActivity(current: resumed, destinationIsCurrent: true))
+        withExtendedLifetime(lease) {
+            XCTAssertTrue(after.preservesPresentation(inBackground: false)) // inactive
+            XCTAssertTrue(after.preservesPresentation(inBackground: false)) // active again
+            XCTAssertFalse(after.preservesPresentation(inBackground: true))
+        }
+    }
+
     func testCancelledAfterWritingAChunkDeletesPartialShare() async throws {
         let latch = Latch()
         let fixture = Reader(mode: .midBody(latch))

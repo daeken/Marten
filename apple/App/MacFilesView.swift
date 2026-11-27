@@ -98,7 +98,7 @@ struct MacFilesView: View {
         .task(id: ReadKey(identity: identity, foregroundEpoch: foregroundEpoch, active: active, refresh: refresh)) {
             // UIKit can make the scene temporarily inactive as the share activity
             // takes focus. Cancel network work and clear previews, not the handoff.
-            reset(keepShare: phase != .background && staged != nil)
+            reset(keepShare: staged?.preservesPresentation(inBackground: phase == .background) == true)
             if active && isCurrent(), staged == nil { await load() }
         }
         .task(id: work.job(more)) {
@@ -269,7 +269,7 @@ private struct ActivitySheet: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> UIViewController {
         // Check live foreground readiness, route and destination immediately before
         // giving UIKit a URL. The presentation request may have been queued earlier.
-        guard let lease = acquire() else {
+        guard context.environment.scenePhase == .active, let lease = acquire() else {
             Task { @MainActor in completed() }
             return UIViewController()
         }
