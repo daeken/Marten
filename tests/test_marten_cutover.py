@@ -425,6 +425,41 @@ class HealthTests(unittest.TestCase):
                 cutover.healthy(host, child, 51000, 'scratch-token')
 
 
+    def test_shared_listener_is_not_probed_or_accepted(self):
+        child = SimpleNamespace(pid=4321, poll=lambda: None)
+        shared = {child.pid, 4322}
+        sole = {child.pid}
+        # Shared initially, then a subprocess appears during the first probe.
+        observations = iter((shared, sole, shared, shared, sole, sole))
+        latest = None
+
+        def listeners(port):
+            nonlocal latest
+            latest = next(observations)
+            return latest
+
+        def probe(*args):
+            self.assertEqual(latest, sole)
+            return True
+
+        with patch.dict(cutover.healthy.__globals__, http_check=probe), patch.object(time, 'sleep') as sleep:
+            cutover.healthy(SimpleNamespace(listeners=listeners), child, 51000, 'scratch-token')
+        self.assertEqual(sleep.call_count, 3)
+        self.assertEqual(list(observations), [])
+
+    def test_persistent_shared_listener_times_out_without_http_probe(self):
+        child = SimpleNamespace(pid=4321, poll=lambda: None)
+        host = SimpleNamespace(listeners=lambda port: {child.pid, 4322})
+        with (
+            patch.dict(cutover.healthy.__globals__, http_check=lambda *args: self.fail('shared listener')),
+            patch.object(time, 'monotonic', side_effect=(0, 0, 30)),
+            patch.object(time, 'sleep') as sleep,
+        ):
+            with self.assertRaisesRegex(cutover.CutoverError, r'additional listener PIDs \[4322\]'):
+                cutover.healthy(host, child, 51000, 'scratch-token')
+        sleep.assert_called_once_with(0.25)
+
+
 class PrebuildTests(unittest.TestCase):
     def test_moved_remote_is_rejected_before_merge_or_build(self):
         calls = []
@@ -449,7 +484,7 @@ class DarwinTests(unittest.TestCase):
             fixture = root / cutover.DLL
             fixture.parent.mkdir(parents=True)
             fixture.write_text(dedent('''\
-                import os, signal, time
+                import os, signal, subprocess, sys, time
                 from pathlib import Path
                 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -470,10 +505,28 @@ class DarwinTests(unittest.TestCase):
                             raise SystemExit(0)
                         signal.signal(signal.SIGTERM, delay_term)
                         print(server.server_port, flush=True)
+                    else:
+                        # Keep an actual duplicate of the listening fd open
+                        # until the deploy helper's lsof has seen both holders.
+                        fd = server.fileno()
+                        holder = subprocess.Popen([sys.executable, 'hold.py'], pass_fds=(fd,))
                     print('scratch server ready', flush=True)
                     deadline = time.monotonic() + 12
-                    while time.monotonic() < deadline and not Path('fixture.stop').exists():
-                        server.handle_request()
+                    try:
+                        while time.monotonic() < deadline and not Path('fixture.stop').exists():
+                            server.handle_request()
+                    finally:
+                        if port and holder.poll() is None:
+                            holder.terminate()
+                            holder.wait(timeout=2)
+                '''))
+            (root / 'hold.py').write_text(dedent('''\
+                import time
+                from pathlib import Path
+
+                end = time.monotonic() + 5
+                while time.monotonic() < end and not Path('release-holder').exists():
+                    time.sleep(0.05)
                 '''))
             shim = root / 'dotnet'
             shim.write_text('#!/bin/bash\nexec -a dotnet "$SCRATCH_PYTHON" "$@"\n')
@@ -505,7 +558,14 @@ class DarwinTests(unittest.TestCase):
 
                 helper, old_pid, port = sys.argv[1:]
                 m = runpy.run_path(helper)
-                host = m['Darwin']()
+                class ScratchDarwin(m['Darwin']):
+                    def listeners(self, port):
+                        pids = super().listeners(port)
+                        if len(pids) > 1:
+                            Path('release-holder').touch()
+                        return pids
+
+                host = ScratchDarwin()
                 root = Path.cwd()
                 port = int(port)
                 pid = int(old_pid)
@@ -537,6 +597,7 @@ class DarwinTests(unittest.TestCase):
                     self.assertEqual(finished.returncode, 0, finished.stderr)
                     self.assertEqual(old.wait(2), 0)
                     self.assertIn('exceeded TERM grace', finished.stdout)
+                    self.assertTrue((root / 'release-holder').exists(), 'lsof did not observe the inherited socket')
                     result_text = (job / 'result.json').read_text()
                     self.assertNotIn('scratch-token', result_text)
                     result = json.loads(result_text)

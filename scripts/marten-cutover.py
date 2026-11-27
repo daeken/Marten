@@ -242,21 +242,34 @@ def http_check(port, token, timeout):
 
 
 def healthy(host, child, port, token):
+    def observe():
+        listeners = host.listeners(port)
+        if listeners and child.pid not in listeners:
+            raise CutoverError(f'Port {port} occupied by unexpected listener(s) {sorted(listeners)}')
+        return listeners
+
     deadline = time.monotonic() + 30
+    expected = {child.pid}
+    listeners = set()
     while time.monotonic() < deadline:
         if child.poll() is not None:
             raise CutoverError(f'New Marten PID {child.pid} exited during startup ({child.returncode})')
-        listeners = host.listeners(port)
-        if listeners - {child.pid}:
-            raise CutoverError(f'Port {port} occupied by unexpected listener(s) {sorted(listeners)}')
-        if listeners == {child.pid}:
+        # lsof may list both Marten and a subprocess that briefly inherited its
+        # socket. Wait for exclusive ownership; do not probe HTTP while shared.
+        listeners = observe()
+        if listeners == expected:
             try:
                 ready = http_check(port, token, 1)
             except (OSError, ValueError, http.client.HTTPException):
                 ready = False
-            if ready and host.listeners(port) == {child.pid} and child.poll() is None:
-                return
+            if ready:
+                listeners = observe()
+                if listeners == expected and child.poll() is None:
+                    return
         time.sleep(0.25)
+    if listeners - expected:
+        raise CutoverError(f'Port {port} still has additional listener PIDs {sorted(listeners - expected)}; '
+                           f'new Marten PID {child.pid} was not the sole listener within startup budget')
     raise CutoverError(f'New Marten PID {child.pid} unhealthy: UI/authenticated status did not become ready')
 
 
