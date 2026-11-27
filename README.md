@@ -73,7 +73,7 @@ Look for `Marten shutdown +…ms` in stderr to see which phase is still running.
 
 On startup, Marten tells existing agents that it restarted and records interruptions it can infer from disk. It does not automatically repeat interrupted calls. A forced kill or power loss skips cleanup; results or queued messages can be lost even when a command changed files or external state. Check the transcript, logs, and actual state before retrying.
 
-For a planned single-host macOS release on port 7450, give a heads-up and use the [detached cutover runbook](docs/release-cutover.md). No fixed waiting window is required; an explicit earliest TERM time is optional.
+For a planned single-host macOS release on port 7450, give a heads-up and use the [detached cutover runbook](docs/release-cutover.md). No fixed waiting window is required; an explicit earliest TERM time is optional. Startup succeeds only after the new Marten PID is the sole listener and the health checks pass.
 
 ## Linked project memory
 
