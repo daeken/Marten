@@ -48,21 +48,103 @@ public sealed class ArtifactTests {
 		Assert.DoesNotContain(events, e => e.Contains("\"artifacts\":["));
 	}
 
-	[Fact]
-	public void OlderMalformedSegmentDoesNotPreventHealthyAgentStarting() {
+	const string ValidId = "00000000000000000000000000000001";
+	const string ValidRef = "{\"id\":\"" + ValidId + "\",\"name\":\"note.txt\",\"bytes\":0,\"previewKind\":\"text\"}";
+
+	[Theory]
+	[InlineData("{broken", true)]
+	[InlineData("""{"kind":"tool_result","artifacts":[null]}""", true)]
+	[InlineData("""{"kind":"tool_result","artifacts":[{}]}""", false)]
+	[InlineData("""{"kind":"tool_result","artifacts":[{"id":"bad","name":"note.txt","bytes":0,"previewKind":"text"}]}""", true)]
+	[InlineData("{\"kind\":\"tool_result\",\"artifacts\":[{\"id\":\"" + ValidId + "\",\"name\":\"note.txt\",\"previewKind\":\"text\"}]}", true)]
+	[InlineData("{\"kind\":\"tool_result\",\"artifacts\":[{\"id\":\"" + ValidId + "\",\"name\":\"../note.txt\",\"bytes\":0,\"previewKind\":\"text\"}]}", true)]
+	[InlineData("{\"kind\":\"tool_result\",\"artifacts\":[{\"id\":\"" + ValidId + "\",\"name\":\"note.txt\",\"bytes\":8388609,\"previewKind\":\"text\"}]}", true)]
+	[InlineData("{\"kind\":\"tool_result\",\"artifacts\":[{\"id\":\"" + ValidId + "\",\"name\":\"note.txt\",\"bytes\":0,\"previewKind\":\"html\"}]}", true)]
+	[InlineData("{\"kind\":\"tool_result\",\"artifacts\":[" + ValidRef + "," + ValidRef + "]}", true)]
+	[InlineData("{\"kind\":\"assistant\",\"artifacts\":[" + ValidRef + "]}", true)]
+	public void MalformedSegmentDoesNotPreventHealthyAgentStarting(string line, bool archive) {
 		using var temp = new TempDir();
 		var home = new Home(temp.File("runtime"));
 		var manager = new AgentManager(home, new Config(), new FakeBackend(), new ToolRegistry());
 		var damaged = manager.CreateChat("damaged", temp.Path);
 		var healthy = manager.CreateChat("healthy", temp.Path);
 		var log = Path.Combine(damaged.Directory, "transcript");
-		File.WriteAllText(Path.Combine(log, "000001.jsonl"), "{broken\n");
-		File.WriteAllText(Path.Combine(log, "000002.jsonl"), "");
+		var corruptPath = Path.Combine(log, "000001.jsonl");
+		File.WriteAllText(corruptPath, line + "\n");
+		if(archive) File.WriteAllText(Path.Combine(log, "000002.jsonl"), "");
 		var restarted = new AgentManager(home, new Config(), new FakeBackend(), new ToolRegistry());
 		restarted.LoadAll();
 		Assert.Null(restarted.Get(damaged.Info.Id));
 		Assert.NotNull(restarted.Get(healthy.Info.Id));
-		Assert.Equal("{broken\n", File.ReadAllText(Path.Combine(log, "000001.jsonl")));
+		Assert.Equal(line + "\n", File.ReadAllText(corruptPath));
+	}
+
+	[Fact]
+	public void InvalidArtifactDoesNotWriteOrPoisonTranscript() {
+		using var scratch = new TempDir();
+		var log = new Transcript(scratch.Path);
+		var item = new ArtifactRef(ValidId, "note.txt", 0, "text");
+		var result = new Entry { Kind = EntryKind.ToolResult, Artifacts = [item] };
+		Assert.Throws<InvalidDataException>(() => log.Append(result with { Artifacts = [item, null!] }));
+		Assert.Empty(Directory.GetFiles(scratch.Path));
+		Assert.Empty(log.Entries);
+		Assert.Null(log.Artifact(item.Id));
+		Assert.Equal(1, log.Append(result).Seq);
+		var segment = scratch.File("000001.jsonl");
+		var committed = File.ReadAllBytes(segment);
+		Assert.Throws<InvalidDataException>(() => log.Append(result));
+		Assert.Equal(committed, File.ReadAllBytes(segment));
+		Assert.Equal(item, log.Artifact(item.Id));
+		Assert.Equal(2, log.Append(new Entry { Kind = EntryKind.Idle }).Seq);
+	}
+
+	[Theory]
+	[InlineData("")]
+	[InlineData("\n")]
+	public void ArtifactAppendChecksTailOnVerifiedDescriptor(string terminator) {
+		if(!ArtifactFiles.Supported) return;
+		using var scratch = new TempDir();
+		var home = new Home(scratch.File("runtime"));
+		var directory = home.AgentDir("agent");
+		var path = Path.Combine(directory, "transcript");
+		var segment = Path.Combine(path, "000001.jsonl");
+		var initial = JsonIO.Serialize(new Entry { Kind = EntryKind.ToolCall, Seq = 1, CallId = "publish" });
+		Directory.CreateDirectory(path);
+		File.WriteAllText(segment, initial + terminator);
+		var log = new Transcript(path);
+		using var lease = ArtifactFiles.AcquireHome(home.Root, _ => { });
+		using var agents = ArtifactFiles.DirectoryAt(lease!.Root, "agents");
+		using var agent = ArtifactFiles.DirectoryAt(agents, "agent");
+		using var verifiedDir = ArtifactFiles.DirectoryAt(agent, "transcript");
+		var moved = path + "-fixture";
+		Directory.Move(path, moved); // The verified directory remains open, but the old path no longer resolves.
+		var result = new Entry { Kind = EntryKind.ToolResult, CallId = "publish", Artifacts = [new(ValidId, "note.txt", 0, "text")] };
+		var appended = log.AppendArtifact(result, name => ArtifactFiles.OpenLog(verifiedDir, name), () => ArtifactFiles.SyncNamespace(verifiedDir), () => { });
+		Directory.Move(moved, path);
+		Assert.Equal(initial + "\n" + JsonIO.Serialize(appended) + "\n", File.ReadAllText(segment));
+		Assert.Equal(appended.Seq, log.Last!.Seq);
+		Assert.Equal(ValidId, Assert.Single(new Transcript(path).Last!.Artifacts!).Id);
+	}
+
+	[Fact]
+	public async Task FailedExclusiveCreateDoesNotDeleteUnownedTemp() {
+		if(!ArtifactFiles.Supported) return;
+		using var scratch = new TempDir();
+		var home = new Home(scratch.File("runtime"));
+		var directory = home.AgentDir("agent");
+		var warnings = new List<string>();
+		Directory.CreateDirectory(directory);
+		using var store = new Artifacts(home, warnings.Add, nextId: () => Guid.ParseExact(ValidId, "N"));
+		Assert.True(store.Enabled);
+		store.PrepareAgent("agent");
+		await File.WriteAllTextAsync(Path.Combine(directory, Artifacts.Staging, "note.txt"), "source");
+		var collision = Path.Combine(home.Root, Artifacts.Store, "agent." + ValidId + ".tmp");
+		await File.WriteAllTextAsync(collision, "pre-existing");
+		await Assert.ThrowsAsync<IOException>(() => store.Publish("agent", "note.txt", null, default));
+		Assert.Equal("pre-existing", await File.ReadAllTextAsync(collision));
+		Assert.Equal(collision, Assert.Single(Directory.GetFiles(Path.GetDirectoryName(collision)!)));
+		Assert.False(store.Enabled);
+		Assert.Single(warnings);
 	}
 
 	[Fact]

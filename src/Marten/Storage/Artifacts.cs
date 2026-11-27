@@ -5,7 +5,8 @@ using System.Text;
 
 namespace Marten.Storage;
 
-public sealed record ArtifactRef(string Id, string Name, long Bytes, string PreviewKind);
+// Unset size is distinct from a valid empty snapshot when reading a persisted ref.
+public sealed record ArtifactRef(string Id, string Name, long Bytes = -1, string PreviewKind = "");
 
 internal sealed class Artifacts : IDisposable {
 	public const string Staging = "artifact-inbox", Store = "artifact-store";
@@ -17,19 +18,24 @@ internal sealed class Artifacts : IDisposable {
 	long totalBytes;
 	int totalCount;
 
-	public static bool IdValid(string id) => id.Length == 32 && id.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
+	public static bool IdValid(string? id) => id is { Length: 32 } && id.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
+	internal static bool RefValid(ArtifactRef? item) => item != null && IdValid(item.Id) &&
+		item.Bytes is >= 0 and <= MaxBytes && item.PreviewKind is "none" or "text" or "png" &&
+		item.Name is { Length: > 0 and <= 125 } name && name == name.Trim(' ', '.') && name.All(SafeDisplayCharacter);
 	static bool CanFailClosed(Exception e) => e is IOException or UnauthorizedAccessException or EntryPointNotFoundException or DllNotFoundException;
 
 	readonly SafeFileHandle? root, data;
 	readonly ArtifactFiles.HomeLease? localLease;
 	readonly Action<string> warning;
 	readonly Action<string>? fault;
+	readonly Func<Guid>? nextId;
 	volatile bool enabled;
 	public bool Enabled => enabled;
 
-	public Artifacts(Home home, Action<string> warning, Action<string>? fault = null, ArtifactFiles.HomeLease? ownedHome = null, bool useOwnedHomeOnly = false) {
+	public Artifacts(Home home, Action<string> warning, Action<string>? fault = null, ArtifactFiles.HomeLease? ownedHome = null, bool useOwnedHomeOnly = false, Func<Guid>? nextId = null) {
 		this.warning = warning;
 		this.fault = fault;
+		this.nextId = nextId;
 		try {
 			if(ownedHome == null && !useOwnedHomeOnly) localLease = ArtifactFiles.AcquireHome(home.Root, warning);
 			root = (ownedHome ?? localLease)?.Root;
@@ -131,17 +137,16 @@ internal sealed class Artifacts : IDisposable {
 		await using var source = ArtifactFiles.Read(inbox, filename, out var size);
 		if(size is < 0 or > MaxBytes) throw new IOException("Artifact exceeds the 8 MiB limit.");
 		var dir = data!;
-		var id = Guid.NewGuid().ToString("N");
+		var id = (nextId?.Invoke() ?? Guid.NewGuid()).ToString("N");
 		var key = Key(agentId, id);
 		var temp = key + ".tmp";
 		var ext = Path.GetExtension(filename).ToLowerInvariant();
 		var candidate = ext == ".png" && size <= MaxPng ? "png" : ext is ".txt" or ".md" or ".log" or ".csv" or ".tsv" or ".json" ? "text" : "none";
 		var sample = new byte[(int) Math.Min(size, candidate == "png" ? MaxPng : candidate == "text" ? MaxText : 0)];
 		Account(agentId, size, 1, enforce: true);
-		bool attemptedCreate = false, finalized = false;
+		bool ownsTemp = false, finalizing = false, finalized = false;
 		try {
-			attemptedCreate = true;
-			await using(var destination = ArtifactFiles.Create(dir, temp)) {
+			await using(var destination = ArtifactFiles.Create(dir, temp, () => ownsTemp = true)) {
 				var buffer = ArrayPool<byte>.Shared.Rent(MaxText);
 				try {
 					long copied = 0;
@@ -164,17 +169,21 @@ internal sealed class Artifacts : IDisposable {
 				_ => "none",
 			};
 			ct.ThrowIfCancellationRequested();
+			finalizing = true;
 			ArtifactFiles.Finalize(dir, temp, key);
 			finalized = true;
 			Sync(dir, "snapshot namespace");
 			return new(id, name, size, kind);
-		} catch(Exception e) when(finalized && CanFailClosed(e)) { StopWrites(); throw; } finally {
-			if(!finalized) {
+		} catch(Exception e) when((!ownsTemp || finalizing) && CanFailClosed(e)) {
+			StopWrites(); // Inventory may not match our reservation. Keep it until restart.
+			throw;
+		} finally {
+			if(ownsTemp && !finalized) {
 				try {
-					if(attemptedCreate && !ArtifactFiles.Delete(dir, temp)) throw new IOException("Temporary artifact state indeterminate.");
-					if(attemptedCreate) Sync(dir, "temporary removal namespace");
-					Account(agentId, -size, -1, enforce: false);
-				} catch(Exception e) when(CanFailClosed(e)) { StopWrites(); }
+					if(!ArtifactFiles.Delete(dir, temp)) throw new IOException("Temporary artifact state indeterminate.");
+					Sync(dir, "temporary removal namespace");
+					if(!finalizing) Account(agentId, -size, -1, enforce: false);
+				} catch(Exception e) when(CanFailClosed(e)) { if(Enabled) StopWrites(); }
 			}
 		}
 	}
@@ -212,9 +221,11 @@ internal sealed class Artifacts : IDisposable {
 		return null;
 	}
 
+	static bool SafeDisplayCharacter(char c) => !char.IsControl(c) && !char.IsSurrogate(c) &&
+		char.GetUnicodeCategory(c) != System.Globalization.UnicodeCategory.Format && c is not ('/' or '\\' or ':' or '"' or '*' or '?' or '<' or '>' or '|');
+
 	static string DisplayName(string? label, string filename) {
-		static string Clean(string value) => new string(value.Where(c => !char.IsControl(c) && !char.IsSurrogate(c) &&
-			char.GetUnicodeCategory(c) != System.Globalization.UnicodeCategory.Format && c is not ('/' or '\\' or ':' or '"' or '*' or '?' or '<' or '>' or '|')).Take(120).ToArray()).Trim(' ', '.');
+		static string Clean(string value) => new string(value.Where(SafeDisplayCharacter).Take(120).ToArray()).Trim(' ', '.');
 		// Keep the source extension rather than allowing the label to give downloaded bytes a different executable type.
 		var ext = Path.GetExtension(filename);
 		ext = ext.ToLowerInvariant() switch {

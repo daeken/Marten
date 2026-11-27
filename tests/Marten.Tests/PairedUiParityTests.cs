@@ -7,10 +7,68 @@ using System.Text.Json;
 using Marten.Agents;
 using Marten.Storage;
 using Marten.Web;
+using Microsoft.AspNetCore.Http;
 
 namespace Marten.Tests;
 
 public class PairedUiParityTests {
+	[Fact]
+	public async Task RevokedDeviceStopsFullTranscriptStreamAtNextEmission() {
+		using var scratch = new TempDir();
+		var home = new Home(scratch.File("home"));
+		const string host = "pairing-test.example";
+		var pairing = new DevicePairing(home);
+		var token = pairing.Redeem(pairing.Create()!.Code, "Scratch device")!;
+		var device = Assert.Single(pairing.List());
+		var security = new Security(home, new Config { PairingOrigin = $"https://{host}" }) { Pairing = pairing };
+		var log = new Transcript(scratch.File("transcript"));
+		const string artifactName = "later-artifact.txt";
+		log.Append(new Entry { Kind = EntryKind.Assistant, Text = new string('x', 256 * 1024) });
+		log.Append(new Entry { Kind = EntryKind.ToolResult, Artifacts = [new("0123456789abcdef0123456789abcdef", artifactName, 0, "text")] });
+		var handler = security.Middleware(ctx => TranscriptStreaming.WriteFull(ctx, log, false, CancellationToken.None));
+		DefaultHttpContext Request() {
+			var ctx = new DefaultHttpContext();
+			ctx.Request.Method = HttpMethods.Get;
+			ctx.Request.Host = new HostString(host);
+			ctx.Request.Path = "/api/agents/fixture/transcript";
+			ctx.Request.Headers.Authorization = "Bearer " + token;
+			ctx.SetEndpoint(new Endpoint(null, new EndpointMetadataCollection(OperatorRoute.Action), "transcript"));
+			return ctx;
+		}
+		var active = Request();
+		using var body = new PausedTranscriptBody();
+		active.Response.Body = body;
+		var stream = handler(active);
+		using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+		try {
+			var writeToken = await body.FirstWrite.Task.WaitAsync(timeout.Token);
+			Assert.False(stream.IsCompleted);
+			Assert.DoesNotContain(artifactName, System.Text.Encoding.UTF8.GetString(body.ToArray()));
+			var transmitted = body.Length;
+			Assert.True(pairing.Revoke(device.Id));
+			Assert.True(writeToken.IsCancellationRequested);
+			var fresh = Request();
+			await handler(fresh);
+			Assert.Equal(StatusCodes.Status401Unauthorized, fresh.Response.StatusCode);
+			body.Resume.TrySetResult();
+			await Assert.ThrowsAnyAsync<OperationCanceledException>(() => stream.WaitAsync(timeout.Token));
+			Assert.True(stream.IsCanceled);
+			Assert.Equal(transmitted, body.Length);
+		} finally {
+			body.Resume.TrySetResult();
+		}
+	}
+
+	sealed class PausedTranscriptBody : MemoryStream {
+		public TaskCompletionSource<CancellationToken> FirstWrite { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+		public TaskCompletionSource Resume { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+		public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken ct = default) {
+			await base.WriteAsync(buffer, ct);
+			// The first bytes are already handed off; subsequent writes must respect cancellation.
+			if(FirstWrite.TrySetResult(ct)) await Resume.Task;
+		}
+	}
+
 	[Theory]
 	[InlineData(false)]
 	[InlineData(true)]

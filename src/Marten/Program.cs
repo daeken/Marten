@@ -1,4 +1,3 @@
-using System.Runtime.CompilerServices;
 using Marten.Agents;
 using Marten.Models;
 using Marten.Models.Anthropic;
@@ -350,22 +349,11 @@ api.MapGet("/agents/{id}/transcript", async (HttpContext ctx, string id, int? li
 	}
 	using var lease = restart.Enter();
 	if(lease == null) { await Results.StatusCode(503).ExecuteAsync(ctx); return; }
-	using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted, restart.Stopping);
-	// Keep the legacy unredacted JSON array, without buffering the entire archive.
-	await ctx.Response.WriteAsJsonAsync(StreamTranscript(a.Transcript, outside), cancellation.Token);
+	await TranscriptStreaming.WriteFull(ctx, a.Transcript, outside, restart.Stopping);
 }).AllowPaired();
 
 api.MapArtifacts(manager);
 
-static async IAsyncEnumerable<Entry> StreamTranscript(Transcript log, bool outside, [EnumeratorCancellation] CancellationToken ct = default) {
-	await Task.CompletedTask;
-	using var entries = log.Capture().Read().GetEnumerator();
-	while(true) {
-		ct.ThrowIfCancellationRequested();
-		if(!entries.MoveNext()) yield break;
-		yield return outside ? ArtifactTranscriptProjection.Outside(entries.Current, log) : entries.Current;
-	}
-}
 api.MapPost("/agents/{id}/messages", (string id, SendMessage req) => {
 	if(manager.Get(id) is not { } a) return Results.NotFound();
 	if(string.IsNullOrWhiteSpace(req.Text)) return Results.BadRequest();

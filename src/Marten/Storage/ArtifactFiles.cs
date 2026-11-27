@@ -129,9 +129,12 @@ internal static partial class ArtifactFiles {
 		} catch { fd.Dispose(); throw; }
 	}
 
-	public static FileStream Create(SafeFileHandle dir, string name) {
+	public static FileStream Create(SafeFileHandle dir, string name, Action? acquired = null) {
 		var handle = OpenChild(dir, name, NewFlags, PrivateFile);
-		try { return new FileStream(handle, FileAccess.Write, 64 * 1024, isAsync: false); }
+		try {
+			acquired?.Invoke(); // The exclusive create owns the name even if the stream wrapper fails.
+			return new FileStream(handle, FileAccess.Write, 64 * 1024, isAsync: false);
+		}
 		catch { handle.Dispose(); throw; }
 	}
 

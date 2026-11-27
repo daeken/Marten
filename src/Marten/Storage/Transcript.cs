@@ -147,6 +147,7 @@ public sealed class Transcript {
 			if(line.EndsWith(" !incomplete-artifact"u8)) { damagedTail = true; return; }
 			if(JsonSerializer.Deserialize<Entry>(line, JsonIO.Options) is { } e) {
 				if(!terminated && e.Artifacts is { Count: > 0 }) { damagedTail = rejectUnterminatedArtifact = true; return; }
+				ValidateArtifacts(e);
 				rows.Add(new(e.Seq, offset, line.Length, segment, Tag(e.Kind)));
 				IndexArtifacts(e);
 			}
@@ -248,6 +249,16 @@ public sealed class Transcript {
 	public TranscriptPage ReadPage(int limit, long? before = null) => Capture().Tail(Math.Clamp(limit, 1, 100), before: before);
 	public Entry? Last => Capture().ReadLast(RowKind.All);
 
+	void ValidateArtifacts(Entry entry) {
+		if(entry.Artifacts == null) return;
+		if(entry.Kind != EntryKind.ToolResult) throw new InvalidDataException("Artifact refs require a tool result.");
+		var seen = entry.Artifacts.Count > 1 ? new HashSet<string>(StringComparer.Ordinal) : null;
+		foreach(var item in entry.Artifacts) {
+			if(!Artifacts.RefValid(item) || artifacts.ContainsKey(item.Id) || seen?.Add(item.Id) == false)
+				throw new InvalidDataException("Invalid or duplicate transcript artifact ref.");
+		}
+	}
+
 	void IndexArtifacts(Entry entry) {
 		if(entry.Kind == EntryKind.ToolCall && entry.CallId != null && Web.ArtifactTranscriptProjection.PrivateCall(entry)) artifactCalls.Add(entry.CallId);
 		if(entry.Kind == EntryKind.ToolResult && entry.Artifacts != null)
@@ -262,6 +273,7 @@ public sealed class Transcript {
 	internal Entry Append(Entry entry, Action<FileStream, byte[]> write, Func<string, FileStream>? open = null, Action? syncDirectory = null, Action? afterFlush = null) {
 		lock(gate) {
 			if(appendFailed) throw new IOException("A previous transcript append failed; restart to re-index before appending again.");
+			ValidateArtifacts(entry);
 			entry = entry with {
 				Seq = rows.Count > 0 ? rows[^1].Seq + 1 : 1,
 				Ts = entry.Ts == default ? DateTimeOffset.UtcNow : entry.Ts,
@@ -278,9 +290,18 @@ public sealed class Transcript {
 				fs.Seek(0, SeekOrigin.End);
 				syncDirectory?.Invoke();
 				if(fs.Length > 0) {
-					using var check = OpenRead(path);
-					check.Seek(-1, SeekOrigin.End);
-					if(check.ReadByte() != '\n') {
+					int last;
+					if(open == null) {
+						using var check = OpenRead(path);
+						check.Seek(-1, SeekOrigin.End);
+						last = check.ReadByte();
+					} else {
+						// Check the exact file opened through the verified directory descriptor.
+						fs.Seek(-1, SeekOrigin.End);
+						last = fs.ReadByte();
+						fs.Seek(0, SeekOrigin.End);
+					}
+					if(last != '\n') {
 						if(rejectUnterminatedArtifact) fs.Write(" !incomplete-artifact"u8);
 						fs.WriteByte((byte) '\n');
 					}
