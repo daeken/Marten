@@ -182,6 +182,7 @@ object ProjectSummary(Project p) => new { p.Info.Id, p.Info.Name, p.Info.Created
 
 var api = app.MapGroup("/api");
 api.MapPairing(pairing, security);
+new MacFiles(config.MacFilesEnabled, tailnet.HasNativeProof, pairing, restart.Stopping).Map(api);
 api.MapGet("/status", () => new {
 	auth = new { connected = auth.Connected, email = auth.Email, signingIn = auth.SigningIn, lastError = auth.LastError },
 	backends = messagesBackends.Select(BackendSummary),

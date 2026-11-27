@@ -27,7 +27,7 @@ func TestRunRequiresPeerAPIServerAndLogUploadOmitted(t *testing.T) {
 	if buildfeatures.HasLogTail || buildfeatures.HasPeerAPIServer {
 		want = badConfig
 	}
-	if code := run([]string{testHost, "7450", state, filepath.Join(dir, "missing-key")}); code != want {
+	if code := run([]string{testHost, "7450", state, filepath.Join(dir, "missing-key")}, ""); code != want {
 		t.Fatalf("startup returned %d; want %d", code, want)
 	}
 	if _, err := os.Stat(state); want == badConfig && !os.IsNotExist(err) {

@@ -1,6 +1,8 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using Marten.Storage;
 
 namespace Marten.Web;
@@ -9,6 +11,15 @@ public sealed class TailnetTransport(Config config) {
 	public string? Host { get; } = config.Tailnet?.CanonicalHost();
 	volatile bool ready;
 	public bool IsReady => ready;
+	internal const string NativeProofHeader = "X-Marten-Native-Proof";
+	readonly byte[]? nativeProof = config is { MacFilesEnabled: true, Tailnet: not null }
+		? Encoding.ASCII.GetBytes(Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32))) : null;
+
+	internal bool HasNativeProof(HttpContext ctx) {
+		var headers = ctx.Request.Headers[NativeProofHeader];
+		return IsReady && nativeProof != null && headers.Count == 1 && headers[0] is { Length: 64 } supplied &&
+			CryptographicOperations.FixedTimeEquals(nativeProof, Encoding.UTF8.GetBytes(supplied));
+	}
 
 	public async Task RunAsync(Home home, Action<string> log, CancellationToken stopping) {
 		if(config.Tailnet == null || stopping.IsCancellationRequested) return;
@@ -32,11 +43,16 @@ public sealed class TailnetTransport(Config config) {
 		foreach(var arg in new[] { host, config.Port.ToString(CultureInfo.InvariantCulture),
 			Path.Combine(home.Secrets, "tailnet-state"), Path.Combine(home.Secrets, "tailnet-auth-key") })
 			start.ArgumentList.Add(arg);
+		if(nativeProof != null) start.ArgumentList.Add("mac-files-v1");
 		try {
 			using var process = Marten.Tools.ChildProcessWatcher.StartExcluded(start)!;
 			var output = DrainOutputAsync(process.StandardOutput.BaseStream, host, log, stopping);
 			var errors = process.StandardError.BaseStream.CopyToAsync(Stream.Null, stopping);
 			try {
+				if(nativeProof != null) {
+					await process.StandardInput.BaseStream.WriteAsync(nativeProof, stopping);
+					await process.StandardInput.BaseStream.FlushAsync(stopping);
+				}
 				await process.WaitForExitAsync(stopping);
 				await Task.WhenAll(output, errors);
 				ready = false;

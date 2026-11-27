@@ -39,14 +39,22 @@ var hostname = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.[a-z0-9]
 var enrollmentKey = regexp.MustCompile(`^tskey-auth-[a-zA-Z0-9_-]+$`)
 
 func main() {
-	// The parent holds the only writer. Exit even during a stuck enrollment or
-	// if Marten is killed before running its shutdown hooks.
-	go func() { _, _ = io.Copy(io.Discard, os.Stdin); os.Exit(0) }()
 	log.SetOutput(io.Discard)
-	os.Exit(run(os.Args[1:]))
+	args := os.Args[1:]
+	var proof string
+	if len(args) == 5 && args[4] == "mac-files-v1" {
+		var payload [64]byte
+		if _, err := io.ReadFull(os.Stdin, payload[:]); err != nil || !regexp.MustCompile(`^[0-9a-f]{64}$`).Match(payload[:]) {
+			os.Exit(badConfig)
+		}
+		proof, args = string(payload[:]), args[:4]
+	}
+	// The parent holds the only writer; EOF remains the lifetime lease.
+	go func() { _, _ = io.Copy(io.Discard, os.Stdin); os.Exit(0) }()
+	os.Exit(run(args, proof))
 }
 
-func run(args []string) int {
+func run(args []string, proof string) int {
 	// Reject builds with SDK log upload or the unused PeerAPI host TCP
 	// listener. Neither is needed to serve the native HTTPS listener.
 	if len(args) != 4 || buildfeatures.HasLogTail || buildfeatures.HasPeerAPIServer || !hostname.MatchString(args[0]) ||
@@ -125,7 +133,7 @@ func run(args []string) int {
 		TLSConfig:         exactTLS(host, loadCert),
 		ReadHeaderTimeout: 15 * time.Second,
 		IdleTimeout:       90 * time.Second,
-		Handler:           tailnetProxy(host, &url.URL{Scheme: "http", Host: "127.0.0.1:" + strconv.Itoa(port)}),
+		Handler:           tailnetProxyWithProof(host, &url.URL{Scheme: "http", Host: "127.0.0.1:" + strconv.Itoa(port)}, proof),
 		ErrorLog:          log.New(io.Discard, "", 0),
 	}
 	_, _ = io.WriteString(os.Stdout, "READY\n")
@@ -152,7 +160,13 @@ func exactTLS(host string, getCert func(context.Context) (*tls.Certificate, erro
 	}}
 }
 
+const nativeProofHeader = "X-Marten-Native-Proof"
+
 func tailnetProxy(host string, upstream *url.URL) http.Handler {
+	return tailnetProxyWithProof(host, upstream, "")
+}
+
+func tailnetProxyWithProof(host string, upstream *url.URL, proof string) http.Handler {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil // never send Marten credentials through an environment proxy
 	proxy := &httputil.ReverseProxy{
@@ -165,6 +179,10 @@ func tailnetProxy(host string, upstream *url.URL) http.Handler {
 				if strings.HasPrefix(name, "x-forwarded-") || strings.HasPrefix(name, "tailscale-") || name == "via" {
 					r.Out.Header.Del(h)
 				}
+			}
+			r.Out.Header.Del(nativeProofHeader)
+			if proof != "" && strings.HasPrefix(r.Out.URL.Path, "/api/mac-files/") {
+				r.Out.Header.Set(nativeProofHeader, proof)
 			}
 			// ReverseProxy removes Forwarded and handles HTTP Upgrade. No tailnet
 			// peer identity substitutes for Marten's existing authentication.
