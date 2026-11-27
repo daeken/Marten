@@ -99,6 +99,7 @@ var restart = new RestartDrain();
 var scriptTools = new ScriptToolSource(getManager);
 var mcp = new Marten.Mcp.McpHub(getManager);
 using var artifacts = new Artifacts(home, Console.Error.WriteLine, ownedHome: artifactLease, useOwnedHomeOnly: true);
+var jevSettings = new JevSettings(home);
 var tools = new ToolRegistry()
 	.Add(new ReadFileTool())
 	.Add(new EditFileTool(new MemoryGuard(getManager)))
@@ -111,6 +112,7 @@ var tools = new ToolRegistry()
 	.Add(new CloseAgentTool(getManager))
 	.Add(new CreateProjectTool(getManager))
 	.Add(new AskSeraTool(getManager))
+	.Add(new JevTool(jevSettings, new JevClient(), ledger, artifacts, restart.CancelTools))
 	.Add(new ElideResultsTool())
 	.Add(new ToolSearchTool())
 	.Add(new CallToolTool())
@@ -190,7 +192,7 @@ object ProjectSummary(Project p) => new { p.Info.Id, p.Info.Name, p.Info.Created
 
 var api = app.MapGroup("/api");
 api.MapPairing(pairing, security);
-api.MapJevSettings(new JevSettings(home));
+api.MapJevSettings(jevSettings);
 var macFiles = new MacFiles(config.MacFilesEnabled, tailnet.HasNativeProof, pairing, restart.Stopping, ingressReady: () => tailnet.IsReady);
 macFiles.Map(api);
 api.MapGet("/status", (HttpContext ctx) => new {

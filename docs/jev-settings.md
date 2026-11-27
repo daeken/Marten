@@ -1,6 +1,6 @@
 # Typesafe AI Jev Settings
 
-This is enrollment and a capability gate only. No Jev HTTP, key validation against Typesafe AI, agent registration, agent authorization, dispatch, or safety classification is part of this change.
+Settings controls local enrollment and a global agent tool. Settings never validates a key upstream, and the tool does not implement safety classification or enforcement.
 
 ## Local operator API
 
@@ -13,7 +13,7 @@ All four routes require `Authorization: Bearer <ui-token>`, the direct HTTP loop
 
 The card takes a new key in a password field and clears the input when submitted, hidden by closing Settings, or navigating away. Marten does not store the key in browser storage or return it as part of any Jev response, render it in the agent UI, or pass it to an agent/tool. The existing Marten token handling is unchanged. Get an API key in the [TypeSafe console](https://console.typesafe.ai/keys); don't paste it into a prompt or transcript. Removing it here does not revoke it at TypeSafe.
 
-Once agent dispatch is wired, enabling Jev makes it available to all agents without per-call approval. Explicitly requested payloads go to TypeSafe; images require the separate preview opt-in.
+Enabling Jev makes the `jev` tool available to all agents under ordinary tool permissions without per-call approval. Only explicit arguments go to TypeSafe. Do not put secrets in the arguments; they use ordinary Marten tool-call logging. Images require the separate preview opt-in and must be referenced by an already-published PNG artifact from the calling agent.
 
 ## Storage and internal interface
 
@@ -22,5 +22,5 @@ Marten atomically replaces `Home.Secrets/jev-settings.json` with a strict, versi
 A missing record on startup starts off. An invalid, insecure or unexpectedly changed record fails closed; after detecting loss of trust the running process requires explicit replacement/removal rather than silently adopting restored bytes. Failed persistence withdraws the running capability; if the disk could not be changed, retry local removal before restarting and revoke upstream separately. A restart can only judge the record it actually reads.
 
 - `JevSettings.TryAcquire() -> JevGrant?` gives an immutable effective generation only when storage is trusted and Jev is enabled. Identity of the lease is its generation; neither the lease nor its key is a wire contract.
-- `JevGrant.ImagePreviewEnabled`, `.Revoked` (`CancellationToken`), and `.GetKeyForProvider()` (internal string accessor) belong to that generation. Keep them in the future broker; never serialize a lease or include the key in agent inputs, outputs or diagnostics.
-- `JevSettings.IsCurrent(JevGrant?) -> bool` revalidates storage and compares the grant against the active generation. The future broker should link cancellation and recheck immediately before sending and before using or publishing a result. This is a cooperative fence, not an atomic transaction around external sends or downstream publication; stale-result handoff needs a broker-side fence. Retirement swaps the active generation under the settings lock and triggers cancellation outside it. Unexpected storage changes are detected at the next settings read/fence, not by a background watcher.
+- `JevGrant.ImagePreviewEnabled`, `.Revoked` (`CancellationToken`), and `.GetKeyForProvider()` (internal string accessor) belong to that generation. Keep them internal to dispatch; never serialize a lease or include the key in agent inputs, outputs or diagnostics.
+- `JevSettings.IsCurrent(JevGrant?) -> bool` revalidates storage and compares the grant against the active generation. Dispatch links this cancellation and rechecks at admission immediately before starting the HTTP send. Revocation after admission cancels best-effort and may still bill. The publication path accepts only a still-current generation, outside the settings lock for downstream work; accepted bytes cannot be recalled. Retirement swaps the active generation under the settings lock and triggers cancellation outside it. Unexpected storage changes are detected at the next settings read/fence, not by a background watcher.

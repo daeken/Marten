@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.Net;
 using System.Net.Sockets;
 using System.Text.Json;
+using Marten.Storage;
 
 namespace Marten.Models;
 
@@ -144,9 +145,9 @@ internal sealed class JevClient {
 		}
 	}
 
-	public async Task<JevResult> EvaluateAsync(JevRequest request, string apiKey, CancellationToken ct = default) {
+	public async Task<JevResult> EvaluateAsync(JevRequest request, string apiKey, CancellationToken ct = default, Func<Func<Task<HttpResponseMessage>>, Task<HttpResponseMessage>>? dispatch = null, Action<JevResult>? validated = null) {
 		if(request == null) throw JevRequest.Invalid();
-		if(!ValidKey(apiKey)) throw new JevException(JevErrorKind.Authentication);
+		if(!JevKeyFormat.IsValid(apiKey)) throw new JevException(JevErrorKind.Authentication);
 		using var expiration = CancellationTokenSource.CreateLinkedTokenSource(ct);
 		expiration.CancelAfter(deadline);
 		var token = expiration.Token;
@@ -165,7 +166,9 @@ internal sealed class JevClient {
 			message.Headers.ExpectContinue = false;
 			message.Headers.Accept.Add(new("application/json"));
 			if(request.HasImage) message.Headers.Add("TypeSafe-Danger-Zone-Images", "true");
-			using var response = await client.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
+			token.ThrowIfCancellationRequested();
+			Task<HttpResponseMessage> Send() => client.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, token);
+			using var response = await (dispatch == null ? Send() : dispatch(Send)).ConfigureAwait(false);
 			token.ThrowIfCancellationRequested();
 			if(response.StatusCode != HttpStatusCode.OK) throw FromStatus(response);
 			if(response.Content.Headers.ContentType?.MediaType is not string type || !type.Equals("application/json", StringComparison.OrdinalIgnoreCase) ||
@@ -181,6 +184,7 @@ internal sealed class JevClient {
 			token.ThrowIfCancellationRequested();
 			if(count > MaxResponseBytes) throw Protocol();
 			var result = Parse(data.AsMemory(0, count), request.Labels);
+			validated?.Invoke(result); // account validated usage even if cancellation wins before result handoff
 			token.ThrowIfCancellationRequested();
 			return result;
 		} catch(OperationCanceledException) when(ct.IsCancellationRequested) {
@@ -190,15 +194,6 @@ internal sealed class JevClient {
 		} catch(Exception e) when(e is IOException or HttpRequestException or OperationCanceledException) {
 			throw new JevException(ct.IsCancellationRequested ? JevErrorKind.Cancelled : token.IsCancellationRequested ? JevErrorKind.Deadline : JevErrorKind.Transport);
 		}
-	}
-
-	static bool ValidKey(string? key) {
-		if(key == null || key.Length is < 1 or > 512) return false;
-		var value = key.AsSpan().TrimEnd('=');
-		if(value.Length == 0) return false;
-		foreach(char c in value)
-			if(!char.IsAsciiLetterOrDigit(c) && c is not ('.' or '_' or '~' or '+' or '/' or '-')) return false;
-		return true;
 	}
 
 	static JevException FromStatus(HttpResponseMessage response) {

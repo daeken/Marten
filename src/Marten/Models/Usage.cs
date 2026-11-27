@@ -46,6 +46,8 @@ public sealed record UsageTotals {
 	public long Output { get; init; }
 	/// <summary>Null when the model has no known price.</summary>
 	public decimal? Usd { get; init; }
+	public long UnknownCalls { get; init; }
+	public decimal ReservedUsd { get; init; }
 
 	public UsageTotals Add(CallUsage u, decimal? usd) => this with {
 		Calls = Calls + 1, Input = Input + u.Input, CacheRead = CacheRead + u.CacheRead,
@@ -83,10 +85,58 @@ public sealed class UsageLedger(Home home, Func<Config> config) {
 		}
 	}
 
+	internal sealed class JevReservation(string day, decimal maximum, Price price) {
+		internal readonly string Day = day;
+		internal readonly decimal Maximum = maximum;
+		internal readonly Price Price = price;
+		internal bool Finished;
+	}
+
+	internal JevReservation? ReserveJev() {
+		lock(gate) {
+			var price = PriceFor(JevClient.Model) ?? new Price(0.042m, 0);
+			if(price.Input < 0 || price.Output < 0) return null;
+			var maximum = 1_000_000L * (price.Input + price.Output) / 1_000_000m; // matches the wire client's validated usage ceiling
+			var budgets = config().Budgets;
+			foreach(var key in new[] { "jev", "total" })
+				if(budgets.TryGetValue(key, out var cap) && (cap <= 0 || SpentToday(key == "total" ? null : key) + maximum > cap)) return null;
+			var byModel = JevDay(Today);
+			var before = byModel.GetValueOrDefault(JevClient.Model) ?? new UsageTotals();
+			var reservation = new JevReservation(Today, maximum, price);
+			// Durably charge the maximum before sending. Crash or ambiguous failure remains unknown.
+			byModel[JevClient.Model] = before with { UnknownCalls = before.UnknownCalls + 1, ReservedUsd = before.ReservedUsd + maximum };
+			try { JsonIO.Save(Path, Days()); }
+			catch { byModel[JevClient.Model] = before; throw; }
+			return reservation;
+		}
+	}
+
+	internal void CloseJev(JevReservation reservation, JevResult? result) {
+		lock(gate) {
+			if(reservation.Finished) return;
+			reservation.Finished = true;
+			var byModel = JevDay(reservation.Day);
+			var before = byModel[JevClient.Model];
+			var after = before with { UnknownCalls = before.UnknownCalls - 1, ReservedUsd = before.ReservedUsd - reservation.Maximum };
+			if(result != null) {
+				var usage = new CallUsage(result.InputTokens, 0, 0, result.OutputTokens);
+				after = after.Add(usage, usage.Cost(reservation.Price));
+			}
+			byModel[JevClient.Model] = after;
+			try { JsonIO.Save(Path, Days()); }
+			catch { byModel[JevClient.Model] = before; throw; }
+		}
+	}
+
+	Dictionary<string, UsageTotals> JevDay(string date) {
+		var day = Days().GetValueOrDefault(date) ?? (Days()[date] = new());
+		return day.GetValueOrDefault("jev") ?? (day["jev"] = new());
+	}
+
 	public decimal SpentToday(string? provider = null) {
 		lock(gate) {
 			if(Days().GetValueOrDefault(Today) is not { } day) return 0;
-			return day.Where(p => provider == null || p.Key == provider).SelectMany(p => p.Value.Values).Sum(t => t.Usd ?? 0);
+			return day.Where(p => provider == null || p.Key == provider).SelectMany(p => p.Value.Values).Sum(t => (t.Usd ?? 0) + t.ReservedUsd);
 		}
 	}
 

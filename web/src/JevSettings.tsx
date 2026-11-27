@@ -63,7 +63,7 @@ export function JevSettings({ api }: { api: Api }) {
         onChange={e => void update(() => api.setJevOptions(e.target.checked, settings.imagePreviewEnabled), 'options')} /> Enable Jev</label></div>
       <div><label className="small"><input type="checkbox" checked={settings.imagePreviewEnabled} disabled={busy || !settings.hasKey}
         onChange={e => void update(() => api.setJevOptions(settings.enabled, e.target.checked), 'options')} /> Allow image preview API (opt-in)</label></div>
-      <p className="muted small">These settings do not make provider calls. Once agent dispatch is wired, enabling Jev makes it available to all agents without per-call approval. Explicitly requested payloads go to TypeSafe; images require the separate preview opt-in.</p>
+      <p className="muted small">These settings do not make provider calls. Enabling Jev makes the tool available to all agents without per-call approval. Explicit tool inputs go to TypeSafe; images require the separate preview opt-in. Agents should not include secrets.</p>
     </>}
     {error && <div className="error small" role="alert">{error}</div>}
     {notice && <div className="muted small" role="status">{notice}</div>}

@@ -16,8 +16,11 @@ public sealed partial class Agent {
 	string OutputPath(string callId) =>
 		Path.Combine(OutputsDir, $"{string.Concat(callId.Select(c => char.IsLetterOrDigit(c) || c is '-' or '_' ? c : '_'))}.txt");
 
-	public List<Entry> View() {
+	public List<Entry> View() => View(out _);
+
+	List<Entry> View(out long? visibility) {
 		var history = Transcript.Capture();
+		visibility = history.LastSeq(RowKind.ViewChange);
 		var reset = history.LastSeq(RowKind.Reset);
 		var compaction = history.ReadLast(RowKind.Compaction, reset);
 		var after = reset is long boundary && compaction?.UpTo is long upTo ? Math.Max(boundary, upTo) : compaction?.UpTo ?? reset;

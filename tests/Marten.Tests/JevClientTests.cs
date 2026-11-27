@@ -304,7 +304,7 @@ public class JevClientTests {
 		public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
 	}
 
-	static byte[] Png(int width = 280, string? ancillary = null, bool extraRow = false) {
+	internal static byte[] Png(int width = 280, string? ancillary = null, bool extraRow = false) {
 		using var png = new MemoryStream();
 		png.Write([137, 80, 78, 71, 13, 10, 26, 10]);
 		byte[] header = new byte[13];

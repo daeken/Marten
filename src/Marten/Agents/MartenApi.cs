@@ -77,6 +77,7 @@ public sealed class MartenApi(Agent agent, AgentManager manager, CancellationTok
 			Admit();
 			return Task.CompletedTask;
 		}).GetAwaiter().GetResult();
+		if(result.Jev is { } jev && !jev.IsCurrent()) result = JevPresentation.Withdrawn();
 		if(result.IsError) throw new InvalidOperationException(result.Text);
 		return result.Text;
 	}
