@@ -74,7 +74,9 @@ public sealed class ChatGptAuth {
 	}
 
 	/// <summary>Start a sign-in. Returns the URL Sera opens; the loopback callback finishes it in the background.</summary>
-	public string BeginLogin() {
+	public string BeginLogin() => BeginLogin(null);
+
+	internal string BeginLogin(Func<IDisposable?>? admitCallback) {
 		pending?.Dispose();
 		var (listener, port) = ListenOnFreePort();
 		var login = new PendingLogin(listener, $"http://127.0.0.1:{port}/auth/callback");
@@ -93,7 +95,7 @@ public sealed class ChatGptAuth {
 		};
 		if(creds.ClientId == null) query["agent_name_hint"] = "Marten";
 		if(creds.IdToken != null) query["id_token_hint"] = creds.IdToken;
-		_ = Task.Run(() => AwaitCallback(login));
+		_ = Task.Run(() => AwaitCallback(login, admitCallback));
 		// The URL can carry an ID-token hint. Never log it.
 		return $"{Issuer}/api/accounts/authorize?" + string.Join("&",
 			query.Select(kv => $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value!)}"));
@@ -114,9 +116,10 @@ public sealed class ChatGptAuth {
 		}
 	}
 
-	async Task AwaitCallback(PendingLogin login) {
+	async Task AwaitCallback(PendingLogin login, Func<IDisposable?>? admitCallback) {
 		using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
 		using var reg = timeout.Token.Register(login.Dispose);
+		IDisposable? operation = null;
 		try {
 			while(true) {
 				var ctx = await login.Listener.GetContextAsync();
@@ -128,6 +131,14 @@ public sealed class ChatGptAuth {
 				}
 				if(!CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(q["state"] ?? ""), Encoding.UTF8.GetBytes(login.State))) {
 					await Respond(ctx, 400, "Invalid sign-in state. Start again from Marten.");
+					continue;
+				}
+				// Waiting for a browser is not active work. A validated callback must win
+				// admission before exchanging credentials or changing sign-in state.
+				operation = admitCallback?.Invoke();
+				if(admitCallback != null && operation == null) {
+					ctx.Response.Headers["Retry-After"] = "1";
+					await Respond(ctx, 503, "Marten is draining for restart. Sign-in was not accepted; retry after service resumes.");
 					continue;
 				}
 				try {
@@ -144,6 +155,7 @@ public sealed class ChatGptAuth {
 		} finally {
 			if(pending == login) pending = null;
 			login.Dispose();
+			operation?.Dispose();
 		}
 	}
 

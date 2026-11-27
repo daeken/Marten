@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json.Nodes;
 using Marten.Agents;
+using Marten.Models.OpenAI;
 using Marten.Storage;
 using Marten.Tools;
 using Marten.Web;
@@ -122,6 +123,48 @@ public class ReleaseDrainTests {
 	}
 
 	[Fact]
+	public async Task BrowserCallbackCannotStartWhileReadyAndAdmittedExchangeCountsUntilCompletion() {
+		using var dir = new TempDir();
+		var drain = new RestartDrain();
+		var handler = new HeldExchange();
+		using var upstream = new HttpClient(handler);
+		using var browser = new HttpClient { Timeout = Deadline };
+		var auth = new ChatGptAuth(new Home(dir.File("home")), upstream);
+		var url = new Uri(auth.BeginLogin(drain.Enter));
+		var args = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(url.Query);
+		var callback = args["redirect_uri"].ToString() + "?state=" + Uri.EscapeDataString(args["state"].ToString()) + "&code=fixture&client_id=fixture";
+		try {
+			Assert.Equal("ready", drain.BeginRelease(First, 30)?.State);
+			using(var denied = await browser.GetAsync(callback)) {
+				Assert.Equal(HttpStatusCode.ServiceUnavailable, denied.StatusCode);
+				Assert.Equal(TimeSpan.FromSeconds(1), denied.Headers.RetryAfter?.Delta);
+			}
+			Assert.True(auth.SigningIn);
+			Assert.False(handler.Entered.Task.IsCompleted);
+			Assert.True(drain.AbortRelease(First));
+			var accepted = browser.GetAsync(callback);
+			await handler.Entered.Task.WaitAsync(Deadline);
+			Assert.Equal("draining", drain.BeginRelease(Second, 30)?.State);
+			handler.Finish.SetResult();
+			using(var response = await accepted) Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+			await Wait.Until(() => drain.GetRelease(Second)?.State == "ready");
+		} finally {
+			handler.Finish.TrySetResult();
+			auth.Logout();
+		}
+	}
+
+	sealed class HeldExchange : HttpMessageHandler {
+		public readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+		public readonly TaskCompletionSource Finish = new(TaskCreationOptions.RunContinuationsAsynchronously);
+		protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) {
+			Entered.TrySetResult();
+			await Finish.Task.WaitAsync(ct);
+			return new(HttpStatusCode.BadRequest);
+		}
+	}
+
+	[Fact]
 	public async Task RealRoutesAuthenticateBeforeAdmissionAndCountAnInFlightWriteUntilItSettles() {
 		using var dir = new TempDir();
 		var home = new Home(dir.File("home"));
@@ -165,7 +208,7 @@ public class ReleaseDrainTests {
 			using var request = new HttpRequestMessage(method, path);
 			if(token != null) request.Headers.Authorization = new("Bearer", token);
 			if(host != null) request.Headers.Host = host;
-			if(body != null) request.Content = JsonContent.Create(body);
+			if(body != null) request.Content = body is string raw ? new StringContent(raw, System.Text.Encoding.UTF8, "application/json") : JsonContent.Create(body);
 			if(id != null) request.Headers.Add("X-Marten-Drain-Id", id);
 			if(reportedPid != null) request.Headers.Add("X-Marten-Drain-Pid", reportedPid.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
 			if(forwarded) request.Headers.Add("Forwarded", "for=192.0.2.1");
@@ -187,6 +230,7 @@ public class ReleaseDrainTests {
 		await Check(Send(HttpMethod.Get, Path, op), HttpStatusCode.BadRequest);
 		await Check(Send(HttpMethod.Post, Path, op, new { id = "INVALID", pid, leaseSeconds = 20 }), HttpStatusCode.BadRequest);
 		await Check(Send(HttpMethod.Post, Path, op, new { id = First, pid, leaseSeconds = 301 }), HttpStatusCode.BadRequest);
+		await Check(Send(HttpMethod.Post, Path, op, $$"""{"id":"{{Second}}","id":"{{First}}","pid":{{pid}},"leaseSeconds":20}"""), HttpStatusCode.BadRequest);
 		await Check(Send(HttpMethod.Post, Path, op, new { id = First, pid = pid + 1, leaseSeconds = 20 }), HttpStatusCode.Conflict);
 
 		var earlier = Send(HttpMethod.Post, composer, op);

@@ -10,6 +10,7 @@ internal static class ReleaseDrainEndpoints {
 	const string Path = "/api/release/drain";
 	const string IdHeader = "X-Marten-Drain-Id";
 	const string PidHeader = "X-Marten-Drain-Pid";
+	static readonly JsonSerializerOptions BeginJson = new() { AllowDuplicateProperties = false };
 	sealed class Control;
 	internal sealed class OutsideWrite;
 
@@ -71,7 +72,7 @@ internal static class ReleaseDrainEndpoints {
 		try {
 			var size = await ctx.Request.Body.ReadAtLeastAsync(buffer, buffer.Length, false, timeout.Token);
 			if(size > limit) return Results.BadRequest();
-			var req = JsonSerializer.Deserialize<BeginRequest>(buffer.AsSpan(0, size));
+			var req = JsonSerializer.Deserialize<BeginRequest>(buffer.AsSpan(0, size), BeginJson);
 			if(req == null || !ValidId(req.Id) || req.Pid <= 0 || req.LeaseSeconds is < 1 or > RestartDrain.MaxLeaseSeconds) return Results.BadRequest();
 			return req.Pid == Environment.ProcessId ? Status(drain.BeginRelease(req.Id!, req.LeaseSeconds)) : Conflict();
 		} catch(JsonException) { return Results.BadRequest(); }

@@ -234,7 +234,7 @@ api.MapPost("/projects/{id}/pause", (string id, PauseRequest req) => {
 	manager.SetProjectPaused(p, req.Paused);
 	return Results.Ok(ProjectSummary(p));
 }).AllowPaired();
-api.MapPost("/auth/login", () => new { url = auth.BeginLogin() }).AllowPaired();
+api.MapPost("/auth/login", () => new { url = auth.BeginLogin(restart.Enter) }).AllowPaired();
 api.MapPost("/auth/logout", () => { auth.Logout(); return Results.Ok(); }).AllowPaired();
 api.MapPut("/backends/{name}/key", (string name, BackendKey req) => {
 	if(messagesBackends.FirstOrDefault(b => b.Provider == name) is not { } b) return Results.NotFound();
