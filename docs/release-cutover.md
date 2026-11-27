@@ -64,9 +64,17 @@ instance or run another deploy/start command alongside it.
    `MARTEN_WEB_ROOT` override must point to this checkout's `web/dist`.
    Do not edit the checkout/build outputs, config, or generation snapshot
    midway through the job.
-4. The helper re-verifies the generation before TERM. It waits 60 seconds by
-   default, then keeps watching for another 60 seconds so an exit just past
-   grace still proceeds through the same startup checks. Both waits can be
+4. After prebuild, the optional time gate, and artifact verification, the
+   helper requests a short pre-restart drain lease from the old generation.
+   It polls until active operations and pending messages are both zero;
+   `busy`, expiry, HTTP/auth failures and unexpected responses stop the job
+   without TERM. It re-verifies the generation, fetches a fresh `ready`
+   snapshot, and checks listener identity, process birth and remaining lease
+   budget before signaling. There is no automatic legacy fallback.
+
+   **After** TERM it waits 60 seconds by default, then keeps watching for
+   another 60 seconds so an exit just past grace still proceeds through
+   the same startup checks. Both waits can be
    set with `--grace` and `--late-wait` (seconds). **There is no KILL by
    default.** For an explicitly approved last resort, add `--kill-after-grace`
    at launch. It can lose data and will only send KILL after both waits, against
@@ -101,9 +109,80 @@ instance or run another deploy/start command alongside it.
    restart result and any follow-up to Sera. An abrupt helper interruption may
    leave `running`; inspect the host before taking any further action.
 
+### Drain protocol used by the detached helper
+
+The helper talks directly to `127.0.0.1:7450` (no proxies or redirects) using
+`Authorization: Bearer …` from the mounted home's `secrets/ui-token`. It keeps
+both the bearer and its randomly generated lease ID in memory, not in command
+arguments, logs, or job files. The API is for the local owner only.
+
+- `POST /api/release/drain` sends JSON `{id,pid,leaseSeconds}`. `id` is a fresh
+  32-character lowercase hex string (128 random bits); `pid` is the verified
+  old PID. The API accepts a nonrenewable lease of 1–300 seconds; the helper
+  requests 120 seconds. It never renews or takes over another lease.
+- `GET /api/release/drain` and `DELETE /api/release/drain` carry
+  `X-Marten-Drain-Id` and `X-Marten-Drain-Pid` (decimal PID). POST and GET
+  return a `200` no-store snapshot `{id,pid,state,remainingMs,activeOperations,pendingMessages}`.
+  `draining` means active operations remain and pending messages are zero;
+  `busy` means pending messages remain, regardless of active operations, and
+  aborts the cutover. `ready` requires both counters to be zero. The API rejects malformed requests with
+  `400` and stale, wrong-PID or competing leases with `409`.
+- Before TERM, a failure after acquiring a lease (or after an ambiguous POST)
+  triggers one best-effort DELETE for that same ID and PID if the old
+  generation still verifies. Successful release is `204`. If the helper
+  crashes or cannot confirm release, the lease expires on the old server;
+  nothing is carried to the replacement. After TERM the helper does not
+  release the lease; it leaves shutdown to the old server.
+- Polling is bounded by the original lease budget. Each poll can only shorten
+  the local deadline (request-start monotonic time plus the reported remaining
+  milliseconds). The helper requires more than two seconds of conservative
+  lifetime left at its final check. This practical monotonic margin is not a
+  guarantee against arbitrary OS suspension between the check and the signal.
+  The kernel binds delivery to the verified PID generation, not just the
+  numeric PID.
+
+### One-time first install from `fda0f931`
+
+The currently deployed `fda0f931680b4ecec0942949a888282d82ebc634` predates the
+lease endpoint. Only for the first cutover from that version, append:
+
+```sh
+--legacy-first-install fda0f931680b4ecec0942949a888282d82ebc634
+```
+
+This flag is the operator's affirmation that the reviewed `generation.json`
+is the previously verified live SHA/PID and that the maintenance window is
+quiet, with no separately known ingress producers or active standalone work
+(e.g. schedules/replays). The old status API cannot attest its running SHA or
+report all work. Do not use the flag on a drain-capable server, with
+`--kill-after-grace`, or to retry a failed modern drain. The helper independently
+requires authenticated GET of the lease endpoint to return `404`. Any other
+status, timeout, or malformed status snapshot stops the job without TERM.
+
+The helper observes the full agent inventory from authenticated `GET /api/status`
+twice a second apart and once more just before TERM. Every agent (including
+closed and effectively paused agents) must report `status: "idle"`, exact zero
+`pending`, and no in-flight model call. `fda0f931` retains the latest
+model attempt after it ends, so `modelCall` may be absent or null, or a
+well-formed terminal `reply` or `compaction` (`succeeded`, `failed`, or
+`cancelled`, with valid zoned start/end timestamps). In-flight or malformed
+attempts block TERM. The unique agent IDs must be unchanged. `pending` is
+full in-memory inbox depth, not just the user-authored entries visible in
+`pending-messages`. Closed and effective pause are separate flags and can be
+idle; `status: "paused"` can be an unfinished turn held at a dispatch boundary
+and is not proof of quiet. Error, running, waiting, or unknown states also
+block the first install. **These are observations, not an atomic admission
+barrier.** New work can arrive after any check; quiet snapshots alone do not
+establish external silence. There is no force override for this mode. Omit
+this flag for future releases.
+
 ### If the drain or startup fails
 
-- On `drain-timeout`, do not start over or send another signal. If the verified
+- A failed pre-restart drain sends no TERM and is not resumable. Inspect the
+  failure and old generation; resolve any outstanding work or let a possibly
+  unreleased lease expire before deciding whether to try a fresh job. Do not
+  use first-install mode as an override.
+- On `drain-timeout` (after TERM), do not start over or send another signal. If the verified
   old generation exits after the bounded watch, use the same command with
   `resume` instead of `release`, the **same** job/checkout/home/SHA, and omit
   `--not-before` and escalation options. It checks the original timeout and
