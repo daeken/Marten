@@ -443,21 +443,47 @@ class HealthTests(unittest.TestCase):
             return True
 
         with patch.dict(cutover.healthy.__globals__, http_check=probe), patch.object(time, 'sleep') as sleep:
-            cutover.healthy(SimpleNamespace(listeners=listeners), child, 51000, 'scratch-token')
+            host = SimpleNamespace(listeners=listeners, direct_children=lambda pid, pids: pid == 4321 and pids == {4322})
+            cutover.healthy(host, child, 51000, 'scratch-token')
         self.assertEqual(sleep.call_count, 3)
         self.assertEqual(list(observations), [])
 
     def test_persistent_shared_listener_times_out_without_http_probe(self):
         child = SimpleNamespace(pid=4321, poll=lambda: None)
-        host = SimpleNamespace(listeners=lambda port: {child.pid, 4322})
+        host = SimpleNamespace(listeners=lambda port: {child.pid, 4322}, direct_children=lambda *_: True)
         with (
             patch.dict(cutover.healthy.__globals__, http_check=lambda *args: self.fail('shared listener')),
-            patch.object(time, 'monotonic', side_effect=(0, 0, 30)),
+            patch.object(time, 'monotonic', side_effect=(0, 0, 0, 2, 2)),
             patch.object(time, 'sleep') as sleep,
         ):
             with self.assertRaisesRegex(cutover.CutoverError, r'additional listener PIDs \[4322\]'):
                 cutover.healthy(host, child, 51000, 'scratch-token')
         sleep.assert_called_once_with(0.25)
+
+
+    def test_shared_listener_window_is_not_renewed(self):
+        child = SimpleNamespace(pid=4321, poll=lambda: None)
+        observations = iter(({4321, 4322}, set(), {4321, 4323}))
+        host = SimpleNamespace(listeners=lambda port: next(observations), direct_children=lambda *_: True)
+        with (
+            patch.dict(cutover.healthy.__globals__, http_check=lambda *args: self.fail('not sole listener')),
+            patch.object(time, 'monotonic', side_effect=(0, 0, 0, 1, 2, 2)),
+            patch.object(time, 'sleep') as sleep,
+        ):
+            with self.assertRaisesRegex(cutover.CutoverError, r'additional listener PIDs \[4323\]'):
+                cutover.healthy(host, child, 51000, 'scratch-token')
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_unrelated_co_listener_is_rejected_immediately(self):
+        child = SimpleNamespace(pid=4321, poll=lambda: None)
+        host = SimpleNamespace(listeners=lambda port: {4321, 4322}, direct_children=lambda *_: False)
+        with (
+            patch.dict(cutover.healthy.__globals__, http_check=lambda *args: self.fail('unrelated listener')),
+            patch.object(time, 'sleep') as sleep,
+        ):
+            with self.assertRaisesRegex(cutover.CutoverError, r'unexpected listener.*\[4321, 4322\]'):
+                cutover.healthy(host, child, 51000, 'scratch-token')
+        sleep.assert_not_called()
 
 
 class PrebuildTests(unittest.TestCase):
@@ -559,11 +585,11 @@ class DarwinTests(unittest.TestCase):
                 helper, old_pid, port = sys.argv[1:]
                 m = runpy.run_path(helper)
                 class ScratchDarwin(m['Darwin']):
-                    def listeners(self, port):
-                        pids = super().listeners(port)
-                        if len(pids) > 1:
+                    def direct_children(self, parent_pid, pids):
+                        related = super().direct_children(parent_pid, pids)
+                        if related:
                             Path('release-holder').touch()
-                        return pids
+                        return related
 
                 host = ScratchDarwin()
                 root = Path.cwd()

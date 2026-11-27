@@ -21,6 +21,7 @@ import tempfile
 import time
 
 PORT = 7450
+SHARED_LISTENER_GRACE = 2
 LOCK_DIR = Path('/private/tmp')
 DLL = 'src/Marten/bin/Debug/net10.0/Marten.dll'
 BUILD_DIR = str(Path(DLL).parent)
@@ -76,7 +77,7 @@ class Darwin:
         self.lib.proc_pidinfo.argtypes = [C.c_int, C.c_int, C.c_uint64, C.c_void_p, C.c_int]
         self.lib.proc_signal_with_audittoken.argtypes = [C.POINTER(C.c_uint32), C.c_int]
 
-    def birth(self, pid):
+    def _proc_info(self, pid):
         info = ProcInfo()
         C.set_errno(0)
         n = self.lib.proc_pidinfo(pid, 18, 1, C.byref(info), C.sizeof(info))
@@ -86,8 +87,25 @@ class Darwin:
             raise CutoverError(f'Cannot establish generation for PID {pid}')
         if info.fields[1] == 5:  # SZOMB: exited, not yet reaped
             return None
+        return info
+
+    def birth(self, pid):
+        info = self._proc_info(pid)
+        if info is None:
+            return None
         return Birth(info.fields[5], info.fields[7], info.seconds, info.micros,
                      info.unique, info.version)
+
+    def direct_children(self, parent_pid, pids):
+        parent = self._proc_info(parent_pid)
+        if parent is None or (parent.fields[5], parent.fields[7]) != (os.getuid(), os.getuid()):
+            return False
+        for pid in pids:
+            info = self._proc_info(pid)
+            if (info is None or info.fields[4] != parent_pid or info.parent_unique != parent.unique
+                    or (info.fields[5], info.fields[7]) != (parent.fields[5], parent.fields[7])):
+                return False
+        return True
 
     def signal(self, old, sig):
         # XNU checks PID + pidversion in the kernel before delivering the signal.
@@ -242,14 +260,25 @@ def http_check(port, token, timeout):
 
 
 def healthy(host, child, port, token):
-    def observe():
-        listeners = host.listeners(port)
-        if listeners and child.pid not in listeners:
-            raise CutoverError(f'Port {port} occupied by unexpected listener(s) {sorted(listeners)}')
-        return listeners
-
     deadline = time.monotonic() + 30
     expected = {child.pid}
+    shared_until = None
+
+    def observe():
+        nonlocal shared_until
+        listeners = host.listeners(port)
+        extras = listeners - expected
+        if extras:
+            if child.pid not in listeners or not host.direct_children(child.pid, extras):
+                raise CutoverError(f'Port {port} occupied by unexpected listener(s) {sorted(listeners)}')
+            now = time.monotonic()
+            if shared_until is None:
+                shared_until = min(deadline, now + SHARED_LISTENER_GRACE)
+            if now >= shared_until:
+                raise CutoverError(f'Port {port} still has additional listener PIDs {sorted(extras)}; '
+                                   f'new Marten PID {child.pid} was not the sole listener within startup budget')
+        return listeners
+
     listeners = set()
     while time.monotonic() < deadline:
         if child.poll() is not None:
