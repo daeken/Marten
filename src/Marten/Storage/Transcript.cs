@@ -57,6 +57,7 @@ public sealed record Entry {
 	public string? Instructions { get; init; }
 	/// <summary>Images a tool result shows the model (MCP tools, View-Image): absolute paths of saved files.</summary>
 	public List<ImageRef>? Images { get; init; }
+	public IReadOnlyList<ArtifactRef>? Artifacts { get; init; }
 }
 
 public sealed record ImageRef(string Path, string MimeType);
@@ -78,9 +79,15 @@ internal sealed record CallRecord(string? CallId, string? Name);
 public sealed class Transcript {
 	const long SegmentBytes = 4 << 20;
 	readonly List<string> segments;
+	readonly HashSet<string> artifactCalls = new(StringComparer.Ordinal);
+	internal bool IsArtifactCall(string? id) { lock(gate) return id != null && artifactCalls.Contains(id); }
+	readonly Dictionary<string, ArtifactRef> artifacts = new(StringComparer.Ordinal);
+	internal string DirectoryPath { get; }
+	internal bool AppendFailed { get { lock(gate) return appendFailed; } }
+	internal ArtifactRef? Artifact(string id) { lock(gate) return artifacts.GetValueOrDefault(id); }
 	readonly List<Row> rows = new();
 	readonly object gate = new();
-	bool damagedTail;
+	bool damagedTail, rejectUnterminatedArtifact;
 	bool appendFailed;
 
 	readonly record struct Row(long Seq, long Offset, int Length, int Segment, RowKind Kind);
@@ -97,6 +104,7 @@ public sealed class Transcript {
 	static FileStream OpenRead(string path) => new(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
 
 	public Transcript(string dir) {
+		DirectoryPath = dir;
 		Directory.CreateDirectory(dir);
 		segments = Directory.GetFiles(dir, "*.jsonl").Order(StringComparer.Ordinal).ToList();
 		if(segments.Count == 0) { segments.Add(Path.Combine(dir, "000001.jsonl")); return; }
@@ -129,15 +137,20 @@ public sealed class Transcript {
 			}
 			partial.Write(rest);
 		}
-		if(partial.WrittenCount > 0) IndexLine(partial.WrittenSpan, offset, segment);
+		if(partial.WrittenCount > 0) IndexLine(partial.WrittenSpan, offset, segment, terminated: false);
 	}
 
-	void IndexLine(ReadOnlySpan<byte> line, long offset, int segment) {
+	void IndexLine(ReadOnlySpan<byte> line, long offset, int segment, bool terminated = true) {
 		if(offset == 0 && line.StartsWith("\uFEFF"u8)) { line = line[3..]; offset = 3; }
 		if(line.IndexOfAnyExcept((byte) ' ', (byte) '\t', (byte) '\r') < 0) return;
 		try {
-			if(JsonSerializer.Deserialize<Entry>(line, JsonIO.Options) is { } e)
+			if(line.EndsWith(" !incomplete-artifact"u8)) { damagedTail = true; return; }
+			if(JsonSerializer.Deserialize<Entry>(line, JsonIO.Options) is { } e) {
+				if(!terminated && e.Artifacts is { Count: > 0 }) { damagedTail = rejectUnterminatedArtifact = true; return; }
+				ValidateArtifacts(e);
 				rows.Add(new(e.Seq, offset, line.Length, segment, Tag(e.Kind)));
+				IndexArtifacts(e);
+			}
 		} catch(JsonException) when(IsUnicodeWhitespace(line)) {
 			// StreamReader-based transcripts also ignored Unicode-only blank lines.
 		} catch(JsonException) when(segment == segments.Count - 1) {
@@ -236,11 +249,31 @@ public sealed class Transcript {
 	public TranscriptPage ReadPage(int limit, long? before = null) => Capture().Tail(Math.Clamp(limit, 1, 100), before: before);
 	public Entry? Last => Capture().ReadLast(RowKind.All);
 
+	void ValidateArtifacts(Entry entry) {
+		if(entry.Artifacts == null) return;
+		if(entry.Kind != EntryKind.ToolResult) throw new InvalidDataException("Artifact refs require a tool result.");
+		var seen = entry.Artifacts.Count > 1 ? new HashSet<string>(StringComparer.Ordinal) : null;
+		foreach(var item in entry.Artifacts) {
+			if(!Artifacts.RefValid(item) || artifacts.ContainsKey(item.Id) || seen?.Add(item.Id) == false)
+				throw new InvalidDataException("Invalid or duplicate transcript artifact ref.");
+		}
+	}
+
+	void IndexArtifacts(Entry entry) {
+		if(entry.Kind == EntryKind.ToolCall && entry.CallId != null && Web.ArtifactTranscriptProjection.PrivateCall(entry)) artifactCalls.Add(entry.CallId);
+		if(entry.Kind == EntryKind.ToolResult && entry.Artifacts != null)
+			foreach(var item in entry.Artifacts) artifacts.TryAdd(item.Id, item);
+	}
+
+	internal Entry AppendArtifact(Entry entry, Func<string, FileStream> open, Action syncDirectory, Action afterFlush) =>
+		Append(entry, static (fs, bytes) => { fs.Write(bytes); fs.WriteByte((byte) '\n'); }, open, syncDirectory, afterFlush);
+
 	public Entry Append(Entry entry) => Append(entry, static (fs, bytes) => { fs.Write(bytes); fs.WriteByte((byte) '\n'); });
 
-	internal Entry Append(Entry entry, Action<FileStream, byte[]> write) {
+	internal Entry Append(Entry entry, Action<FileStream, byte[]> write, Func<string, FileStream>? open = null, Action? syncDirectory = null, Action? afterFlush = null) {
 		lock(gate) {
 			if(appendFailed) throw new IOException("A previous transcript append failed; restart to re-index before appending again.");
+			ValidateArtifacts(entry);
 			entry = entry with {
 				Seq = rows.Count > 0 ? rows[^1].Seq + 1 : 1,
 				Ts = entry.Ts == default ? DateTimeOffset.UtcNow : entry.Ts,
@@ -253,22 +286,39 @@ public sealed class Transcript {
 			var bytes = JsonSerializer.SerializeToUtf8Bytes(entry, JsonIO.Options);
 			long offset;
 			try {
-				using var fs = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read);
+				using var fs = open == null ? new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read) : open(Path.GetFileName(path));
+				fs.Seek(0, SeekOrigin.End);
+				syncDirectory?.Invoke();
 				if(fs.Length > 0) {
-					using var check = OpenRead(path);
-					check.Seek(-1, SeekOrigin.End);
-					if(check.ReadByte() != '\n') fs.WriteByte((byte) '\n');
+					int last;
+					if(open == null) {
+						using var check = OpenRead(path);
+						check.Seek(-1, SeekOrigin.End);
+						last = check.ReadByte();
+					} else {
+						// Check the exact file opened through the verified directory descriptor.
+						fs.Seek(-1, SeekOrigin.End);
+						last = fs.ReadByte();
+						fs.Seek(0, SeekOrigin.End);
+					}
+					if(last != '\n') {
+						if(rejectUnterminatedArtifact) fs.Write(" !incomplete-artifact"u8);
+						fs.WriteByte((byte) '\n');
+					}
 				}
 				offset = fs.Position;
 				write(fs, bytes);
 				fs.Flush(flushToDisk: true);
+				afterFlush?.Invoke();
 			} catch(Exception e) when(e is IOException or UnauthorizedAccessException) {
 				// A failed write/flush may have left a partial or even complete line. Do not
 				// append a separator or reuse its sequence until startup has inspected it.
 				appendFailed = true;
 				throw;
 			}
+			rejectUnterminatedArtifact = false;
 			rows.Add(new(entry.Seq, offset, bytes.Length, segments.Count - 1, Tag(entry.Kind)));
+			IndexArtifacts(entry);
 			return entry;
 		}
 	}

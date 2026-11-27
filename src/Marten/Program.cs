@@ -1,4 +1,3 @@
-using System.Runtime.CompilerServices;
 using Marten.Agents;
 using Marten.Models;
 using Marten.Models.Anthropic;
@@ -9,6 +8,13 @@ using Marten.Tools;
 using Marten.Web;
 using Microsoft.Extensions.FileProviders;
 
+// Maintenance commands retain their existing semantics. Server peers must fence before Home/Config writes.
+var server = args is not (["backup", ..] or ["client", "add" or "rotate", _, ..] or ["restore", _, ..] or ["bedrock-list-mantle"] or ["bedrock-check", _]);
+ArtifactFiles.HomeLease? acquired = null;
+try { if(server) acquired = ArtifactFiles.AcquireHome(Home.ResolveRoot(), Console.Error.WriteLine); }
+catch(ArtifactFiles.BusyException e) { Console.Error.WriteLine(e.Message); Environment.ExitCode = 1; return; }
+using var artifactLease = acquired;
+if(artifactLease != null) ArtifactFiles.RequireSameDirectory(artifactLease.Root, Home.ResolveRoot());
 var home = new Home();
 var config = Config.Load(home);
 AgentManager? managerRef = null;
@@ -92,6 +98,7 @@ var childWatcher = new ChildProcessWatcher();
 var restart = new RestartDrain();
 var scriptTools = new ScriptToolSource(getManager);
 var mcp = new Marten.Mcp.McpHub(getManager);
+using var artifacts = new Artifacts(home, Console.Error.WriteLine, ownedHome: artifactLease, useOwnedHomeOnly: true);
 var tools = new ToolRegistry()
 	.Add(new ReadFileTool())
 	.Add(new EditFileTool(new MemoryGuard(getManager)))
@@ -118,7 +125,8 @@ var tools = new ToolRegistry()
 	.Add(new RemoveToolTool(getManager, scriptTools))
 	.AddSource(scriptTools)
 	.AddSource(mcp);
-var manager = managerRef = new AgentManager(home, config, backend, tools) { Launcher = new ProcessLauncher(), Mcp = mcp, Restart = restart };
+if(artifacts.Enabled) tools.Add(new PublishArtifactTool(getManager));
+var manager = managerRef = new AgentManager(home, config, backend, tools) { Launcher = new ProcessLauncher(), Mcp = mcp, Restart = restart, ArtifactStore = artifacts };
 var hub = new EventHub();
 manager.Events += hub.Broadcast;
 var pairing = new DevicePairing(home);
@@ -298,11 +306,12 @@ ext.MapGet("/inbox", async (HttpContext ctx, bool? ack, int? wait) => {
 	return Results.Ok(list.Select(m => new { file = Path.GetFileName(m.File), headers = m.Headers, m.Text }));
 });
 ext.MapGet("/agents/{id}/transcript", (HttpContext ctx, string id, long? since, int? limit) => {
+	ctx.Response.Headers.CacheControl = "no-store";
 	if(ClientOf(ctx) is null) return NeedsClient();
 	if(manager.Get(id) is not { } a) return Results.NotFound();
 	static string? Cut(string? s, int n) => s == null || s.Length <= n ? s : s[..n] + $"… ({s.Length - n} more chars)";
 	var tail = a.Transcript.Capture().Tail(Math.Clamp(limit ?? 50, 1, 500),
-		static e => new { e.Seq, e.Ts, e.Kind, e.From, Text = Cut(e.Text, 4000), e.Name, Arguments = Cut(e.Arguments, 1000), e.IsError },
+		e => { e = ArtifactTranscriptProjection.Outside(e, a.Transcript); return new { e.Seq, e.Ts, e.Kind, e.From, Text = Cut(e.Text, 4000), e.Name, Arguments = Cut(e.Arguments, 1000), e.IsError }; },
 		RowKind.All & ~(RowKind.Reasoning | RowKind.Elide), after: since ?? 0);
 	return Results.Ok(tail.Entries);
 });
@@ -329,29 +338,22 @@ api.MapPut("/config", (ConfigUpdate update) => {
 api.MapGet("/agents", () => manager.Agents.Select(AgentSummary)).AllowPaired();
 api.MapPost("/agents", (CreateAgent req) => AgentSummary(manager.CreateChat(req.Name, Blank(req.WorkingDirectory)))).AllowPaired();
 api.MapGet("/agents/{id}/transcript", async (HttpContext ctx, string id, int? limit, long? before) => {
+	ctx.Response.Headers.CacheControl = "no-store";
+	var outside = ClientOf(ctx) != null;
 	if(manager.Get(id) is not { } a) { await Results.NotFound().ExecuteAsync(ctx); return; }
 	if(limit is int size) {
 		// Drop replay payloads row by row rather than retaining the entire page's raw data.
-		var page = a.Transcript.Capture().Tail(Math.Clamp(size, 1, 100), static e => e with { Raw = null, Instructions = null }, before: before);
+		var page = a.Transcript.Capture().Tail(Math.Clamp(size, 1, 100), e => (outside ? ArtifactTranscriptProjection.Outside(e, a.Transcript) : e) with { Raw = null, Instructions = null }, before: before);
 		await ctx.Response.WriteAsJsonAsync(new { page.Entries, page.HasOlder });
 		return;
 	}
 	using var lease = restart.Enter();
 	if(lease == null) { await Results.StatusCode(503).ExecuteAsync(ctx); return; }
-	using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted, restart.Stopping);
-	// Keep the legacy unredacted JSON array, without buffering the entire archive.
-	await ctx.Response.WriteAsJsonAsync(StreamTranscript(a.Transcript.Capture()), cancellation.Token);
+	await TranscriptStreaming.WriteFull(ctx, a.Transcript, outside, restart.Stopping);
 }).AllowPaired();
 
-static async IAsyncEnumerable<Entry> StreamTranscript(Transcript.Snapshot snapshot, [EnumeratorCancellation] CancellationToken ct = default) {
-	await Task.CompletedTask;
-	using var entries = snapshot.Read().GetEnumerator();
-	while(true) {
-		ct.ThrowIfCancellationRequested();
-		if(!entries.MoveNext()) yield break;
-		yield return entries.Current;
-	}
-}
+api.MapArtifacts(manager);
+
 api.MapPost("/agents/{id}/messages", (string id, SendMessage req) => {
 	if(manager.Get(id) is not { } a) return Results.NotFound();
 	if(string.IsNullOrWhiteSpace(req.Text)) return Results.BadRequest();

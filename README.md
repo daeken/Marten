@@ -35,6 +35,12 @@ Agents outside Marten (e.g. Claude Code sessions) can create projects and messag
 
 The agent header and status APIs (`/api/status`, `/api/ext/status`, and `$Marten.Agents()`) show the start and end of the latest model attempt, including compaction. If a turn fails outright (for example, its model is unavailable or retries run out), Marten wakes the parent and agent assigners of unfinished tasks with a queued error message. It does not change task states.
 
+## Publishing artifacts
+
+To deliver a file, an agent copies it to `agents/<id>/artifact-inbox/` under `MARTEN_HOME`, then calls `publish_artifact` with its filename. The operator sees a card next to the tool result in the web conversation. **Preview** displays bounded plain text or static PNG; **Download** saves the original bytes. Publishing takes a snapshot; later edits or deletion of the staged file don't affect it. Stage only finished deliverables, not secrets. The agent can remove its staging copy after publishing.
+
+The server accepts at most 8 MiB per file, 256 MiB/1,024 files per agent and 2 GiB/16,384 files per host. There is no public link, outside-client download, or project-file browse access. Routine backups keep the transcript card but not staged or published bytes; restored cards without their blobs show “Artifact unavailable” on access. Descriptor-safe publishing currently runs on macOS and Linux (x64/arm64 with `openat2`, Linux 5.6+); there is no unchecked fallback. See [the artifact wire contract](docs/artifact-api.md) for native integration.
+
 ## Resource limits
 
 Set process-wide limits in `~/.marten/config.json` (read at startup):
