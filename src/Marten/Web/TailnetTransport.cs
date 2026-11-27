@@ -15,10 +15,14 @@ public sealed class TailnetTransport(Config config) {
 	readonly byte[]? nativeProof = config is { MacFilesEnabled: true, Tailnet: not null }
 		? Encoding.ASCII.GetBytes(Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32))) : null;
 
-	internal bool HasNativeProof(HttpContext ctx) {
+	internal bool HasNativeProof(HttpContext ctx) => ConsumeNativeProof(ctx, IsReady ? nativeProof : null);
+
+	internal static bool ConsumeNativeProof(HttpContext ctx, byte[]? expected) {
 		var headers = ctx.Request.Headers[NativeProofHeader];
-		return IsReady && nativeProof != null && headers.Count == 1 && headers[0] is { Length: 64 } supplied &&
-			CryptographicOperations.FixedTimeEquals(nativeProof, Encoding.UTF8.GetBytes(supplied));
+		ctx.Request.Headers.Remove(NativeProofHeader);
+		return expected != null && ctx.Connection.RemoteIpAddress is { } peer && System.Net.IPAddress.IsLoopback(peer) &&
+			headers.Count == 1 && headers[0] is { Length: 64 } supplied &&
+			CryptographicOperations.FixedTimeEquals(expected, Encoding.UTF8.GetBytes(supplied));
 	}
 
 	public async Task RunAsync(Home home, Action<string> log, CancellationToken stopping) {

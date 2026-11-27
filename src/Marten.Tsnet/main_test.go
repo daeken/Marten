@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -163,6 +165,103 @@ func TestProxyKeepsRequestAuthAndDropsSpoofedIdentity(t *testing.T) {
 		if w.Code == 200 && (w.Body.String() != "notebook" || w.Header().Get("Content-Disposition") == "") {
 			t.Fatal("download metadata or bytes not forwarded")
 		}
+	}
+}
+
+// Opt-in cross-language fixture: the .NET test starts an isolated real Kestrel
+// server and passes synthetic credentials over a private child stdin pipe.
+func TestMacFilesProxyToKestrel(t *testing.T) {
+	if os.Getenv("MARTEN_TEST_MAC_FILES_KESTREL") != "1" {
+		t.Skip("requires scratch Kestrel launcher")
+	}
+	var fixture struct{ URL, Bearer, Ingress string }
+	if err := json.NewDecoder(os.Stdin).Decode(&fixture); err != nil {
+		t.Fatal("invalid fixture input")
+	}
+	up, err := url.Parse(fixture.URL)
+	if err != nil || up.Scheme != "http" || up.Hostname() != "127.0.0.1" || len(fixture.Ingress) != 64 {
+		t.Fatal("invalid fixture backend")
+	}
+	const host = "example.com" // covered by httptest's synthetic certificate
+	certFixture := httptest.NewTLSServer(http.NotFoundHandler())
+	defer certFixture.Close()
+	cert := &certFixture.TLS.Certificates[0]
+	start := func(proof string) *httptest.Server {
+		srv := httptest.NewUnstartedServer(tailnetProxyWithProof(host, up, proof))
+		srv.TLS = exactTLS(host, func(context.Context) (*tls.Certificate, error) { return cert, nil })
+		// StartTLS supplies its own certificate when Certificates is empty. Keep
+		// strict SNI via GetConfigForClient; the returned config uses exactTLS.
+		strict := srv.TLS
+		srv.TLS = &tls.Config{GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) { return strict, nil }}
+		srv.StartTLS()
+		t.Cleanup(srv.Close)
+		return srv
+	}
+	front := start(fixture.Ingress)
+	disabledProof := start("")
+	client := func(sni string) *http.Client {
+		tr := certFixture.Client().Transport.(*http.Transport).Clone()
+		tr.TLSClientConfig.ServerName = sni
+		tr.Proxy = nil
+		t.Cleanup(tr.CloseIdleConnections)
+		return &http.Client{Transport: tr, Timeout: 4 * time.Second}
+	}
+	native := client(host)
+	get := func(c *http.Client, address, path, authority, token, proof string, want int) (http.Header, []byte) {
+		t.Helper()
+		r, err := http.NewRequest(http.MethodGet, address+"/api/"+path, nil)
+		if err != nil {
+			t.Fatal("invalid fixture request")
+		}
+		r.Host = authority
+		if token != "" {
+			r.Header.Set("Authorization", "Bearer "+token)
+		}
+		if proof != "" {
+			r.Header.Set(nativeProofHeader, proof)
+		}
+		r.Header.Set("X-Forwarded-Proto", "https")
+		r.Header.Set("Forwarded", "proto=https;host="+host)
+		res, err := c.Do(r)
+		if want == 0 && err != nil {
+			return nil, nil
+		}
+		if err != nil || res.StatusCode != want {
+			if res != nil {
+				res.Body.Close()
+				t.Fatalf("fixture returned %d; want %d", res.StatusCode, want)
+			}
+			t.Fatal("fixture request failed")
+		}
+		defer res.Body.Close()
+		body, err := io.ReadAll(res.Body)
+		if err != nil {
+			t.Fatal("failed reading fixture response")
+		}
+		return res.Header, body
+	}
+	const roots = "mac-files/roots"
+	get(native, fixture.URL, roots, host, fixture.Bearer, "", 403)
+	get(native, fixture.URL, roots, host, fixture.Bearer, strings.Repeat("0", 64), 403)
+	get(native, disabledProof.URL, roots, host, fixture.Bearer, fixture.Ingress, 403)
+	get(native, front.URL, "proof-control", host, fixture.Bearer, fixture.Ingress, 204)
+	get(native, front.URL, roots, "wrong.example", fixture.Bearer, "", 403)
+	get(client("wrong.example"), front.URL, roots, host, fixture.Bearer, "", 0)
+	get(native, front.URL, roots, host, "", "", 401)
+	_, body := get(native, front.URL, roots, host, fixture.Bearer, strings.Repeat("0", 64), 200)
+	var root []struct{ ID string }
+	if json.Unmarshal(body, &root) != nil || len(root) != 1 || root[0].ID == "" {
+		t.Fatal("unexpected fixture roots")
+	}
+	_, body = get(native, front.URL, "mac-files/entries/"+root[0].ID, host, fixture.Bearer, "", 200)
+	var page struct{ Entries []struct{ ID, Name string } }
+	if json.Unmarshal(body, &page) != nil || len(page.Entries) != 1 || page.Entries[0].Name != ".fixture" {
+		t.Fatal("unexpected fixture entries")
+	}
+	h, body := get(native, front.URL, "mac-files/bytes/"+page.Entries[0].ID+"/share", host, fixture.Bearer, "", 200)
+	if string(body) != "scratch bytes" || h.Get("Content-Length") != strconv.Itoa(len(body)) ||
+		h.Get("Content-Type") != "application/octet-stream" || h.Get("Content-Disposition") != "attachment" || h.Get("Cache-Control") != "no-store" {
+		t.Fatal("unexpected fixture download")
 	}
 }
 

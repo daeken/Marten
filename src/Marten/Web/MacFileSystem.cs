@@ -7,7 +7,8 @@ namespace Marten.Web;
 // Darwin arm64 only. No fallback to pathname reads.
 internal static class MacFileSystem {
 	const int DirectoryFlag = 0x100000, CloseOnExec = 0x1000000, NoLinks = 0x20000000,
-		Beneath = 0x1000, NonBlock = 4, EventOnly = 0x8000;
+		Beneath = 0x1000, NonBlock = 4, EventOnly = 0x8000, NoControllingTerminal = 0x20000;
+	const int StatNoLinksBeneath = 0x20 | 0x800 | 0x2000; // AT_SYMLINK_NOFOLLOW / AT_SYMLINK_NOFOLLOW_ANY / AT_RESOLVE_BENEATH
 	const string Lib = "/usr/lib/libSystem.B.dylib";
 	static readonly UTF8Encoding Utf8 = new(false, true);
 	public static bool Supported => OperatingSystem.IsMacOSVersionAtLeast(26) && RuntimeInformation.ProcessArchitecture == Architecture.Arm64 && EffectiveUserId() != 0;
@@ -69,18 +70,22 @@ internal static class MacFileSystem {
 	public static bool Leaf(string s) => s.Length is > 0 and <= 255 && s is not "." and not ".." &&
 		s.All(c => c != '/' && !char.IsControl(c) && char.GetUnicodeCategory(c) != System.Globalization.UnicodeCategory.Format);
 
+	public static bool Representable(string relative) => Utf8.GetByteCount(relative) <= 1000;
+
 	// Only internally enumerated names. Mount crossings are intentional. Probe while holding the
 	// descriptor, then open with no-follow, nonblocking and type flags; reject any replacement.
 	public static SafeFileHandle Descendant(SafeFileHandle root, string relative, bool readFile = false) {
-		var flags = CloseOnExec | Beneath | NoLinks | NonBlock;
+		var flags = CloseOnExec | Beneath | NoLinks | NonBlock | NoControllingTerminal;
 		if(relative.Length == 0 && !readFile) return Handle(OpenAt(root, ".", flags | DirectoryFlag));
-		if(Utf8.GetByteCount(relative) > 1000 || !relative.Split('/').All(Leaf)) throw new IOException();
+		if(!Representable(relative) || !relative.Split('/').All(Leaf)) throw new IOException();
 		// Stat without opening first: O_EVTONLY alone is not a safe type classifier.
-		if(FStatAt(root, relative, out var listed, 0x20 | 0x800 | 0x2000) != 0 ||
+		if(FStatAt(root, relative, out var listed, StatNoLinksBeneath) != 0 ||
 			(!listed.Directory && !listed.File) || (readFile && !listed.File)) throw new IOException();
 		using var probe = Handle(OpenAt(root, relative, flags | EventOnly));
 		var before = Inspect(probe);
 		if(!before.Stat.SameRevision(listed)) throw new IOException();
+		if(FStatAt(root, relative, out var current, StatNoLinksBeneath) != 0 || !current.SameRevision(before.Stat))
+			throw new IOException();
 		var fd = Handle(OpenAt(root, relative, flags | (before.Stat.Directory ? DirectoryFlag : readFile ? 0 : EventOnly)));
 		try {
 			if(!Inspect(fd).SameRevision(before)) throw new IOException();

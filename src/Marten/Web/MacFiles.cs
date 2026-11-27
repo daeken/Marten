@@ -6,7 +6,7 @@ using static Marten.Web.MacFileSystem;
 namespace Marten.Web;
 
 internal sealed class MacFiles(bool enabled, Func<HttpContext, bool> nativeIngress, DevicePairing pairing,
-	CancellationToken stopping, string rootPath = "/") {
+	CancellationToken stopping, string rootPath = "/", Func<bool, Task>? publicationFixture = null) {
 	const int MaxScan = 2000, PageSize = 100, MaxHandles = 4096, PerDeviceHandles = 2200;
 	readonly object gate = new();
 	readonly HashSet<CancellationToken> busy = [];
@@ -34,10 +34,13 @@ internal sealed class MacFiles(bool enabled, Func<HttpContext, bool> nativeIngre
 		response.Headers.CacheControl = "no-store";
 		response.Headers.XContentTypeOptions = "nosniff";
 		var device = Security.DeviceRevocationOf(ctx);
-		if(!device.CanBeCanceled || ctx.Request.QueryString.HasValue || ctx.Request.Headers.ContainsKey("Origin") || !nativeIngress(ctx)) {
+		var native = nativeIngress(ctx);
+		if(!device.CanBeCanceled || ctx.Request.QueryString.HasValue || ctx.Request.Headers.ContainsKey("Origin")) {
 			response.StatusCode = 403; return;
 		}
-		if(!enabled || !Supported) { response.StatusCode = 404; return; }
+		if(!enabled) { response.StatusCode = 404; return; }
+		if(!native) { response.StatusCode = 403; return; }
+		if(!Supported) { response.StatusCode = 404; return; }
 		if(ctx.Request.Headers.ContainsKey("Range")) { response.StatusCode = 416; return; }
 		lock(gate) {
 			if(busy.Count >= 4 || !busy.Add(device)) { response.StatusCode = 429; return; }
@@ -49,12 +52,21 @@ internal sealed class MacFiles(bool enabled, Func<HttpContext, bool> nativeIngre
 			var pending = new Dictionary<string, object>();
 			stop.Token.ThrowIfCancellationRequested();
 			result = await Task.Run(() => prepare(device, pending, stop.Token), stop.Token);
+			if(publicationFixture != null) await publicationFixture(false);
 			if(!pairing.CommitIfActive(device, () => Commit(device, pending, stop.Token))) throw new Denied(403);
+			// Once committed, a cancellation aborts the transport, including a
+			// stalled write. It cannot retract bytes already handed to the proxy.
+			using var abort = stop.Token.Register(ctx.Abort);
+			if(publicationFixture != null) await publicationFixture(true);
 			stop.Token.ThrowIfCancellationRequested();
 			response.ContentType = result.Type;
 			response.ContentLength = result.Bytes.Length;
 			if(result.Attachment) response.Headers.ContentDisposition = "attachment";
-			await response.Body.WriteAsync(result.Bytes, stop.Token);
+			for(var i = 0; i < result.Bytes.Length; i += 64 * 1024) {
+				stop.Token.ThrowIfCancellationRequested();
+				await response.Body.WriteAsync(result.Bytes.AsMemory(i, Math.Min(64 * 1024, result.Bytes.Length - i)), stop.Token);
+			}
+			await response.Body.FlushAsync(stop.Token);
 		} catch(Denied e) { Fail(ctx, e.Status); }
 		catch(OperationCanceledException) { Fail(ctx, device.IsCancellationRequested ? 403 : 503); }
 		catch(Exception e) when(e is IOException or ArgumentException or UnauthorizedAccessException) { Fail(ctx, 409); }
@@ -135,6 +147,7 @@ internal sealed class MacFiles(bool enabled, Func<HttpContext, bool> nativeIngre
 				if(++scanned > MaxScan) throw new Denied(413);
 				if(name == null || !Leaf(name)) continue;
 				var path = node.Path.Length == 0 ? name : node.Path + "/" + name;
+				if(!Representable(path)) continue;
 				try {
 					using var item = Descendant(dir, name);
 					rows.Add((name, new Node(path, Inspect(item))));

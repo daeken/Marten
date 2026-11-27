@@ -181,7 +181,7 @@ func tailnetProxyWithProof(host string, upstream *url.URL, proof string) http.Ha
 				}
 			}
 			r.Out.Header.Del(nativeProofHeader)
-			if proof != "" && strings.HasPrefix(r.Out.URL.Path, "/api/mac-files/") {
+			if proof != "" && r.In.TLS != nil && r.In.TLS.ServerName == host && strings.HasPrefix(r.Out.URL.Path, "/api/mac-files/") {
 				r.Out.Header.Set(nativeProofHeader, proof)
 			}
 			// ReverseProxy removes Forwarded and handles HTTP Upgrade. No tailnet
@@ -203,6 +203,13 @@ func tailnetProxyWithProof(host string, upstream *url.URL, proof string) http.Ha
 		if !strings.HasPrefix(r.URL.Path, "/api/") {
 			w.WriteHeader(http.StatusNotFound)
 			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/mac-files/") {
+			// A stalled downstream must not retain a Files delivery indefinitely.
+			controller := http.NewResponseController(w)
+			if controller.SetWriteDeadline(time.Now().Add(20*time.Second)) == nil {
+				defer controller.SetWriteDeadline(time.Time{})
+			}
 		}
 		proxy.ServeHTTP(w, r)
 	})
