@@ -353,9 +353,12 @@ class LeaseDrain:
                 or obj.get('state') not in ('draining', 'ready', 'busy')
                 or any(type(obj.get(k)) is not int or obj[k] < 0
                        for k in ('remainingMs', 'activeOperations', 'pendingMessages'))
-                or obj['remainingMs'] > DRAIN_LEASE_SECONDS * 1000
-                or (obj['state'] == 'ready' and (obj['activeOperations'] or obj['pendingMessages']))):
+                or obj['remainingMs'] > DRAIN_LEASE_SECONDS * 1000):
             raise CutoverError('Unexpected pre-restart drain response')
+        expected = ('busy' if obj['pendingMessages'] else
+                    'draining' if obj['activeOperations'] else 'ready')
+        if obj['state'] != expected:
+            raise CutoverError('Inconsistent pre-restart drain state and counters')
         # Anchor at request start, not response receipt, and never extend it.
         self.until = min(self.until, start + obj['remainingMs'] / 1000)
         if obj['state'] == 'busy':

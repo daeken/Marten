@@ -463,7 +463,7 @@ class PreRestartTests(unittest.TestCase):
 
         def respond(calls):
             self.assertEqual(host.sent, [])
-            return ((200, dict(state='draining', activeOperations=1, pendingMessages=1))
+            return ((200, dict(state='draining', activeOperations=1))
                     if len(calls) == 1 else (200, {}))
 
         with self.endpoint(respond) as (port, calls):
@@ -475,6 +475,7 @@ class PreRestartTests(unittest.TestCase):
         scenarios = (
             ((200, dict(state='busy', pendingMessages=1)),),
             ((200, dict(state='ready', pendingMessages=1)),),
+            ((200, dict(state='draining', activeOperations=1, pendingMessages=1)),),
             ((200, dict(state='ready', activeOperations=True)),),
             ((200, dict(id='different')),),
             ((200, dict(pid=12345)),),
@@ -602,11 +603,12 @@ class PreRestartTests(unittest.TestCase):
         self.assertEqual(host.now, 0.5)
 
     def test_legacy_only_absent_and_three_quiet_snapshots(self):
-        quiet = [dict(id='closed', status='idle', pending=0, closed=True, pausedEffective=False),
+        quiet = [dict(id='closed', status='idle', pending=0, closed=True, pausedEffective=False, modelCall=None),
                  dict(id='paused', status='idle', pending=0, closed=False, pausedEffective=True)]
         for absent, final_change in ((404, {}), (200, {}), (403, {}),
                                      (404, dict(pending=1)), (404, dict(status='paused')),
                                      (404, dict(modelCall={'active': True})),
+                                     (404, dict(id='replacement')), (404, dict(id='closed')),
                                      (404, dict(pending=False))):
             with self.subTest(absent=absent, final_change=final_change):
                 host = Fake()

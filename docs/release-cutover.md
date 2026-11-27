@@ -123,8 +123,9 @@ arguments, logs, or job files. The API is for the local owner only.
 - `GET /api/release/drain` and `DELETE /api/release/drain` carry
   `X-Marten-Drain-Id` and `X-Marten-Drain-Pid` (decimal PID). POST and GET
   return a `200` no-store snapshot `{id,pid,state,remainingMs,activeOperations,pendingMessages}`.
-  `draining` waits; `busy` is not readiness and aborts the cutover. `ready`
-  requires both counters to be zero. The API rejects malformed requests with
+  `draining` means active operations remain and pending messages are zero;
+  `busy` means pending messages remain, regardless of active operations, and
+  aborts the cutover. `ready` requires both counters to be zero. The API rejects malformed requests with
   `400` and stale, wrong-PID or competing leases with `409`.
 - Before TERM, a failure after acquiring a lease (or after an ambiguous POST)
   triggers one best-effort DELETE for that same ID and PID if the old
@@ -135,8 +136,10 @@ arguments, logs, or job files. The API is for the local owner only.
 - Polling is bounded by the original lease budget. Each poll can only shorten
   the local deadline (request-start monotonic time plus the reported remaining
   milliseconds). The helper requires more than two seconds of conservative
-  lifetime left at signal time. The kernel binds delivery to the verified
-  PID generation, not just the numeric PID.
+  lifetime left at its final check. This practical monotonic margin is not a
+  guarantee against arbitrary OS suspension between the check and the signal.
+  The kernel binds delivery to the verified PID generation, not just the
+  numeric PID.
 
 ### One-time first install from `fda0f931`
 
@@ -159,7 +162,8 @@ status, timeout, or malformed status snapshot stops the job without TERM.
 The helper observes the full agent inventory from authenticated `GET /api/status`
 twice a second apart and once more just before TERM. Every agent (including
 closed and effectively paused agents) must report `status: "idle"`, exact zero
-`pending`, and no `modelCall`; the agent IDs must be unchanged. `pending` is
+`pending`, and `modelCall` omitted or null; the unique agent IDs must be
+unchanged. `pending` is
 full in-memory inbox depth, not just the user-authored entries visible in
 `pending-messages`. Closed and effective pause are separate flags and can be
 idle; `status: "paused"` can be an unfinished turn held at a dispatch boundary
