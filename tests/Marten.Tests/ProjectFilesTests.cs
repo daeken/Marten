@@ -88,6 +88,55 @@ public class ProjectFilesTests {
 		Assert.Equal(256 * 1024, (await prefix.Content.ReadAsByteArrayAsync()).Length);
 	}
 
+	[Fact]
+	public async Task ReplacedAncestorsAndEntriesDoNotReuseExistingHandles() {
+		if(!ProjectFileSystem.Supported) return;
+		await using var server = await Fixture.Start();
+		var root = server.Grant();
+		var folder = Directory.CreateDirectory(Path.Combine(root, "folder")).FullName;
+		await File.WriteAllTextAsync(Path.Combine(folder, "visible.txt"), "original");
+		var rootId = (await Json(await server.Get("roots")))[0].GetProperty("id").GetString();
+		var folderId = (await Json(await server.Get($"entries/{rootId}"))).GetProperty("entries")[0].GetProperty("id").GetString();
+		var fileId = (await Json(await server.Get($"entries/{folderId}"))).GetProperty("entries")[0].GetProperty("id").GetString();
+		var sibling = Directory.CreateDirectory(Path.Combine(root, "sibling")).FullName;
+		await File.WriteAllTextAsync(Path.Combine(sibling, "visible.txt"), "different revision");
+		Directory.Move(folder, folder + "-old");
+		Directory.CreateSymbolicLink(folder, sibling);
+		await ConflictWithoutBytes(await server.Get($"entries/{folderId}"));
+		await ConflictWithoutBytes(await server.Get($"bytes/{fileId}/share"));
+		Directory.Delete(folder);
+		Directory.Move(sibling, folder);
+		await ConflictWithoutBytes(await server.Get($"entries/{folderId}"));
+		await ConflictWithoutBytes(await server.Get($"bytes/{fileId}/share"));
+	}
+
+	[Fact]
+	public async Task BindingAliasMustStillResolveToItsApprovedPhysicalRoot() {
+		if(!ProjectFileSystem.Supported) return;
+		await using var server = await Fixture.Start(aliasedBinding: true);
+		var alias = server.Grant();
+		var approved = ProjectFileSystem.Physical(alias)!;
+		var id = (await Json(await server.Get("roots")))[0].GetProperty("id").GetString();
+		var replacement = Directory.CreateDirectory(Path.Combine(Path.GetDirectoryName(approved)!, "replacement")).FullName;
+		Directory.Delete(alias);
+		Directory.CreateSymbolicLink(alias, replacement);
+		Assert.Empty((await Json(await server.Get("roots"))).EnumerateArray());
+		await ConflictWithoutBytes(await server.Get($"entries/{id}"));
+	}
+
+	[Fact]
+	public async Task PhysicalAliasIntoProtectedStorageCannotBecomeARoot() {
+		if(!ProjectFileSystem.Supported) return;
+		await using var server = await Fixture.Start(aliasedBinding: true, protectedBinding: true);
+		server.Grant();
+		Assert.Empty((await Json(await server.Get("roots"))).EnumerateArray());
+	}
+
+	static async Task ConflictWithoutBytes(HttpResponseMessage r) {
+		Assert.Equal(HttpStatusCode.Conflict, r.StatusCode);
+		Assert.Empty(await r.Content.ReadAsByteArrayAsync());
+	}
+
 	static async Task<JsonElement> Json(HttpResponseMessage r) {
 		Assert.Equal(HttpStatusCode.OK, r.StatusCode);
 		Assert.True(r.Headers.CacheControl?.NoStore);
@@ -101,10 +150,14 @@ public class ProjectFilesTests {
 		public string LocalHost => new Uri(endpoint).Authority;
 		public string Other => other;
 		public string Operator => op;
-		public static async Task<Fixture> Start(bool enableScratchResolver = true) {
+		public static async Task<Fixture> Start(bool enableScratchResolver = true, bool aliasedBinding = false, bool protectedBinding = false) {
 			var dir = new TempDir();
 			var home = new Home(dir.File("home"));
-			var root = Directory.CreateDirectory(dir.File("binding")).FullName;
+			var root = dir.File("binding");
+			if(aliasedBinding) {
+				var physical = Directory.CreateDirectory(protectedBinding ? Path.Combine(home.Root, "protected") : dir.File("physical")).FullName;
+				Directory.CreateSymbolicLink(root, physical);
+			} else Directory.CreateDirectory(root);
 			var project = Project.Create(home.Projects, "scratch", [root], null, false);
 			var cfg = new Config { PairingOrigin = "https://paired.example", RemoteHosts = ["alias.example"] };
 			var pairing = new DevicePairing(home);
